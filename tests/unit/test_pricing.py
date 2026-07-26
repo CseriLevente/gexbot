@@ -15,7 +15,9 @@ import pytest
 
 from src.domain.contracts import OptionRight
 from src.gex.pricing import (
-    MIN_TIME_TO_EXPIRY_YEARS,
+    DEFAULT_MIN_TIME_TO_EXPIRY_YEARS,
+    MIN_TIME_TO_EXPIRY_YEARS_30M,
+    MIN_TIME_TO_EXPIRY_YEARS_60M,
     SECONDS_PER_YEAR,
     BlackScholesInputs,
     delta,
@@ -67,9 +69,7 @@ def test_gamma_is_identical_for_calls_and_puts():
     step = 0.01
     for right in (OptionRight.CALL, OptionRight.PUT):
         up = delta(replace(inputs, spot=5000.0 + step), right)
-        down = delta(
-            replace(inputs, spot=5000.0 - step), right
-        )
+        down = delta(replace(inputs, spot=5000.0 - step), right)
         numeric[right] = (up - down) / (2 * step)
     assert numeric[OptionRight.CALL] == pytest.approx(
         numeric[OptionRight.PUT], rel=1e-6
@@ -97,26 +97,28 @@ def test_gamma_peaks_near_the_money():
     atm = gamma(BASE)
     for offset in (200.0, 500.0, 1000.0):
         for direction in (1.0, -1.0):
-            wing = gamma(
-                replace(BASE, strike=5000.0 + direction * offset)
-            )
+            wing = gamma(replace(BASE, strike=5000.0 + direction * offset))
             assert wing < atm
 
 
 def test_gamma_grows_as_expiry_approaches_for_an_atm_option():
     """The 0DTE singularity is real; the engine must reproduce it, not hide it."""
     long_dated = gamma(replace(BASE, time_to_expiry=0.25))
-    short_dated = gamma(
-        replace(BASE, time_to_expiry=1.0 / 365.0)
-    )
+    short_dated = gamma(replace(BASE, time_to_expiry=1.0 / 365.0))
     assert short_dated > long_dated * 5
 
 
 def test_degenerate_inputs_return_zero_gamma_not_nan():
     for bad in (
-        BlackScholesInputs(spot=5000.0, strike=5000.0, time_to_expiry=0.0, implied_vol=0.2),
-        BlackScholesInputs(spot=5000.0, strike=5000.0, time_to_expiry=0.25, implied_vol=0.0),
-        BlackScholesInputs(spot=0.0, strike=5000.0, time_to_expiry=0.25, implied_vol=0.2),
+        BlackScholesInputs(
+            spot=5000.0, strike=5000.0, time_to_expiry=0.0, implied_vol=0.2
+        ),
+        BlackScholesInputs(
+            spot=5000.0, strike=5000.0, time_to_expiry=0.25, implied_vol=0.0
+        ),
+        BlackScholesInputs(
+            spot=0.0, strike=5000.0, time_to_expiry=0.25, implied_vol=0.2
+        ),
     ):
         assert gamma(bad) == 0.0
         assert vega(bad) == 0.0
@@ -130,12 +132,44 @@ def test_expired_delta_reports_the_intrinsic_limit():
     assert delta(itm_call, OptionRight.PUT) == pytest.approx(0.0)
 
 
-def test_year_fraction_floors_at_the_documented_minimum():
-    assert year_fraction(0.0) == MIN_TIME_TO_EXPIRY_YEARS
-    assert year_fraction(-5000.0) == MIN_TIME_TO_EXPIRY_YEARS
-    one_hour = year_fraction(3600.0)
-    assert one_hour == pytest.approx(3600.0 / SECONDS_PER_YEAR)
+def test_year_fraction_floors_at_the_documented_default():
+    """The default floor is 60 minutes and is a MODEL PARAMETER, not a constant.
+
+    It moved from 30 to 60 minutes in v2 and is now configurable per ModelSpec,
+    because the floor materially changes 0DTE gamma and the engine must be able
+    to report sensitivity across candidates rather than bake one in.
+    """
+    assert DEFAULT_MIN_TIME_TO_EXPIRY_YEARS == MIN_TIME_TO_EXPIRY_YEARS_60M
+    assert year_fraction(0.0) == DEFAULT_MIN_TIME_TO_EXPIRY_YEARS
+    assert year_fraction(-5000.0) == DEFAULT_MIN_TIME_TO_EXPIRY_YEARS
+    # One hour sits exactly on the default floor; two hours clears it.
+    assert year_fraction(7200.0) == pytest.approx(7200.0 / SECONDS_PER_YEAR)
     assert year_fraction(0.0, floor=0.0) == 0.0
+    assert year_fraction(0.0, floor=MIN_TIME_TO_EXPIRY_YEARS_30M) == (
+        MIN_TIME_TO_EXPIRY_YEARS_30M
+    )
+
+
+def test_model_spec_overrides_the_floor_argument():
+    """Precedence is explicit: spec wins, so a snapshot's reported conventions
+    can never disagree with the numbers it contains.
+    """
+    from src.domain.model_spec import ModelSpec
+
+    spec = ModelSpec(minimum_time_to_expiry_minutes=30.0)
+    assert year_fraction(0.0, floor=999.0, spec=spec) == pytest.approx(
+        MIN_TIME_TO_EXPIRY_YEARS_30M
+    )
+
+
+def test_day_count_convention_changes_the_year_fraction():
+    from src.domain.model_spec import DayCountConvention, ModelSpec
+
+    seconds = 30 * 86_400.0
+    act365 = ModelSpec(day_count_convention=DayCountConvention.ACT_365_FIXED)
+    act252 = ModelSpec(day_count_convention=DayCountConvention.ACT_252)
+    assert act365.year_fraction(seconds) == pytest.approx(30.0 / 365.0)
+    assert act252.year_fraction(seconds) == pytest.approx(30.0 / 252.0)
 
 
 @pytest.mark.parametrize("sigma", [0.08, 0.15, 0.22, 0.45, 0.90])

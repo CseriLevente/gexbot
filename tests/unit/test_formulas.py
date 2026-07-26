@@ -9,8 +9,10 @@ import pytest
 
 from src.domain.contracts import OptionRight, OptionRoot
 from src.domain.gex import ExpiryBucket, SignConvention
+from src.domain.validation import ValidationCode
 from src.gex.config import GexEngineConfig
 from src.gex.formulas import (
+    ExclusionReason,
     GammaSource,
     aggregate_by_bucket,
     aggregate_by_strike,
@@ -22,7 +24,7 @@ from src.gex.formulas import (
     total_signed_gex,
     total_unsigned_gex,
 )
-from tests.fixtures.chains import (
+from src.synthetic.chains import (
     CALL_OI_PEAK_STRIKE,
     PUT_OI_PEAK_STRIKE,
     SyntheticChainSpec,
@@ -66,8 +68,14 @@ def test_notional_gex_is_never_negative_even_with_negative_vendor_gamma():
 
 
 def test_single_contract_chain_reproduces_the_hand_calculation():
+    """Pins the formula, so ``prefer_vendor_gamma=True`` to fix gamma exactly.
+
+    The engine default is False (derive gamma from IV), which is the right
+    operating mode but would make this a test of the pricer rather than of the
+    GEX formula.
+    """
     chain = build_single_contract_chain(gamma=0.001, open_interest=1000, spot=5000.0)
-    result = compute_contract_gex(chain)
+    result = compute_contract_gex(chain, GexEngineConfig(prefer_vendor_gamma=True))
     assert len(result.contracts) == 1
     assert result.contracts[0].unsigned_gex == pytest.approx(25_000_000.0)
     assert total_unsigned_gex(result.contracts) == pytest.approx(25_000_000.0)
@@ -197,9 +205,7 @@ def test_strike_view_is_sorted_and_splits_calls_from_puts(contract_gex):
     strikes = aggregate_by_strike(contract_gex.contracts)
     assert [s.strike for s in strikes] == sorted(s.strike for s in strikes)
     assert all(s.call_gex >= 0.0 and s.put_gex >= 0.0 for s in strikes)
-    assert all(
-        s.unsigned_gex == pytest.approx(s.call_gex + s.put_gex) for s in strikes
-    )
+    assert all(s.unsigned_gex == pytest.approx(s.call_gex + s.put_gex) for s in strikes)
 
 
 def test_strike_totals_reconcile_with_the_chain_total(contract_gex):
@@ -279,7 +285,7 @@ def test_shadow_pricer_is_used_when_the_vendor_supplies_no_gamma():
     result = compute_contract_gex(chain)
     assert result.shadow_gamma_count == len(result.contracts)
     assert result.vendor_gamma_count == 0
-    assert all(c.gamma_source == GammaSource.SHADOW_PRICER for c in result.contracts)
+    assert all(c.gamma_source is GammaSource.SHADOW_PRICER for c in result.contracts)
 
 
 def test_shadow_pricer_reproduces_vendor_gamma_on_the_synthetic_chain():
@@ -292,7 +298,7 @@ def test_shadow_pricer_reproduces_vendor_gamma_on_the_synthetic_chain():
         build_synthetic_chain(SyntheticChainSpec(vendor_gamma=False))
     ).contracts
     assert len(with_vendor) == len(without)
-    for a, b in zip(with_vendor, without):
+    for a, b in zip(with_vendor, without, strict=False):
         assert a.contract.key == b.contract.key
         assert a.gamma == pytest.approx(b.gamma, rel=1e-12)
 
@@ -305,15 +311,15 @@ def test_prefer_vendor_gamma_false_forces_the_shadow_pricer():
 
 
 def test_contracts_without_any_gamma_source_are_dropped_and_counted():
-    chain = build_single_contract_chain()
-    stripped = replace(
-        chain,
-        quotes=(replace(chain.quotes[0], gamma=None, implied_vol=None),),
-    )
-    result = compute_contract_gex(stripped)
+    """No vendor gamma and no usable IV: validation rejects it outright, so the
+    contract never reaches the arithmetic and the loss is counted.
+    """
+    chain = build_single_contract_chain(gamma=None, implied_vol=None)
+    result = compute_contract_gex(chain)
     assert result.contracts == ()
-    assert result.dropped_no_gamma_source == 1
     assert result.usable_ratio == 0.0
+    assert result.validation.count(ValidationCode.NO_GAMMA_SOURCE) == 1
+    assert result.exclusions[ExclusionReason.VALIDATION_REJECTED] == 1
 
 
 # --- Filtering and diagnostics ---------------------------------------------
@@ -340,30 +346,29 @@ def test_expired_series_are_excluded_using_the_root_specific_clock():
 
 def test_crossed_quotes_are_dropped_and_reported():
     chain = build_single_contract_chain()
-    crossed = replace(
-        chain, quotes=(replace(chain.quotes[0], bid=11.0, ask=10.0),)
-    )
+    crossed = replace(chain, quotes=(replace(chain.quotes[0], bid=11.0, ask=10.0),))
     result = compute_contract_gex(crossed)
     assert result.contracts == ()
-    assert result.dropped_crossed == 1
+    assert result.validation.count(ValidationCode.CROSSED_MARKET) == 1
     assert result.crossed_ratio == pytest.approx(1.0)
 
 
-def test_crossed_quotes_are_kept_when_the_filter_is_disabled():
+def test_crossed_quotes_are_kept_as_a_warning_when_the_filter_is_disabled():
+    """Disabling the filter downgrades crossed from error to warning: the record
+    is kept and still counted, rather than becoming invisible.
+    """
     chain = build_single_contract_chain()
-    crossed = replace(
-        chain, quotes=(replace(chain.quotes[0], bid=11.0, ask=10.0),)
-    )
+    crossed = replace(chain, quotes=(replace(chain.quotes[0], bid=11.0, ask=10.0),))
     result = compute_contract_gex(crossed, GexEngineConfig(drop_crossed_quotes=False))
     assert len(result.contracts) == 1
-    assert result.dropped_crossed == 0
+    assert result.validation.warning_counts[ValidationCode.CROSSED_MARKET] == 1
 
 
 def test_zero_open_interest_contracts_are_dropped_and_counted():
     chain = build_single_contract_chain(open_interest=0)
     result = compute_contract_gex(chain)
     assert result.contracts == ()
-    assert result.dropped_no_open_interest == 1
+    assert result.exclusions[ExclusionReason.NO_OPEN_INTEREST] == 1
 
 
 def test_zero_open_interest_contributes_nothing_when_the_filter_is_off():

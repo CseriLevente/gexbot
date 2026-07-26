@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from src.domain.contracts import ChainSnapshot, OptionRoot
-from tests.fixtures.chains import SyntheticChainSpec, build_synthetic_chain
+from src.synthetic.chains import SyntheticChainSpec, build_synthetic_chain
 
 
 class SyntheticOptionsDataSource:
@@ -35,9 +35,7 @@ class SyntheticOptionsDataSource:
             self._spec,
             as_of=as_of,
             expiries=tuple(
-                (root, expiry)
-                for root, expiry in self._spec.expiries
-                if root in roots
+                (root, expiry) for root, expiry in self._spec.expiries if root in roots
             ),
         )
         chain = build_synthetic_chain(spec)
@@ -50,6 +48,4 @@ class SyntheticOptionsDataSource:
         roots: tuple[OptionRoot, ...] = (OptionRoot.SPX, OptionRoot.SPXW),
         max_dte: int | None = None,
     ) -> int | None:
-        return len(
-            self.fetch_chain(as_of=as_of, roots=roots, max_dte=max_dte).quotes
-        )
+        return len(self.fetch_chain(as_of=as_of, roots=roots, max_dte=max_dte).quotes)

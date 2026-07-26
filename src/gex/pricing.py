@@ -24,20 +24,34 @@ import math
 from dataclasses import dataclass
 
 from src.domain.contracts import OptionRight
+from src.domain.model_spec import (
+    FLOOR_30_MINUTES,
+    FLOOR_60_MINUTES,
+    DayCountConvention,
+    ModelSpec,
+)
 
-# Trading-time conventions. SPX index options are quoted against calendar time,
-# so a 365-day year is the right denominator here (not 252).
-DAYS_PER_YEAR = 365.0
-SECONDS_PER_YEAR = DAYS_PER_YEAR * 24.0 * 3600.0
+# Retained for readability in formulas below. The *authoritative* day count comes
+# from :class:`~src.domain.model_spec.ModelSpec`, which can select ACT/360 or
+# ACT/252; these constants are only the ACT/365F case.
+DAYS_PER_YEAR = DayCountConvention.ACT_365_FIXED.days_per_year
+SECONDS_PER_YEAR = DayCountConvention.ACT_365_FIXED.seconds_per_year
 
 # Gamma diverges as T -> 0 for an at-the-money option. On expiration day that
 # singularity is real, not a bug -- but it makes aggregate GEX explode and the
-# zero-gamma root-finder unstable. We floor time-to-expiry instead of pretending
-# the problem away, and the floor is an explicit, logged model parameter.
+# zero-gamma root-finder unstable, so time-to-expiry is floored.
 #
-# 30 minutes of a 365-day year. Calibration target: sweep this and confirm the
-# zero-gamma level and the 0DTE bucket weight are not dominated by it.
-MIN_TIME_TO_EXPIRY_YEARS = 30.0 * 60.0 / SECONDS_PER_YEAR
+# The floor is a MODEL PARAMETER, not a constant: it lives on ModelSpec, is
+# configurable, travels in the snapshot fingerprint, and the engine reports
+# sensitivity across several values. These two named levels exist so the
+# alternatives can be referred to by name.
+#
+# NOTE: the default is 60 minutes. This has NOT been verified to match
+# ThetaData's short-dated handling -- see docs/OPEN_DECISIONS.md. Do not describe
+# the engine as vendor-compatible on this point.
+MIN_TIME_TO_EXPIRY_YEARS_30M = FLOOR_30_MINUTES * 60.0 / SECONDS_PER_YEAR
+MIN_TIME_TO_EXPIRY_YEARS_60M = FLOOR_60_MINUTES * 60.0 / SECONDS_PER_YEAR
+DEFAULT_MIN_TIME_TO_EXPIRY_YEARS = MIN_TIME_TO_EXPIRY_YEARS_60M
 
 # Below this vol the formulas are numerically meaningless.
 MIN_IMPLIED_VOL = 1e-4
@@ -52,14 +66,24 @@ def norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def year_fraction(seconds_to_expiry: float, *, floor: float | None = None) -> float:
+def year_fraction(
+    seconds_to_expiry: float,
+    *,
+    floor: float | None = None,
+    spec: ModelSpec | None = None,
+) -> float:
     """Convert seconds-to-expiry into a floored year fraction.
 
-    ``floor`` defaults to :data:`MIN_TIME_TO_EXPIRY_YEARS`. Pass ``0.0`` to
-    disable flooring (only useful in tests that probe the singularity).
+    Precedence is explicit: ``spec`` wins, then ``floor``, then the documented
+    default. Callers inside the engine always pass a ``spec`` so the day count
+    and the floor cannot diverge from what the snapshot reports. Pass
+    ``floor=0.0`` to disable flooring, which is only useful in tests that probe
+    the singularity directly.
     """
+    if spec is not None:
+        return spec.year_fraction(seconds_to_expiry)
     if floor is None:
-        floor = MIN_TIME_TO_EXPIRY_YEARS
+        floor = DEFAULT_MIN_TIME_TO_EXPIRY_YEARS
     return max(seconds_to_expiry / SECONDS_PER_YEAR, floor)
 
 

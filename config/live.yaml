@@ -1,49 +1,87 @@
-# Live profile -- LIVE_STAGE_1, supervised, 1 MES maximum.
+# Live profile -- DISABLED / INCOMPLETE.
 #
-# This is a TEMPLATE, not a runnable live config. It ships with
-# trading_enabled: false and every market threshold still UNSPECIFIED_CALIBRATE,
-# which means loading it as-is cannot place an order: the confidence score reports
-# `uncalibrated`, and the risk engine treats that as a hard block.
+# This profile does not run and cannot be made to run by editing it. It is a
+# template recording what would be required, not a switch.
 #
-# A real live config has ZERO sentinels in it. Promotion checklist, in order:
-#   1. Replace every UNSPECIFIED_CALIBRATE with an out-of-sample-supported value.
-#   2. Confirm OPRA non-display status in writing with the vendor. Automated
-#      consumption of OPRA data that generates orders can fall into the
-#      Non-Display Use category, which is priced separately.
-#   3. Dozens of incident-free paper sessions on paper.yaml. Note that IBKR paper
-#      fills come from a simulator -- they prove the plumbing, not slippage.
-#   4. Exercise reconciliation, the kill switch and end-of-day flatten in chaos
-#      tests, not just unit tests.
-#   5. Only then flip trading_enabled, and start at max_contracts: 1.
+# The loader rejects `trading_enabled: true` and any broker other than `none`
+# unconditionally, because this repository contains no broker adapter and no
+# order-placement code. `tests/unit/test_architecture.py` asserts that no such
+# code exists.
+#
+# Prerequisites, none of which are met:
+#   1. Every UNSPECIFIED_CALIBRATE replaced with an out-of-sample-supported value.
+#   2. OPRA non-display status confirmed in writing with the vendor.
+#   3. Local gamma validated against live vendor gamma -- never done.
+#   4. A risk engine, a broker adapter, reconciliation and a kill switch --
+#      none of which are implemented.
+#   5. Extended incident-free paper operation, which cannot happen until (3)
+#      and (4) exist.
 
 stage: LIVE_STAGE_1
+enabled: false
+disabled_reason: >-
+  Live trading is not implementable from this repository. No broker adapter, no
+  risk engine, no reconciliation, no kill switch, and no validation against live
+  vendor data.
+
 
 data:
-  options_source: thetadata # synthetic | thetadata | cboe
-  futures_source: databento # none | databento | ibkr
-  # ThetaData Standard exposes implied_vol but not gamma (a second-order greek,
-  # Pro-only). Deriving gamma from IV with our own pricer is $80/mo cheaper and
-  # keeps the gamma at spot consistent with the gamma on the zero-gamma grid.
-  # See docs/handoff/data-requirements.md.
-  thetadata_tier: standard
-  roots: [SPX, SPXW]
-  max_dte: 60
+  options_source: thetadata # synthetic | thetadata
+  futures_source: none # not implemented
+  max_dte: null # null = use everything the adapter supplies
+
+# Every assumption that changes a number. Recorded in each snapshot and hashed
+# into the model fingerprint, so changing one here changes the fingerprint.
+model:
+  pricing_model: black_scholes_merton
+  day_count_convention: ACT/365F
+  risk_free_rate_source: configured_constant
+  dividend_yield_source: configured_constant
+  expiration_timestamp_rule: root_specific_settlement
+  underlying_price_source: vendor_index_snapshot
+  iv_price_source: NBBO_MID_IV
+  risk_free_rate: 0.042
+  # SPX carries a material dividend yield; leaving this at zero biases gamma.
+  dividend_yield: 0.013
+  # Gamma diverges as T -> 0. This floor decides how much of that divergence
+  # reaches the aggregate. NOT verified against ThetaData's own short-dated
+  # handling -- see docs/OPEN_DECISIONS.md. Use compute_floor_sensitivity() to
+  # see how much the answer depends on it.
+  min_time_to_expiry_minutes: 60.0
+
+# Synchronisation tolerances. Research limits describing when a joined record
+# stops representing a single instant; not trading parameters.
+data_quality:
+  max_quote_greeks_skew_seconds: 5.0
+  max_quote_iv_skew_seconds: 5.0
+  max_quote_underlying_skew_seconds: 2.0
+  max_future_timestamp_seconds: 2.0
+  max_snapshot_age_seconds: 60.0
+  max_open_interest_age_sessions: 2
 
 gex:
   spot_move_pct: 0.01
   sign_convention: dealer_long_calls_short_puts
-  # False forces the shadow pricer everywhere -- the apples-to-apples mode for
-  # zero-gamma research, and mandatory below the Pro tier anyway.
+  # False forces the shadow pricer everywhere: the zero-gamma grid must reprice
+  # gamma in-house regardless, so using one model throughout avoids a
+  # discontinuity at the current spot.
   prefer_vendor_gamma: false
   drop_crossed_quotes: true
   require_open_interest: true
 
 zero_gamma:
   grid_span_pct: 0.04
+  # Finer than the 25-point SPX strike ladder on a 5000 index.
   grid_step_pct: 0.001
-  conventions: [sticky_strike, frozen_iv, sticky_delta]
+  # sticky_delta is deliberately absent: a true sticky-delta model needs a
+  # delta-coordinate surface solved iteratively. The log-moneyness approximation
+  # is exposed under its own name, sticky_moneyness.
+  conventions: [sticky_strike, frozen_iv, sticky_moneyness]
   max_dte_for_grid: 60
   min_points_for_smile_fit: 5
+  boundary_tolerance_pct: 0.10
+  max_grid_expansions: 3
+  grid_expansion_factor: 1.75
 
 walls:
   node_min_share_of_max: 0.25
@@ -51,55 +89,45 @@ walls:
   void_max_share_of_max: 0.05
   void_min_width_pct: 0.002
   band_pct: 0.10
+  directional_wall_min_distance_pct: 0.0
+  directional_wall_band_pct: 0.10
+  irregular_spacing_factor: 1.5
+  min_observed_strikes_for_true_void: 2
+  min_ladder_coverage_for_true_void: 0.80
 
 confidence:
-  # Data-quality thresholds: measurable facts, defensible without a backtest.
+  # Data-quality thresholds: measurable facts.
   min_chain_completeness_ratio: 0.90
-  max_quote_staleness_sec: 30.0
   crossed_quote_zero_score_ratio: 0.10
-  max_vendor_lag_sec: 5.0
-  max_oi_age_sessions: 2
-  # Market claims: these need out-of-sample evidence before they mean anything.
+  min_universe_coverage_ratio: 0.70
+  min_good_iv_ratio: 0.90
+  ambiguous_root_spacing_pct: 0.50
+  steep_slope_threshold: 0.20
+  # Market claims: each needs out-of-sample evidence before it means anything.
   max_zero_gamma_shift_pct: UNSPECIFIED_CALIBRATE
   max_sign_model_disagreement: UNSPECIFIED_CALIBRATE
   max_0dte_dominance_ratio: UNSPECIFIED_CALIBRATE
 
-regime:
-  positive_gex_z_min: UNSPECIFIED_CALIBRATE
-  negative_gex_z_max: UNSPECIFIED_CALIBRATE
-  min_confidence_for_trade: UNSPECIFIED_CALIBRATE
-  max_zero_gamma_shift_pct: UNSPECIFIED_CALIBRATE
-  max_pre_event_window_min: UNSPECIFIED_CALIBRATE
-  min_reward_to_risk: UNSPECIFIED_CALIBRATE
-
-strategy:
-  positive_gex_mean_reversion:
-    enabled: false
-    min_confidence: UNSPECIFIED_CALIBRATE
-    stop_atr_multiple: UNSPECIFIED_CALIBRATE
-    time_stop_bars: UNSPECIFIED_CALIBRATE
-  negative_gex_momentum:
-    enabled: false
-    min_confidence: UNSPECIFIED_CALIBRATE
-    min_breakout_volume_z: UNSPECIFIED_CALIBRATE
-    trailing_stop_atr_multiple: UNSPECIFIED_CALIBRATE
-
-risk:
-  trading_enabled: false
-  instrument: MES
-  point_value: 5.0 # MES: $5/point. ES is $50/point.
-  max_contracts: 1
-  max_open_positions: 1
-  allow_averaging_down: false
-  allow_martingale: false
-  daily_loss_cap_usd: UNSPECIFIED_CALIBRATE
-  weekly_drawdown_cap_usd: UNSPECIFIED_CALIBRATE
-  max_consecutive_losses: UNSPECIFIED_CALIBRATE
-  max_entries_per_day: UNSPECIFIED_CALIBRATE
-  flatten_before_session_end: true
-  overnight_allowed: false
-  kill_switch: false
+thetadata:
+  base_url: http://127.0.0.1:25503
+  auth_mode: local_terminal
+  tier: standard
+  timeout_seconds: 30.0
+  max_retries: 3
+  backoff_base_seconds: 0.25
+  # Names of environment variables, never values.
+  username_env: THETADATA_USERNAME
+  password_env: THETADATA_PASSWORD
+  greeks_version: latest
+  rate_type: sofr
+  rate_value: null
+  annual_dividend: null
+  stock_price_source: vendor_default
+  max_dte: 60
+  strike_range: null
+  min_time: null
+  use_market_value: null
 
 execution:
-  broker: ibkr_live # none | ibkr_paper | ibkr_live
-  order_type: bracket
+  broker: none
+  trading_enabled: false

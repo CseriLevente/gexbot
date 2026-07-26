@@ -13,9 +13,9 @@ Sign is applied on top of that magnitude and is a *proxy* -- see
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from enum import Enum
 
 from src.domain.contracts import (
     ChainSnapshot,
@@ -23,9 +23,20 @@ from src.domain.contracts import (
     OptionQuote,
     OptionRight,
 )
-from src.domain.gex import BucketGex, ExpiryBucket, SignConvention, StrikeGex
+from src.domain.gex import (
+    BucketGex,
+    ExpiryBucket,
+    OptionUniverse,
+    SignConvention,
+    StrikeGex,
+)
+from src.domain.iv import IVSource
+from src.domain.model_spec import ExpirationTimestampRule, ModelSpec
+from src.domain.normalize import validate_chain
+from src.domain.validation import ValidationCode, ValidationReport
 from src.gex.config import BUCKET_BOUNDS, GexEngineConfig
-from src.gex.pricing import BlackScholesInputs, gamma as bs_gamma, year_fraction
+from src.gex.pricing import BlackScholesInputs
+from src.gex.pricing import gamma as bs_gamma
 from src.gex.sessions import calendar_dte, seconds_to_expiry
 
 
@@ -67,9 +78,25 @@ def notional_gex(
     return abs(gamma) * open_interest * multiplier * spot * (spot_move_pct * spot)
 
 
-class GammaSource(str):
+class GammaSource(str, Enum):
     VENDOR = "vendor"
     SHADOW_PRICER = "shadow_pricer"
+
+
+class ExclusionReason(str, Enum):
+    """Why a supplied quote did not reach the aggregates.
+
+    Counted rather than logged: ``chain_completeness`` needs to state *why* the
+    chain shrank, and an operator debugging a thin snapshot needs the breakdown.
+    """
+
+    VALIDATION_REJECTED = "validation_rejected"
+    EXPIRED = "expired"
+    BEYOND_MAX_DTE = "beyond_max_dte"
+    CROSSED_QUOTE = "crossed_quote"
+    NO_OPEN_INTEREST = "no_open_interest"
+    NO_GAMMA_SOURCE = "no_gamma_source"
+    NON_FINITE_GAMMA = "non_finite_gamma"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +109,7 @@ class ContractGex:
     time_to_expiry: float
     gamma: float
     implied_vol: float | None
+    iv_source: IVSource | None
     open_interest: int
     unsigned_gex: float
     signed_gex: float
@@ -90,20 +118,27 @@ class ContractGex:
     # rounds to zero at the current spot -- exactly the far-wing strikes that
     # come alive once the zero-gamma grid moves spot toward them.
     sign: float
-    gamma_source: str
+    gamma_source: GammaSource
+    vendor_gamma: float | None = None
+
+    @property
+    def moneyness(self) -> float | None:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
 class ContractGexResult:
     contracts: tuple[ContractGex, ...]
-    # Diagnostics feeding chain_completeness / crossed_market_penalty.
+    validation: ValidationReport
     total_quotes: int
-    dropped_expired: int
-    dropped_no_open_interest: int
-    dropped_no_gamma_source: int
-    dropped_crossed: int
+    exclusions: dict[ExclusionReason, int]
+    excluded_expiries: tuple[str, ...]
     vendor_gamma_count: int
     shadow_gamma_count: int
+    # Unsigned GEX that *would* have been contributed by contracts excluded for a
+    # reason other than being unusable (i.e. DTE filtering). Contracts rejected by
+    # validation have no trustworthy gamma, so they contribute nothing measurable.
+    excluded_unsigned_gex: float = 0.0
 
     @property
     def usable_ratio(self) -> float:
@@ -111,7 +146,22 @@ class ContractGexResult:
 
     @property
     def crossed_ratio(self) -> float:
-        return self.dropped_crossed / self.total_quotes if self.total_quotes else 0.0
+        """Share of supplied quotes with a torn book.
+
+        Counts both the validation-stage detections and any the engine dropped
+        directly, so the ratio does not change meaning when
+        ``drop_crossed_quotes`` flips a crossed quote between warning and error.
+        """
+        if not self.total_quotes:
+            return 0.0
+        crossed = self.exclusions.get(ExclusionReason.CROSSED_QUOTE, 0)
+        crossed += self.validation.count(ValidationCode.CROSSED_MARKET)
+        return min(crossed / self.total_quotes, 1.0)
+
+    def exclusion_counts(self) -> dict[str, int]:
+        return {
+            reason.value: count for reason, count in sorted(self.exclusions.items())
+        }
 
 
 def _resolve_gamma(
@@ -120,19 +170,21 @@ def _resolve_gamma(
     snapshot: ChainSnapshot,
     time_to_expiry: float,
     config: GexEngineConfig,
-) -> tuple[float, str] | None:
+) -> tuple[float, GammaSource] | None:
     """Vendor gamma if allowed and present, else Black-Scholes from IV."""
+    spec = config.model_spec
     if config.prefer_vendor_gamma and quote.gamma is not None:
         return quote.gamma, GammaSource.VENDOR
-    if quote.implied_vol is not None and quote.implied_vol > 0.0:
+    iv = quote.effective_iv
+    if iv is not None and iv > 0.0:
         value = bs_gamma(
             BlackScholesInputs(
                 spot=snapshot.spot,
                 strike=quote.contract.strike,
                 time_to_expiry=time_to_expiry,
-                implied_vol=quote.implied_vol,
-                rate=snapshot.risk_free_rate,
-                dividend_yield=snapshot.dividend_yield,
+                implied_vol=iv,
+                rate=spec.risk_free_rate or snapshot.risk_free_rate,
+                dividend_yield=spec.dividend_yield or snapshot.dividend_yield,
             )
         )
         return value, GammaSource.SHADOW_PRICER
@@ -145,39 +197,74 @@ def _resolve_gamma(
 def compute_contract_gex(
     snapshot: ChainSnapshot, config: GexEngineConfig | None = None
 ) -> ContractGexResult:
-    """Explode a chain snapshot into per-contract GEX contributions."""
+    """Validate, then explode a chain snapshot into per-contract contributions.
+
+    Validation runs first and unconditionally. A contract that fails it never
+    reaches the arithmetic, so a NaN gamma or a negative open interest cannot
+    reach a sum -- the failure shows up as a counted exclusion instead of as a
+    NaN total that looks like a rendering bug three layers downstream.
+    """
+    import math
+
     cfg = config or GexEngineConfig()
+    spec = cfg.model_spec
+    honour_early_close = (
+        spec.expiration_timestamp_rule
+        is ExpirationTimestampRule.ROOT_SPECIFIC_SETTLEMENT_WITH_EARLY_CLOSE
+    )
+
+    normalized = validate_chain(
+        snapshot,
+        limits=cfg.data_quality,
+        require_open_interest=cfg.require_open_interest,
+        treat_crossed_as_error=cfg.drop_crossed_quotes,
+    )
+
+    exclusions: Counter[ExclusionReason] = Counter()
+    exclusions[ExclusionReason.VALIDATION_REJECTED] = len(normalized.rejected)
+
     contracts: list[ContractGex] = []
-    dropped_expired = 0
-    dropped_no_oi = 0
-    dropped_no_gamma = 0
-    dropped_crossed = 0
     vendor_count = 0
     shadow_count = 0
+    excluded_expiries: set[str] = set()
 
-    for quote in snapshot.quotes:
+    for quote in normalized.snapshot.quotes:
         contract = quote.contract
-        remaining = seconds_to_expiry(snapshot.as_of, contract.root, contract.expiry)
+        remaining = seconds_to_expiry(
+            snapshot.as_of,
+            contract.root,
+            contract.expiry,
+            honour_early_close=honour_early_close,
+        )
         if remaining <= 0.0:
-            dropped_expired += 1
+            exclusions[ExclusionReason.EXPIRED] += 1
+            excluded_expiries.add(contract.expiry.isoformat())
             continue
-        if cfg.drop_crossed_quotes and quote.is_crossed:
-            dropped_crossed += 1
+
+        dte = calendar_dte(snapshot.as_of, contract.expiry)
+        if cfg.max_dte is not None and dte > cfg.max_dte:
+            exclusions[ExclusionReason.BEYOND_MAX_DTE] += 1
+            excluded_expiries.add(contract.expiry.isoformat())
             continue
+
         open_interest = quote.open_interest or 0
         if cfg.require_open_interest and open_interest <= 0:
-            dropped_no_oi += 1
+            exclusions[ExclusionReason.NO_OPEN_INTEREST] += 1
             continue
 
-        time_to_expiry = year_fraction(remaining)
+        time_to_expiry = spec.year_fraction(remaining)
         resolved = _resolve_gamma(
             quote, snapshot=snapshot, time_to_expiry=time_to_expiry, config=cfg
         )
         if resolved is None:
-            dropped_no_gamma += 1
+            exclusions[ExclusionReason.NO_GAMMA_SOURCE] += 1
             continue
         gamma_value, source = resolved
-        if source == GammaSource.VENDOR:
+        if not math.isfinite(gamma_value):
+            exclusions[ExclusionReason.NON_FINITE_GAMMA] += 1
+            continue
+
+        if source is GammaSource.VENDOR:
             vendor_count += 1
         else:
             shadow_count += 1
@@ -189,7 +276,6 @@ def compute_contract_gex(
             spot=snapshot.spot,
             spot_move_pct=cfg.spot_move_pct,
         )
-        dte = calendar_dte(snapshot.as_of, contract.expiry)
         sign = sign_for(contract.right, cfg.sign_convention)
         contracts.append(
             ContractGex(
@@ -198,22 +284,32 @@ def compute_contract_gex(
                 bucket=bucket_for_dte(dte),
                 time_to_expiry=time_to_expiry,
                 gamma=gamma_value,
-                implied_vol=quote.implied_vol,
+                implied_vol=quote.effective_iv,
+                iv_source=quote.iv.source if quote.effective_iv is not None else None,
                 open_interest=open_interest,
                 unsigned_gex=magnitude,
                 signed_gex=magnitude * sign,
                 sign=sign,
                 gamma_source=source,
+                vendor_gamma=quote.gamma,
             )
         )
 
+    # Canonical ordering before anything sums these.
+    #
+    # Floating-point addition is not associative, so summing the same contracts
+    # in a different order changes the last bits of every total -- and vendors do
+    # not guarantee row order. Sorting by contract identity makes the engine's
+    # output a function of the *data* rather than of the order it arrived in,
+    # which is what the replay guarantee actually needs.
+    contracts.sort(key=lambda c: c.contract.key)
+
     return ContractGexResult(
         contracts=tuple(contracts),
+        validation=normalized.report,
         total_quotes=len(snapshot.quotes),
-        dropped_expired=dropped_expired,
-        dropped_no_open_interest=dropped_no_oi,
-        dropped_no_gamma_source=dropped_no_gamma,
-        dropped_crossed=dropped_crossed,
+        exclusions=dict(exclusions),
+        excluded_expiries=tuple(sorted(excluded_expiries)),
         vendor_gamma_count=vendor_count,
         shadow_gamma_count=shadow_count,
     )
@@ -225,9 +321,8 @@ def compute_contract_gex(
 def total_unsigned_gex(contracts: tuple[ContractGex, ...]) -> float:
     """View 1. Where gamma is concentrated, with no directional claim.
 
-    This is the least model-sensitive view in the engine: it needs no dealer
-    positioning assumption at all, which is why the plan makes it mandatory for
-    intraday level mapping.
+    The least model-sensitive view in the engine: it needs no dealer positioning
+    assumption at all.
     """
     return sum(c.unsigned_gex for c in contracts)
 
@@ -270,11 +365,7 @@ def aggregate_by_bucket(contracts: tuple[ContractGex, ...]) -> tuple[BucketGex, 
 
 
 def bucket_gex_ratio_0dte_vs_rest(buckets: tuple[BucketGex, ...]) -> float | None:
-    """0DTE unsigned GEX as a share of the whole chain.
-
-    Feature-store field of the same name, and the input to the
-    ``0dte_dominance_alert`` confidence component.
-    """
+    """0DTE unsigned GEX as a share of the whole chain."""
     total = sum(b.unsigned_gex for b in buckets)
     if total <= 0.0:
         return None
@@ -319,9 +410,99 @@ def aggregate_by_strike(contracts: tuple[ContractGex, ...]) -> tuple[StrikeGex, 
     )
 
 
-def signed_gex_at_spot(
-    contracts: tuple[ContractGex, ...], *, as_of: datetime
-) -> float:
-    """Convenience wrapper used by tests and the zero-gamma sanity check."""
-    del as_of  # signature symmetry with the grid path
-    return total_signed_gex(contracts)
+# --- Universe accounting -----------------------------------------------------
+
+
+def build_universe(
+    *,
+    included: tuple[ContractGex, ...],
+    all_contracts: tuple[ContractGex, ...],
+    max_dte_used: int | None,
+    extra_filter_reasons: dict[str, int] | None = None,
+) -> OptionUniverse:
+    """Account for exactly which contracts a number covers.
+
+    Called once for the chain totals and once for the zero-gamma grid, because
+    the two run on different universes and comparing them without saying so
+    invites a false conclusion about how much gamma the level accounts for.
+    """
+    included_keys = {id(c) for c in included}
+    excluded = tuple(c for c in all_contracts if id(c) not in included_keys)
+    reasons: dict[str, int] = dict(extra_filter_reasons or {})
+    if excluded and max_dte_used is not None:
+        beyond = sum(1 for c in excluded if c.dte > max_dte_used)
+        if beyond:
+            reasons["beyond_max_dte"] = reasons.get("beyond_max_dte", 0) + beyond
+
+    return OptionUniverse(
+        total_contract_count=len(all_contracts),
+        included_contract_count=len(included),
+        included_unsigned_gex=total_unsigned_gex(included),
+        excluded_unsigned_gex=total_unsigned_gex(excluded),
+        included_expirations=tuple(
+            sorted({c.contract.expiry.isoformat() for c in included})
+        ),
+        excluded_expirations=tuple(
+            sorted(
+                {c.contract.expiry.isoformat() for c in excluded}
+                - {c.contract.expiry.isoformat() for c in included}
+            )
+        ),
+        max_dte_used=max_dte_used,
+        filter_reasons=reasons,
+    )
+
+
+def gamma_comparisons(
+    contracts: tuple[ContractGex, ...],
+    *,
+    spot: float,
+    observed_at: str | None = None,
+) -> tuple[object, ...]:
+    """Local-vs-vendor gamma comparisons, where vendor gamma is available.
+
+    Empty when the subscription tier does not supply gamma, which is the normal
+    case. This is a validation aid, not an operating requirement.
+    """
+    import math
+
+    from src.domain.iv import GammaComparison
+
+    out: list[GammaComparison] = []
+    for c in contracts:
+        if c.vendor_gamma is None:
+            continue
+        local = (
+            c.gamma
+            if c.gamma_source is GammaSource.SHADOW_PRICER
+            else _recompute_local_gamma(c, spot=spot)
+        )
+        out.append(
+            GammaComparison(
+                local_gamma=local,
+                vendor_gamma=c.vendor_gamma,
+                dte=c.dte,
+                moneyness=(math.log(c.contract.strike / spot) if spot > 0.0 else None),
+                right=c.contract.right.value,
+                implied_vol=c.implied_vol,
+                observed_at=observed_at,
+            )
+        )
+    return tuple(out)
+
+
+def _recompute_local_gamma(contract: ContractGex, *, spot: float) -> float | None:
+    if contract.implied_vol is None or contract.implied_vol <= 0.0:
+        return None
+    return bs_gamma(
+        BlackScholesInputs(
+            spot=spot,
+            strike=contract.contract.strike,
+            time_to_expiry=contract.time_to_expiry,
+            implied_vol=contract.implied_vol,
+        )
+    )
+
+
+def apply_model_spec(config: GexEngineConfig, spec: ModelSpec) -> GexEngineConfig:
+    return config.with_(model_spec=spec)

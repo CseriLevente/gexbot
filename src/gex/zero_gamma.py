@@ -1,47 +1,56 @@
 """View 5: the zero-gamma spot grid.
 
-Algorithm, per the plan:
+Algorithm:
 
 1. Build a symmetric spot grid around the current spot.
 2. Reprice every contract's gamma at each grid point under a stated IV
    convention.
 3. Aggregate signed GEX at each point.
-4. Interpolate where the aggregate changes sign.
+4. Find *every* sign change, interpolate each, and report the full set.
 
-Step 2 is where the answer is actually decided, which is why the convention is a
-first-class parameter and why the engine runs several of them. The disagreement
-between conventions is not noise to be averaged away -- it is the honest error
-bar on the level, and it feeds ``zero_gamma_stability`` in the confidence score.
+Step 4 is where this differs from the usual treatment. Returning a single
+"the zero gamma level" hides three things that decide whether it means anything:
 
-The four conventions:
+* **How many other crossings exist.** A book with open-interest bumps on both
+  sides genuinely crosses more than once, and the nearest one is a reporting
+  convention, not a discovery.
+* **How steeply the curve passes through.** A shallow crossing moves a long way
+  for a small data change; a steep isolated one does not.
+* **Whether it sits at the grid edge**, where it may be an artefact of where we
+  stopped looking rather than a real level.
+
+The four IV conventions:
 
 ``FROZEN_IV``
-    Each contract keeps its raw snapshot IV. Baseline, and the only one that
-    involves no fitting.
+    Each contract keeps its raw snapshot IV. Baseline, no fitting.
 ``STICKY_STRIKE``
-    IV stays pinned to the strike, but is read off a fitted per-expiry smile
-    rather than the raw quote. Same spot-invariance as ``FROZEN_IV``, less
-    sensitive to one torn quote. The plan's default research convention.
-``STICKY_DELTA``
-    The smile translates with spot: a contract's IV follows its *new*
-    standardised moneyness as the grid moves.
-``SURFACE_REFIT``
-    Explicitly out of scope for v1. Requested runs return an unresolved result
-    carrying a reason instead of a fabricated number.
+    IV pinned to the strike, read off a fitted per-expiry smile rather than the
+    raw quote. Same spot-invariance as ``FROZEN_IV``, less sensitive to one torn
+    quote. The default research convention.
+``STICKY_MONEYNESS``
+    The fitted smile translates with spot: a contract's IV follows its new
+    standardised log-moneyness as the grid moves. **Named for what it does.**
+    This is an approximation to sticky-delta behaviour, not sticky-delta itself.
+``STICKY_DELTA`` / ``SURFACE_REFIT``
+    Not implemented. Requesting one returns an unresolved result carrying the
+    reason, rather than quietly aliasing onto the approximation.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 
-from src.domain.gex import IVConvention, ZeroGammaResult
+from src.domain.gex import IVConvention, RootSelectionMethod, ZeroGammaResult
 from src.gex.config import ZeroGammaConfig
 from src.gex.formulas import ContractGex
 from src.gex.pricing import (
     MAX_IMPLIED_VOL,
     MIN_IMPLIED_VOL,
     BlackScholesInputs,
+)
+from src.gex.pricing import (
     gamma as bs_gamma,
 )
 
@@ -52,7 +61,7 @@ def _solve_symmetric_3x3(
     matrix: list[list[float]], rhs: list[float]
 ) -> tuple[float, float, float] | None:
     """Gaussian elimination with partial pivoting. ``None`` when singular."""
-    a = [row[:] + [rhs[i]] for i, row in enumerate(matrix)]
+    a = [[*row[:], rhs[i]] for i, row in enumerate(matrix)]
     for col in range(_QUADRATIC_TERMS):
         pivot_row = max(range(col, _QUADRATIC_TERMS), key=lambda r: abs(a[r][col]))
         if abs(a[pivot_row][col]) < 1e-12:
@@ -138,9 +147,7 @@ def fit_smiles_by_expiry(
         if c.implied_vol is None or c.implied_vol <= 0.0:
             continue
         key = (c.contract.expiry.isoformat(), c.time_to_expiry)
-        moneyness = standardised_moneyness(
-            c.contract.strike, spot, c.time_to_expiry
-        )
+        moneyness = standardised_moneyness(c.contract.strike, spot, c.time_to_expiry)
         grouped.setdefault(key, []).append((moneyness, c.implied_vol))
 
     fits: dict[tuple[str, float], SmileFit] = {}
@@ -154,10 +161,17 @@ def fit_smiles_by_expiry(
 
 
 def build_spot_grid(spot: float, *, span_pct: float, step_pct: float) -> list[float]:
-    """Symmetric grid around spot, guaranteed to include spot itself."""
+    """Symmetric grid around spot, guaranteed to include spot itself.
+
+    The realised span is quantised to a whole number of steps, so it can differ
+    slightly from ``span_pct`` (e.g. a 12.25% span at 0.1% steps becomes 12.3%).
+    Keeping the step exact rather than the span is the right trade: the step is
+    what interpolation accuracy depends on, and it must stay finer than the
+    strike ladder.
+    """
     if span_pct <= 0.0 or step_pct <= 0.0:
         raise ValueError("span_pct and step_pct must be positive")
-    steps = int(round(span_pct / step_pct))
+    steps = round(span_pct / step_pct)
     return [spot * (1.0 + i * step_pct) for i in range(-steps, steps + 1)]
 
 
@@ -183,7 +197,7 @@ def _iv_at_grid_point(
         moneyness = standardised_moneyness(
             contract.contract.strike, base_spot, contract.time_to_expiry
         )
-    else:  # STICKY_DELTA -- the smile travels with spot
+    else:  # STICKY_MONEYNESS -- the fitted smile travels with spot
         moneyness = standardised_moneyness(
             contract.contract.strike, grid_spot, contract.time_to_expiry
         )
@@ -261,7 +275,7 @@ def find_sign_change_roots(curve: list[tuple[float, float]]) -> list[float]:
     if not any(value != 0.0 for _, value in curve):
         return []
     roots: list[float] = []
-    for (s1, y1), (s2, y2) in zip(curve, curve[1:]):
+    for (s1, y1), (s2, y2) in itertools.pairwise(curve):
         if y1 == 0.0:
             roots.append(s1)
             continue
@@ -270,6 +284,47 @@ def find_sign_change_roots(curve: list[tuple[float, float]]) -> list[float]:
     if curve and curve[-1][1] == 0.0:
         roots.append(curve[-1][0])
     return roots
+
+
+def local_slope_at(curve: list[tuple[float, float]], root: float) -> float | None:
+    """dGEX/dS across the grid interval containing ``root``.
+
+    A finite difference on the bracketing points rather than an analytic
+    derivative: the curve is only known on the grid, and pretending to more
+    resolution than the grid has would overstate the precision of the slope.
+    """
+    if len(curve) < 2:
+        return None
+    for (s1, y1), (s2, y2) in itertools.pairwise(curve):
+        if s1 <= root <= s2 and s2 > s1:
+            return (y2 - y1) / (s2 - s1)
+    # Root sits outside the grid interior (an endpoint zero); use the nearest
+    # interval instead of reporting nothing.
+    nearest = min(
+        range(len(curve) - 1),
+        key=lambda i: abs((curve[i][0] + curve[i + 1][0]) / 2 - root),
+    )
+    (s1, y1), (s2, y2) = curve[nearest], curve[nearest + 1]
+    return (y2 - y1) / (s2 - s1) if s2 > s1 else None
+
+
+def _nearest_spacing_pct(
+    roots: list[float], selected: float, spot: float
+) -> float | None:
+    """Gap to the next-closest root, as a % of spot."""
+    others = [r for r in roots if r != selected]
+    if not others or spot <= 0.0:
+        return None
+    return min(abs(r - selected) for r in others) / spot * 100.0
+
+
+def _is_near_boundary(root: float, *, grid: list[float], tolerance_pct: float) -> bool:
+    low, high = grid[0], grid[-1]
+    span = high - low
+    if span <= 0.0:
+        return True
+    margin = span * tolerance_pct
+    return root <= low + margin or root >= high - margin
 
 
 def compute_zero_gamma(
@@ -282,50 +337,124 @@ def compute_zero_gamma(
     risk_free_rate: float = 0.0,
     dividend_yield: float = 0.0,
 ) -> ZeroGammaResult:
-    """Locate the zero-gamma spot level under one IV convention.
+    """Locate the zero-gamma spot level(s) under one IV convention.
 
-    When the curve crosses zero more than once the crossing nearest spot is
-    returned, and ``sign_changes`` records that the level was ambiguous. A
-    multi-crossing snapshot is a legitimate market state, not an error, but a
-    strategy should treat the level as soft -- hence surfacing the count rather
-    than hiding it.
+    Every root is retained. ``selected_root`` is the nearest to spot *as a
+    reporting convention* -- ``selection_method`` says so explicitly, so a
+    consumer cannot mistake it for a claim that the others are irrelevant.
+
+    When the selected root lands near the grid boundary the grid is widened and
+    the search repeated, up to ``max_grid_expansions`` times. Bounded because an
+    unbounded search on a one-sided book would widen until the float range gave
+    out, and because a root only found 30% away from spot is not a level anyone
+    should trade around anyway.
     """
     cfg = config or ZeroGammaConfig()
-    grid = build_spot_grid(
-        spot, span_pct=cfg.grid_span_pct, step_pct=cfg.grid_step_pct
-    )
 
-    if convention is IVConvention.SURFACE_REFIT:
+    if not convention.is_implemented:
+        grid = build_spot_grid(
+            spot, span_pct=cfg.grid_span_pct, step_pct=cfg.grid_step_pct
+        )
         return ZeroGammaResult(
             convention=convention,
-            zero_gamma_spot=None,
-            grid_low=grid[0],
-            grid_high=grid[-1],
+            selected_root=None,
+            all_roots=(),
+            selection_method=RootSelectionMethod.CONVENTION_UNIMPLEMENTED,
+            grid_lower_bound=grid[0],
+            grid_upper_bound=grid[-1],
             grid_points=len(grid),
-            no_crossing=True,
+            spot=spot,
+            no_root_found=True,
+            unimplemented_reason=convention.unimplemented_reason,
         )
 
     eligible = tuple(c for c in contracts if c.dte <= cfg.max_dte_for_grid)
-    curve = signed_gex_curve(
-        eligible,
-        grid=grid,
-        base_spot=spot,
-        convention=convention,
-        spot_move_pct=spot_move_pct,
-        risk_free_rate=risk_free_rate,
-        dividend_yield=dividend_yield,
-        min_points_for_smile_fit=cfg.min_points_for_smile_fit,
-    )
+
+    span_pct = cfg.grid_span_pct
+    expansions = 0
+    result: ZeroGammaResult | None = None
+
+    while True:
+        grid = build_spot_grid(spot, span_pct=span_pct, step_pct=cfg.grid_step_pct)
+        curve = signed_gex_curve(
+            eligible,
+            grid=grid,
+            base_spot=spot,
+            convention=convention,
+            spot_move_pct=spot_move_pct,
+            risk_free_rate=risk_free_rate,
+            dividend_yield=dividend_yield,
+            min_points_for_smile_fit=cfg.min_points_for_smile_fit,
+        )
+        result = _build_result(
+            convention=convention,
+            curve=curve,
+            grid=grid,
+            spot=spot,
+            config=cfg,
+            expansions=expansions,
+        )
+        should_expand = (
+            expansions < cfg.max_grid_expansions
+            and (result.root_near_boundary or result.no_root_found)
+            and not result.identically_zero_curve
+        )
+        if not should_expand:
+            return result
+        span_pct *= cfg.grid_expansion_factor
+        expansions += 1
+
+
+def _build_result(
+    *,
+    convention: IVConvention,
+    curve: list[tuple[float, float]],
+    grid: list[float],
+    spot: float,
+    config: ZeroGammaConfig,
+    expansions: int,
+) -> ZeroGammaResult:
+    values = [value for _, value in curve]
+    identically_zero = bool(values) and not any(value != 0.0 for value in values)
+    max_abs = max((abs(value) for value in values), default=0.0)
     roots = find_sign_change_roots(curve)
-    nearest = min(roots, key=lambda r: abs(r - spot)) if roots else None
+
+    if identically_zero:
+        method = RootSelectionMethod.CURVE_IDENTICALLY_ZERO
+    elif roots:
+        method = RootSelectionMethod.NEAREST_TO_SPOT
+    else:
+        method = RootSelectionMethod.NONE_FOUND
+
+    selected = min(roots, key=lambda r: abs(r - spot)) if roots else None
 
     return ZeroGammaResult(
         convention=convention,
-        zero_gamma_spot=nearest,
-        grid_low=grid[0],
-        grid_high=grid[-1],
+        selected_root=selected,
+        all_roots=tuple(roots),
+        selection_method=method,
+        grid_lower_bound=grid[0],
+        grid_upper_bound=grid[-1],
         grid_points=len(grid),
+        spot=spot,
         curve=tuple(curve),
-        sign_changes=len(roots),
-        no_crossing=not roots,
+        local_slope_at_selected_root=(
+            local_slope_at(curve, selected) if selected is not None else None
+        ),
+        nearest_root_spacing_pct=(
+            _nearest_spacing_pct(roots, selected, spot)
+            if selected is not None
+            else None
+        ),
+        root_near_boundary=(
+            _is_near_boundary(
+                selected, grid=grid, tolerance_pct=config.boundary_tolerance_pct
+            )
+            if selected is not None
+            else False
+        ),
+        identically_zero_curve=identically_zero,
+        no_root_found=not roots,
+        max_abs_gex_on_grid=max_abs,
+        grid_expansions=expansions,
     )

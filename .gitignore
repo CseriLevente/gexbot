@@ -1,25 +1,42 @@
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tool caches
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
-# Secrets and local config. Never commit a vendor key or a broker credential.
+# Secrets and machine-local config. Never commit a vendor credential.
 .env
-.env.local
+.env.*
+!.env.example
 config/local.yaml
+secrets/
 
-# Data and artefacts
+# Runtime data and artefacts
 data/
 logs/
 *.db
 *.sqlite3
 exports/
 research_output/
+# Raw vendor responses captured at runtime. Checked-in fixtures live under
+# tests/fixtures/vendor/ and are NOT covered by this rule.
+raw_responses/
 
 # Editors / OS
 .vscode/
 .idea/
+*.swp
 .DS_Store
 Thumbs.db
+desktop.ini

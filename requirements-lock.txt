@@ -1,0 +1,37 @@
+# Resolved dependency versions, generated from pyproject.toml.
+#
+#   .venv/Scripts/python.exe -m pip install -e ".[dev]"
+#   .venv/Scripts/python.exe -m pip freeze --exclude-editable | sort > requirements-lock.txt
+#
+# pyproject.toml holds compatible RANGES for the direct dependencies; this file
+# pins what a known-good environment actually resolved to. Regenerate it
+# deliberately, in a commit that says why.
+#
+# Note what is NOT here: the engine core (src/gex, src/domain, src/synthetic)
+# imports none of these. Only the config loader (PyYAML) and the real HTTP
+# transport (httpx) have runtime dependencies at all; the rest is tooling.
+#
+# Python 3.12 or 3.13.
+
+PyYAML==6.0.3
+Pygments==2.20.0
+anyio==4.14.2
+certifi==2026.7.22
+colorama==0.4.6
+coverage==7.15.2
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.18
+iniconfig==2.3.0
+librt==0.13.0
+mypy==1.20.2
+mypy_extensions==1.1.0
+packaging==26.2
+pathspec==1.1.1
+pluggy==1.6.0
+pytest-cov==7.1.0
+pytest==9.1.1
+ruff==0.14.14
+types-PyYAML==6.0.12.20260724
+typing_extensions==4.16.0

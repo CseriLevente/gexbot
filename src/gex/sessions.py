@@ -23,7 +23,7 @@ reaches back that far.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 
 from src.domain.contracts import OptionRoot
 
@@ -125,15 +125,40 @@ def to_eastern(dt: datetime) -> datetime:
     return dt.astimezone(EASTERN)
 
 
-def settlement_datetime(root: OptionRoot, expiry: date) -> datetime:
-    """The moment the series stops accruing gamma."""
+def settlement_datetime(
+    root: OptionRoot, expiry: date, *, honour_early_close: bool = False
+) -> datetime:
+    """The moment the series stops accruing gamma.
+
+    ``honour_early_close`` shortens a PM-settled expiration to 13:00 ET on an
+    early-close session. It is opt-in rather than automatic because it pulls in
+    the trading calendar, and the engine records which rule it used in
+    ``ModelSpec.expiration_timestamp_rule`` so the two can never silently
+    disagree.
+    """
     hour, minute = SETTLEMENT_TIME_ET[root]
+    if honour_early_close and (hour, minute) == RTH_CLOSE:
+        # Imported lazily: sessions is the lower-level module and the calendar
+        # depends on it, so a module-level import would be circular.
+        from src.gex.calendar import CALENDAR_VALID_FROM_YEAR, is_early_close
+
+        if expiry.year >= CALENDAR_VALID_FROM_YEAR and is_early_close(expiry):
+            hour, minute = 13, 0
     return eastern(expiry.year, expiry.month, expiry.day, hour, minute)
 
 
-def seconds_to_expiry(as_of: datetime, root: OptionRoot, expiry: date) -> float:
+def seconds_to_expiry(
+    as_of: datetime,
+    root: OptionRoot,
+    expiry: date,
+    *,
+    honour_early_close: bool = False,
+) -> float:
     """Seconds from ``as_of`` to settlement. Negative once the series has died."""
-    return (settlement_datetime(root, expiry) - to_eastern(as_of)).total_seconds()
+    settlement = settlement_datetime(
+        root, expiry, honour_early_close=honour_early_close
+    )
+    return (settlement - to_eastern(as_of)).total_seconds()
 
 
 def calendar_dte(as_of: datetime, expiry: date) -> int:

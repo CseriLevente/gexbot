@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    name: lint, types, tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both supported versions. The engine core is stdlib-only, so a
+        # difference between them is a genuine incompatibility rather than a
+        # dependency-resolution artefact.
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Format check
+        run: python -m ruff format --check .
+
+      - name: Type check
+        run: python -m mypy src
+
+      - name: Tests with coverage
+        # No network access is required or expected: every adapter test runs
+        # against the deterministic fake transport.
+        run: python -m pytest --cov --cov-report=term-missing --cov-report=xml
+
+      - name: Engine core imports on a bare interpreter
+        # Belt and braces for the architecture test: prove the maths does not
+        # need PyYAML or httpx, in an environment where they exist but must not
+        # be reached.
+        run: |
+          python -c "
+          import sys
+          import src.gex.engine, src.gex.pricing, src.gex.zero_gamma
+          import src.gex.confidence, src.domain.contracts, src.synthetic.chains
+          loaded = {m.split('.')[0] for m in sys.modules}
+          forbidden = loaded & {'yaml', 'httpx', 'numpy', 'scipy', 'pandas'}
+          assert not forbidden, forbidden
+          print('engine core is dependency-free: OK')
+          "
+
+      - name: Demo runs
+        run: python -m src.app
+
+  no-trading-guarantee:
+    name: repository cannot trade
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Architecture invariants
+        # Separated into its own job so the guarantee is visible as a distinct
+        # green check rather than buried inside the suite.
+        run: python -m pytest tests/unit/test_architecture.py -v

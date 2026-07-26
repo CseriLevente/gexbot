@@ -7,7 +7,7 @@ where ``tzdata`` happens to be installed.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -83,12 +83,14 @@ def test_seconds_to_expiry_uses_the_root_specific_clock():
     expiry = date(2026, 3, 20)
     # SPXW still has five hours; the AM-settled SPX series is already done.
     assert seconds_to_expiry(as_of, OptionRoot.SPXW, expiry) == pytest.approx(5 * 3600)
-    assert seconds_to_expiry(as_of, OptionRoot.SPX, expiry) == pytest.approx(-1.5 * 3600)
+    assert seconds_to_expiry(as_of, OptionRoot.SPX, expiry) == pytest.approx(
+        -1.5 * 3600
+    )
 
 
 def test_utc_input_is_converted_not_reinterpreted():
     # 15:00 UTC in March (EDT) is 11:00 ET.
-    utc = datetime(2026, 3, 17, 15, 0, tzinfo=timezone.utc)
+    utc = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
     assert to_eastern(utc).hour == 11
 
 
@@ -105,7 +107,7 @@ def test_late_utc_evening_does_not_roll_the_eastern_date():
     A naive ``utcnow().date()`` here would advance DTE by one and shift every
     contract into the wrong expiry bucket for the last few hours of each day.
     """
-    utc_late = datetime(2026, 3, 17, 23, 30, tzinfo=timezone.utc)
+    utc_late = datetime(2026, 3, 17, 23, 30, tzinfo=UTC)
     assert to_eastern(utc_late).date() == date(2026, 3, 17)
     assert calendar_dte(utc_late, date(2026, 3, 17)) == 0
 

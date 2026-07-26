@@ -1,17 +1,26 @@
-"""The eight-component confidence score.
+"""The confidence model.
 
 Design rule: a component whose threshold is still ``UNSPECIFIED_CALIBRATE`` is
 *computed* with a documented placeholder and *flagged* -- never silently given a
 made-up number, and never dropped. Flagged components make
-:attr:`ConfidenceScore.calibrated` False, which the risk engine treats as a hard
-block on live orders. The engine therefore runs and produces research output on
-day one, while remaining unable to trade until the calibration work is done.
+``ConfidenceScore.calibrated`` False.
 
-Three components (``zero_gamma_stability``, ``sign_model_agreement``,
-``0dte_dominance_alert``) are genuine calibration targets: their thresholds are
-claims about the market. The other five measure data quality, where a defensible
-value exists without any backtest -- a 60-second-old option snapshot is stale
-whatever the strategy turns out to be.
+An important honesty note about what that flag is and is not: it is a **research
+signal**, not an enforcement mechanism. This repository has no risk engine and no
+broker, so nothing consumes ``calibrated`` to block an order -- there are no
+orders. Earlier documentation overstated this; see ``docs/OPEN_DECISIONS.md``.
+
+Components fall into two families:
+
+* **Data-quality**, where a defensible threshold exists without any backtest --
+  a 60-second-old option snapshot is stale whatever the strategy turns out to be.
+* **Market claims** (``zero_gamma_stability``, ``sign_model_agreement``,
+  ``0dte_dominance_alert``), whose thresholds are hypotheses and stay sentinels.
+
+Separately, some conditions are *hard failures* rather than score reductions: a
+vendor timestamp materially in the future means the snapshot cannot be trusted at
+all, so it zeroes its component and raises a flag that a downstream regime
+service would map to ``DATA_HALT``.
 """
 
 from __future__ import annotations
@@ -20,15 +29,22 @@ import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from src.domain.contracts import OptionQuote
 from src.domain.gex import (
     ConfidenceComponent,
     ConfidenceScore,
     ExpiryBucket,
+    OptionUniverse,
     ZeroGammaResult,
 )
-from src.gex.config import Calibratable, ConfidenceConfig, is_calibrated
+from src.domain.iv import IVQualityFlag
+from src.domain.model_spec import ModelSpec
+from src.domain.timestamps import DataQualityLimits
+from src.domain.validation import ValidationCode, ValidationReport
+from src.gex.calendar import sessions_since
+from src.gex.config import Calibratable, ConfidenceConfig, calibrated_value
 from src.gex.formulas import ContractGexResult
-from src.gex.sessions import to_eastern, weekdays_between
+from src.gex.sessions import to_eastern
 
 # Placeholders used when a threshold is still uncalibrated. Deliberately
 # conservative -- they make the score pessimistic, so an uncalibrated system
@@ -46,17 +62,22 @@ def _linear_decay(value: float, *, zero_at: float) -> float:
 
 
 def _resolve(threshold: Calibratable, placeholder: float) -> tuple[float, bool]:
-    """Return ``(value, uncalibrated)``."""
-    if is_calibrated(threshold):
-        return float(threshold), False  # type: ignore[arg-type]
-    return placeholder, True
+    """Return ``(value, uncalibrated)``.
+
+    Goes through ``calibrated_value`` rather than ``float(threshold)`` because
+    the sentinel refuses coercion by design.
+    """
+    resolved = calibrated_value(threshold)
+    if resolved is None:
+        return placeholder, True
+    return resolved, False
 
 
 @dataclass(frozen=True, slots=True)
 class ConfidenceInputs:
     """Everything the score needs, gathered explicitly.
 
-    Passing a flat input struct rather than the whole pipeline keeps the score
+    A flat input struct rather than the whole pipeline keeps the score
     unit-testable and makes it obvious which measurements the system must be able
     to produce before a component means anything.
     """
@@ -66,30 +87,39 @@ class ConfidenceInputs:
     zero_gamma_results: tuple[ZeroGammaResult, ...]
     spot: float
     dte0_dominance_ratio: float | None
-    # Expected strike/expiry count for the chain we requested. ``None`` when the
-    # adapter cannot state it, in which case completeness falls back to the ratio
-    # of usable quotes.
+    model_spec: ModelSpec
+    limits: DataQualityLimits
+    chain_universe: OptionUniverse
+    zero_gamma_universe: OptionUniverse
+    quotes: tuple[OptionQuote, ...] = ()
     expected_contract_count: int | None = None
     options_feed_timestamp: datetime | None = None
     spot_feed_timestamp: datetime | None = None
-    open_interest_asof: date | None = None
+    open_interest_as_of: date | None = None
     # Signed GEX from the flow-adjusted model, when Cboe Open-Close data is
     # available. ``None`` disables the agreement check.
     flow_adjusted_signed_gex: float | None = None
     naive_signed_gex: float | None = None
+
+    @property
+    def validation(self) -> ValidationReport:
+        return self.result.validation
+
+
+# --- Data-quality components ------------------------------------------------
 
 
 def score_chain_completeness(
     inputs: ConfidenceInputs, config: ConfidenceConfig
 ) -> ConfidenceComponent:
     result = inputs.result
-    if inputs.expected_contract_count:
-        ratio = len(result.contracts) / inputs.expected_contract_count
-    else:
-        ratio = result.usable_ratio
+    ratio = (
+        len(result.contracts) / inputs.expected_contract_count
+        if inputs.expected_contract_count
+        else result.usable_ratio
+    )
     ratio = min(ratio, 1.0)
     floor = config.min_chain_completeness_ratio
-    # Full marks at or above the floor, linear to zero at half the floor.
     if ratio >= floor:
         score = 1.0
     else:
@@ -101,10 +131,8 @@ def score_chain_completeness(
         weight=config.weights.chain_completeness,
         detail=(
             f"{len(result.contracts)} usable of {result.total_quotes} quotes "
-            f"(ratio {ratio:.3f}, floor {floor:.3f}); dropped: "
-            f"expired={result.dropped_expired} "
-            f"no_oi={result.dropped_no_open_interest} "
-            f"no_gamma={result.dropped_no_gamma_source}"
+            f"(ratio {ratio:.3f}, floor {floor:.3f}); exclusions="
+            f"{result.exclusion_counts()}"
         ),
     )
 
@@ -121,44 +149,60 @@ def score_quote_freshness(
             detail="no options feed timestamp -- cannot prove freshness",
         )
     age = (to_eastern(inputs.as_of) - to_eastern(feed_ts)).total_seconds()
-    score = _linear_decay(max(age, 0.0), zero_at=config.max_quote_staleness_sec)
+    if age < 0.0:
+        # A quote dated after the request is not "extra fresh". Scoring the
+        # absolute drift, not the clamped age, is what stops a future timestamp
+        # from earning full marks here.
+        return ConfidenceComponent(
+            name="quote_freshness",
+            score=0.0,
+            weight=config.weights.quote_freshness,
+            detail=(
+                f"options feed timestamp is {-age:.1f}s AHEAD of the request "
+                "instant; freshness is not measurable"
+            ),
+        )
     return ConfidenceComponent(
         name="quote_freshness",
-        score=score,
+        score=_linear_decay(age, zero_at=inputs.limits.max_snapshot_age_seconds),
         weight=config.weights.quote_freshness,
-        detail=f"snapshot age {age:.1f}s (zero at {config.max_quote_staleness_sec:.0f}s)",
+        detail=(
+            f"snapshot age {age:.1f}s "
+            f"(zero at {inputs.limits.max_snapshot_age_seconds:.0f}s)"
+        ),
     )
 
 
 def score_oi_freshness(
     inputs: ConfidenceInputs, config: ConfidenceConfig
 ) -> ConfidenceComponent:
-    """Open interest is built from the prior day's settlement, so T-1 is the best
-    achievable state and scores full marks. This component exists to catch an OI
-    job that stalled days ago, not to penalise a fact of market structure.
+    """Open interest is built from the prior session's settlement.
+
+    T-1 is the best achievable state and scores full marks; this component exists
+    to catch a stalled OI job, not to penalise a fact of market structure. Ageing
+    is in *trading sessions*, so Friday's settlement read on Monday is one
+    session old, and a holiday weekend does not make it look worse.
     """
-    if inputs.open_interest_asof is None:
+    if inputs.open_interest_as_of is None:
         return ConfidenceComponent(
             name="oi_freshness",
             score=0.0,
             weight=config.weights.oi_freshness,
-            detail="no OI as-of date supplied",
+            detail="no open_interest_as_of date supplied",
         )
-    sessions = weekdays_between(
-        inputs.open_interest_asof, to_eastern(inputs.as_of).date()
-    )
+    sessions = sessions_since(inputs.as_of, inputs.open_interest_as_of)
+    limit = inputs.limits.max_open_interest_age_sessions
     score = (
-        1.0
-        if sessions <= 1
-        else _linear_decay(
-            sessions - 1, zero_at=max(1, config.max_oi_age_sessions - 1)
-        )
+        1.0 if sessions <= 1 else _linear_decay(sessions - 1, zero_at=max(1, limit - 1))
     )
     return ConfidenceComponent(
         name="oi_freshness",
         score=score,
         weight=config.weights.oi_freshness,
-        detail=f"OI as of {inputs.open_interest_asof} ({sessions} session(s) old)",
+        detail=(
+            f"OI as of {inputs.open_interest_as_of} ({sessions} trading "
+            f"session(s) old, limit {limit})"
+        ),
     )
 
 
@@ -166,16 +210,368 @@ def score_crossed_market_penalty(
     inputs: ConfidenceInputs, config: ConfidenceConfig
 ) -> ConfidenceComponent:
     ratio = inputs.result.crossed_ratio
-    score = _linear_decay(ratio, zero_at=config.crossed_quote_zero_score_ratio)
     return ConfidenceComponent(
         name="crossed_market_penalty",
-        score=score,
+        score=_linear_decay(ratio, zero_at=config.crossed_quote_zero_score_ratio),
         weight=config.weights.crossed_market_penalty,
         detail=(
-            f"{inputs.result.dropped_crossed} crossed/locked of "
-            f"{inputs.result.total_quotes} ({ratio:.4f})"
+            f"crossed/locked share {ratio:.4f} of {inputs.result.total_quotes} quotes"
         ),
     )
+
+
+def score_vendor_lag(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Drift between the options feed and the spot feed."""
+    options_ts = inputs.options_feed_timestamp
+    spot_ts = inputs.spot_feed_timestamp
+    if options_ts is None or spot_ts is None:
+        return ConfidenceComponent(
+            name="vendor_lag_alert",
+            score=0.0,
+            weight=config.weights.vendor_lag_alert,
+            detail="missing feed timestamp on options or spot -- drift unmeasurable",
+        )
+    drift = abs((to_eastern(options_ts) - to_eastern(spot_ts)).total_seconds())
+    return ConfidenceComponent(
+        name="vendor_lag_alert",
+        score=_linear_decay(
+            drift, zero_at=inputs.limits.max_quote_underlying_skew_seconds
+        ),
+        weight=config.weights.vendor_lag_alert,
+        detail=(
+            f"options/spot timestamp drift {drift:.2f}s (zero at "
+            f"{inputs.limits.max_quote_underlying_skew_seconds:.1f}s)"
+        ),
+    )
+
+
+def score_timestamp_alignment(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Share of contracts whose source clocks agree within tolerance.
+
+    Measured from the validation pass rather than re-derived, so the score and
+    the rejection counters can never tell different stories.
+    """
+    report = inputs.validation
+    total = report.total
+    if total == 0:
+        return ConfidenceComponent(
+            name="timestamp_alignment_score",
+            score=0.0,
+            weight=config.weights.timestamp_alignment_score,
+            detail="no records validated",
+        )
+    skewed = report.count(ValidationCode.TIMESTAMP_SKEW)
+    ratio = min(skewed / total, 1.0)
+    return ConfidenceComponent(
+        name="timestamp_alignment_score",
+        score=1.0 - ratio,
+        weight=config.weights.timestamp_alignment_score,
+        detail=(
+            f"{skewed} of {total} records exceeded a join skew tolerance "
+            f"(greeks<={inputs.limits.max_quote_greeks_skew_seconds}s, "
+            f"iv<={inputs.limits.max_quote_iv_skew_seconds}s, "
+            f"underlying<={inputs.limits.max_quote_underlying_skew_seconds}s)"
+        ),
+    )
+
+
+def score_future_timestamp(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Hard failure on a vendor timestamp materially in the future.
+
+    Small clock skew between two machines is ordinary and is absorbed by
+    ``max_future_timestamp_seconds``. Beyond that, either the feed, the parser or
+    our own clock is wrong, and none of those should be able to produce a
+    healthy-looking snapshot. This is the component a downstream regime service
+    would read to raise ``DATA_HALT``.
+    """
+    report = inputs.validation
+    offenders = report.count(ValidationCode.FUTURE_TIMESTAMP)
+    tolerance = inputs.limits.max_future_timestamp_seconds
+
+    # The chain-level clock is checked directly: it does not pass through the
+    # per-contract validation pass.
+    feed_ahead_by = 0.0
+    for label, stamp in (
+        ("options feed", inputs.options_feed_timestamp),
+        ("spot feed", inputs.spot_feed_timestamp),
+    ):
+        if stamp is None:
+            continue
+        drift = (to_eastern(stamp) - to_eastern(inputs.as_of)).total_seconds()
+        if drift > tolerance:
+            offenders += 1
+            feed_ahead_by = max(feed_ahead_by, drift)
+            del label
+
+    if offenders:
+        return ConfidenceComponent(
+            name="future_timestamp_penalty",
+            score=0.0,
+            weight=config.weights.future_timestamp_penalty,
+            detail=(
+                f"{offenders} record(s)/feed(s) dated after the request instant "
+                f"beyond the {tolerance:.1f}s clock-skew allowance"
+                + (f"; worst {feed_ahead_by:.1f}s" if feed_ahead_by else "")
+                + " -- DATA_HALT eligible"
+            ),
+            hard_failure=True,
+        )
+    return ConfidenceComponent(
+        name="future_timestamp_penalty",
+        score=1.0,
+        weight=config.weights.future_timestamp_penalty,
+        detail=f"no timestamp beyond the {tolerance:.1f}s future allowance",
+    )
+
+
+def score_iv_spread_quality(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Share of contracts whose IV came from a clean two-sided book."""
+    if not inputs.quotes:
+        return ConfidenceComponent(
+            name="iv_spread_quality",
+            score=0.0,
+            weight=config.weights.iv_spread_quality,
+            detail="no quotes supplied -- IV quality unmeasurable",
+        )
+    counts: dict[str, int] = {}
+    good = 0
+    for quote in inputs.quotes:
+        flag = quote.iv.quality
+        counts[flag.value] = counts.get(flag.value, 0) + 1
+        if flag is IVQualityFlag.OK:
+            good += 1
+    ratio = good / len(inputs.quotes)
+    floor = config.min_good_iv_ratio
+    score = 1.0 if ratio >= floor else max(0.0, ratio / floor)
+    return ConfidenceComponent(
+        name="iv_spread_quality",
+        score=score,
+        weight=config.weights.iv_spread_quality,
+        detail=f"{good}/{len(inputs.quotes)} clean two-sided IV; breakdown={counts}",
+    )
+
+
+def score_option_universe_coverage(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """How much of the chain's gamma the zero-gamma grid actually covers.
+
+    The grid runs on a DTE-capped subset. If that subset carries only half the
+    chain's gamma, the level it produces is not a statement about the whole book,
+    and the score says so instead of leaving the reader to compare two universes
+    unknowingly.
+    """
+    universe = inputs.zero_gamma_universe
+    share = universe.included_unsigned_gex_share
+    if share is None:
+        return ConfidenceComponent(
+            name="option_universe_coverage_score",
+            score=0.0,
+            weight=config.weights.option_universe_coverage_score,
+            detail="no gamma in the chain -- coverage undefined",
+        )
+    floor = config.min_universe_coverage_ratio
+    score = 1.0 if share >= floor else max(0.0, share / floor)
+    return ConfidenceComponent(
+        name="option_universe_coverage_score",
+        score=score,
+        weight=config.weights.option_universe_coverage_score,
+        detail=(
+            f"zero-gamma grid covers {share:.1%} of chain unsigned GEX "
+            f"({universe.included_contract_count}/{universe.total_contract_count} "
+            f"contracts, max_dte={universe.max_dte_used}; floor {floor:.0%})"
+        ),
+    )
+
+
+def score_model_parameter_completeness(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Whether the pricing assumptions are fully specified.
+
+    A zero rate and a zero dividend yield on an SPX chain are almost certainly
+    "nobody configured this" rather than a deliberate choice, and both bias gamma.
+    """
+    spec = inputs.model_spec
+    missing: list[str] = []
+    if spec.risk_free_rate == 0.0:
+        missing.append("risk_free_rate=0")
+    if spec.dividend_yield == 0.0:
+        missing.append("dividend_yield=0 (SPX carries a material yield)")
+    from src.domain.iv import IVSource
+
+    if spec.iv_price_source is IVSource.VENDOR_DEFAULT_IV:
+        missing.append("iv_price_source is the undocumented vendor default")
+    score = 1.0 - (len(missing) / 3.0)
+    return ConfidenceComponent(
+        name="model_parameter_completeness",
+        score=max(0.0, score),
+        weight=config.weights.model_parameter_completeness,
+        detail=(
+            f"model {spec.fingerprint()}; unspecified: {missing}"
+            if missing
+            else f"model {spec.fingerprint()} fully specified"
+        ),
+    )
+
+
+# --- Zero-gamma root diagnostics -------------------------------------------
+
+
+def _resolved_results(inputs: ConfidenceInputs) -> list[ZeroGammaResult]:
+    return [r for r in inputs.zero_gamma_results if r.resolved]
+
+
+def score_multiple_root_penalty(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Penalise ambiguity in the number and proximity of crossings.
+
+    Two crossings 5% apart is a legitimate, readable market state. Two crossings
+    0.2% apart means the level is a coin flip, so proximity is penalised
+    separately from count.
+    """
+    resolved = _resolved_results(inputs)
+    if not resolved:
+        return ConfidenceComponent(
+            name="multiple_root_penalty",
+            score=0.0,
+            weight=config.weights.multiple_root_penalty,
+            detail="no convention resolved a crossing",
+        )
+    worst_count = max(r.root_count for r in resolved)
+    count_score = 1.0 if worst_count <= 1 else max(0.0, 1.0 - 0.35 * (worst_count - 1))
+
+    spacings = [
+        r.nearest_root_spacing_pct
+        for r in resolved
+        if r.nearest_root_spacing_pct is not None
+    ]
+    if spacings:
+        tightest = min(spacings)
+        proximity_score = min(1.0, tightest / config.ambiguous_root_spacing_pct)
+    else:
+        tightest = None
+        proximity_score = 1.0
+
+    return ConfidenceComponent(
+        name="multiple_root_penalty",
+        score=min(count_score, proximity_score),
+        weight=config.weights.multiple_root_penalty,
+        detail=(
+            f"worst root count {worst_count}"
+            + (
+                f", tightest spacing {tightest:.3f}% of spot "
+                f"(ambiguous below {config.ambiguous_root_spacing_pct:.2f}%)"
+                if tightest is not None
+                else ", single root per convention"
+            )
+        ),
+    )
+
+
+def score_root_slope(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Steep crossings are stable; shallow ones move on noise."""
+    resolved = _resolved_results(inputs)
+    slopes = [r.normalised_slope for r in resolved if r.normalised_slope is not None]
+    if not slopes:
+        return ConfidenceComponent(
+            name="root_slope_score",
+            score=0.0,
+            weight=config.weights.root_slope_score,
+            detail="no measurable slope at any selected root",
+        )
+    shallowest = min(abs(slope) for slope in slopes)
+    score = min(1.0, shallowest / config.steep_slope_threshold)
+    return ConfidenceComponent(
+        name="root_slope_score",
+        score=score,
+        weight=config.weights.root_slope_score,
+        detail=(
+            f"shallowest normalised slope {shallowest:.4f} "
+            f"(full marks at {config.steep_slope_threshold:.2f}); "
+            "units are fraction of max |GEX| per 1% of spot"
+        ),
+    )
+
+
+def score_root_boundary(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """A root at the edge of the search window may be where we stopped looking."""
+    resolved = _resolved_results(inputs)
+    if not resolved:
+        return ConfidenceComponent(
+            name="root_boundary_penalty",
+            score=0.0,
+            weight=config.weights.root_boundary_penalty,
+            detail="no convention resolved a crossing",
+        )
+    at_boundary = [r for r in resolved if r.root_near_boundary]
+    expansions = max(r.grid_expansions for r in resolved)
+    if not at_boundary:
+        return ConfidenceComponent(
+            name="root_boundary_penalty",
+            score=1.0,
+            weight=config.weights.root_boundary_penalty,
+            detail=(
+                "all selected roots sit inside the grid interior"
+                + (f" after {expansions} expansion(s)" if expansions else "")
+            ),
+        )
+    return ConfidenceComponent(
+        name="root_boundary_penalty",
+        score=max(0.0, 1.0 - len(at_boundary) / len(resolved)),
+        weight=config.weights.root_boundary_penalty,
+        detail=(
+            f"{len(at_boundary)}/{len(resolved)} selected roots sit near the grid "
+            f"boundary after {expansions} expansion(s) -- level may be an artefact "
+            "of the search window"
+        ),
+    )
+
+
+def score_root_identity_stability(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Do the conventions agree on the *shape* of the curve, not just the level?
+
+    A convention change that alters the number of crossings is a stronger warning
+    than one that merely shifts the level a little.
+    """
+    resolved = _resolved_results(inputs)
+    if len(resolved) < 2:
+        return ConfidenceComponent(
+            name="root_identity_stability",
+            score=0.0,
+            weight=config.weights.root_identity_stability,
+            detail=f"only {len(resolved)} convention(s) resolved -- not comparable",
+        )
+    counts = {r.root_count for r in resolved}
+    methods = {r.selection_method for r in resolved}
+    stable = len(counts) == 1 and len(methods) == 1
+    return ConfidenceComponent(
+        name="root_identity_stability",
+        score=1.0 if stable else 0.0,
+        weight=config.weights.root_identity_stability,
+        detail=(
+            f"root counts across conventions: {sorted(counts)}"
+            + ("" if stable else " -- conventions disagree on curve shape")
+        ),
+    )
+
+
+# --- Market-claim components ------------------------------------------------
 
 
 def score_zero_gamma_stability(
@@ -185,7 +581,14 @@ def score_zero_gamma_stability(
     threshold, uncalibrated = _resolve(
         config.max_zero_gamma_shift_pct, PLACEHOLDER_MAX_ZERO_GAMMA_SHIFT_PCT
     )
-    levels = [r.zero_gamma_spot for r in inputs.zero_gamma_results if r.resolved]
+    # `resolved` guarantees selected_root is not None, but narrowing has to be
+    # explicit for the type checker -- and the explicit form is also what stops
+    # a future refactor from quietly letting a None into the min/max.
+    levels = [
+        r.selected_root
+        for r in _resolved_results(inputs)
+        if r.selected_root is not None
+    ]
     if len(levels) < 2:
         return ConfidenceComponent(
             name="zero_gamma_stability",
@@ -215,10 +618,9 @@ def score_sign_model_agreement(
 ) -> ConfidenceComponent:
     """Naive-signed vs flow-adjusted signed GEX.
 
-    Without Cboe Open-Close there is no second model to compare against, so the
-    component scores zero and says why. That is the correct answer, not a
-    penalty-free pass: a single unverified sign model is exactly the risk the
-    plan warns about.
+    Without Cboe Open-Close there is no second model, so the component scores
+    zero and says why. That is the correct answer, not a penalty-free pass: a
+    single unverified sign model is precisely the risk worth surfacing.
     """
     threshold, uncalibrated = _resolve(
         config.max_sign_model_disagreement, PLACEHOLDER_MAX_SIGN_MODEL_DISAGREEMENT
@@ -233,12 +635,6 @@ def score_sign_model_agreement(
             detail="no flow-adjusted sign model available (needs Cboe Open-Close)",
             uncalibrated=uncalibrated,
         )
-    scale = max(abs(naive), abs(flow))
-    if scale <= 0.0:
-        disagreement = 0.0
-    else:
-        disagreement = abs(naive - flow) / scale
-    # A sign flip between the two models is a hard zero regardless of magnitude.
     if naive * flow < 0.0:
         return ConfidenceComponent(
             name="sign_model_agreement",
@@ -247,6 +643,8 @@ def score_sign_model_agreement(
             detail=f"models disagree on sign: naive={naive:.3e} flow={flow:.3e}",
             uncalibrated=uncalibrated,
         )
+    scale = max(abs(naive), abs(flow))
+    disagreement = abs(naive - flow) / scale if scale > 0.0 else 0.0
     return ConfidenceComponent(
         name="sign_model_agreement",
         score=_linear_decay(disagreement, zero_at=threshold),
@@ -262,8 +660,7 @@ def score_0dte_dominance(
     """Penalise snapshots where same-day gamma masks the longer-dated structure.
 
     High 0DTE share is not itself a data error -- it is now the normal state of
-    the SPX complex. It *is* a reason to distrust the chain-wide aggregate, which
-    is what this score expresses.
+    the SPX complex. It *is* a reason to distrust the chain-wide aggregate.
     """
     threshold, uncalibrated = _resolve(
         config.max_0dte_dominance_ratio, PLACEHOLDER_MAX_0DTE_DOMINANCE_RATIO
@@ -278,44 +675,15 @@ def score_0dte_dominance(
             uncalibrated=uncalibrated,
         )
     excess = max(0.0, ratio - threshold)
-    score = _linear_decay(excess, zero_at=max(1e-9, 1.0 - threshold))
     return ConfidenceComponent(
         name="0dte_dominance_alert",
-        score=score,
+        score=_linear_decay(excess, zero_at=max(1e-9, 1.0 - threshold)),
         weight=config.weights.dte0_dominance_alert,
         detail=(
             f"{ExpiryBucket.DTE_0.value} share {ratio:.4f} of unsigned GEX "
             f"(alert above {threshold:.4f})"
         ),
         uncalibrated=uncalibrated,
-    )
-
-
-def score_vendor_lag(
-    inputs: ConfidenceInputs, config: ConfidenceConfig
-) -> ConfidenceComponent:
-    """Drift between the options feed and the spot feed.
-
-    Gamma is computed from a spot and a chain that are supposed to describe the
-    same instant. When they drift apart the gamma is a blend of two moments, and
-    on 0DTE that blend is where the error lives.
-    """
-    options_ts = inputs.options_feed_timestamp
-    spot_ts = inputs.spot_feed_timestamp
-    if options_ts is None or spot_ts is None:
-        return ConfidenceComponent(
-            name="vendor_lag_alert",
-            score=0.0,
-            weight=config.weights.vendor_lag_alert,
-            detail="missing feed timestamp on options or spot -- drift unmeasurable",
-        )
-    drift = abs((to_eastern(options_ts) - to_eastern(spot_ts)).total_seconds())
-    return ConfidenceComponent(
-        name="vendor_lag_alert",
-        score=_linear_decay(drift, zero_at=config.max_vendor_lag_sec),
-        weight=config.weights.vendor_lag_alert,
-        detail=f"options/spot timestamp drift {drift:.2f}s "
-        f"(zero at {config.max_vendor_lag_sec:.1f}s)",
     )
 
 
@@ -328,20 +696,65 @@ _SCORERS = (
     score_sign_model_agreement,
     score_0dte_dominance,
     score_vendor_lag,
+    score_multiple_root_penalty,
+    score_root_slope,
+    score_root_boundary,
+    score_root_identity_stability,
+    score_timestamp_alignment,
+    score_future_timestamp,
+    score_option_universe_coverage,
+    score_iv_spread_quality,
+    score_model_parameter_completeness,
+)
+
+COMPONENT_NAMES: tuple[str, ...] = (
+    "chain_completeness",
+    "quote_freshness",
+    "oi_freshness",
+    "crossed_market_penalty",
+    "zero_gamma_stability",
+    "sign_model_agreement",
+    "0dte_dominance_alert",
+    "vendor_lag_alert",
+    "multiple_root_penalty",
+    "root_slope_score",
+    "root_boundary_penalty",
+    "root_identity_stability",
+    "timestamp_alignment_score",
+    "future_timestamp_penalty",
+    "option_universe_coverage_score",
+    "iv_spread_quality",
+    "model_parameter_completeness",
 )
 
 
 def compute_confidence(
     inputs: ConfidenceInputs, config: ConfidenceConfig | None = None
 ) -> ConfidenceScore:
-    """Weighted 0-100 score over all eight components."""
+    """Weighted 0-100 score over all components, plus warnings and hard failures.
+
+    A hard failure zeroes the whole score rather than merely reducing it. Letting
+    a snapshot with a future-dated feed score 85/100 because everything else was
+    fine would be exactly the kind of averaged-away warning this model exists to
+    prevent.
+    """
     cfg = config or ConfidenceConfig()
     components = tuple(scorer(inputs, cfg) for scorer in _SCORERS)
     total_weight = sum(c.weight for c in components)
     if total_weight <= 0.0:
         raise ValueError("confidence weights sum to zero")
+
     weighted = sum(c.score * c.weight for c in components) / total_weight
     value = round(100.0 * min(max(weighted, 0.0), 1.0), 4)
     if math.isnan(value):  # pragma: no cover - defensive
         raise ValueError("confidence score is NaN")
-    return ConfidenceScore(value=value, components=components)
+
+    warnings: list[str] = []
+    hard = [c for c in components if c.hard_failure]
+    if hard:
+        value = 0.0
+        warnings.extend(f"HARD FAILURE {c.name}: {c.detail}" for c in hard)
+    warnings.extend(
+        f"{c.name} is uncalibrated: {c.detail}" for c in components if c.uncalibrated
+    )
+    return ConfidenceScore(value=value, components=components, warnings=tuple(warnings))

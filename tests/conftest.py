@@ -13,7 +13,7 @@ from src.domain.contracts import ChainSnapshot
 from src.gex.config import GexEngineConfig
 from src.gex.engine import compute_gex_snapshot
 from src.gex.formulas import ContractGexResult, compute_contract_gex
-from tests.fixtures.chains import SyntheticChainSpec, build_synthetic_chain
+from src.synthetic.chains import SyntheticChainSpec, build_synthetic_chain
 
 
 @pytest.fixture(scope="session")
@@ -32,9 +32,7 @@ def config() -> GexEngineConfig:
 
 
 @pytest.fixture(scope="session")
-def contract_gex(
-    chain: ChainSnapshot, config: GexEngineConfig
-) -> ContractGexResult:
+def contract_gex(chain: ChainSnapshot, config: GexEngineConfig) -> ContractGexResult:
     return compute_contract_gex(chain, config)
 
 

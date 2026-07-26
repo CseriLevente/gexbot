@@ -1,0 +1,36 @@
+# The GEX engine core (src/gex, src/domain) has ZERO third-party dependencies.
+# That is deliberate: `pytest tests/unit` runs on a bare Python 3.12 with nothing
+# installed, so the maths is verifiable anywhere, and importing src.gex.* can
+# never drag in a web framework.
+#
+# Everything below belongs to the service layer that is not built yet. Install it
+# per-phase, not all at once.
+
+# --- Development (needed now) ---
+pytest>=8.0
+
+# --- Phase 1: real options data ---
+# httpx>=0.27          # ThetaData v3 transport (local Theta Terminal)
+# tzdata>=2026.1       # optional: lets test_sessions cross-check the hand-rolled
+#                      # US Eastern DST rule against the real tz database.
+#                      # NOT required at runtime -- src/gex/sessions.py is
+#                      # self-contained by design.
+
+# --- Phase 2: futures data ---
+# databento>=0.40      # CME GLBX.MDP3
+
+# --- Phase 3: broker ---
+# ib-insync>=0.9       # or ibapi; TWS API, not the 10 req/s Web API
+
+# --- Phase 4: service layer ---
+# fastapi>=0.115
+# uvicorn>=0.32
+# pydantic>=2.9
+# sqlalchemy>=2.0
+# alembic>=1.14
+# psycopg[binary]>=3.2
+
+# --- Research / analytics ---
+# polars>=1.0
+# numpy>=2.0           # zero-gamma grid vectorisation, when the sub-1s SLA bites
+# scipy>=1.14

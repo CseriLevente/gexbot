@@ -1,0 +1,105 @@
+# Live profile -- LIVE_STAGE_1, supervised, 1 MES maximum.
+#
+# This is a TEMPLATE, not a runnable live config. It ships with
+# trading_enabled: false and every market threshold still UNSPECIFIED_CALIBRATE,
+# which means loading it as-is cannot place an order: the confidence score reports
+# `uncalibrated`, and the risk engine treats that as a hard block.
+#
+# A real live config has ZERO sentinels in it. Promotion checklist, in order:
+#   1. Replace every UNSPECIFIED_CALIBRATE with an out-of-sample-supported value.
+#   2. Confirm OPRA non-display status in writing with the vendor. Automated
+#      consumption of OPRA data that generates orders can fall into the
+#      Non-Display Use category, which is priced separately.
+#   3. Dozens of incident-free paper sessions on paper.yaml. Note that IBKR paper
+#      fills come from a simulator -- they prove the plumbing, not slippage.
+#   4. Exercise reconciliation, the kill switch and end-of-day flatten in chaos
+#      tests, not just unit tests.
+#   5. Only then flip trading_enabled, and start at max_contracts: 1.
+
+stage: LIVE_STAGE_1
+
+data:
+  options_source: thetadata # synthetic | thetadata | cboe
+  futures_source: databento # none | databento | ibkr
+  # ThetaData Standard exposes implied_vol but not gamma (a second-order greek,
+  # Pro-only). Deriving gamma from IV with our own pricer is $80/mo cheaper and
+  # keeps the gamma at spot consistent with the gamma on the zero-gamma grid.
+  # See docs/handoff/data-requirements.md.
+  thetadata_tier: standard
+  roots: [SPX, SPXW]
+  max_dte: 60
+
+gex:
+  spot_move_pct: 0.01
+  sign_convention: dealer_long_calls_short_puts
+  # False forces the shadow pricer everywhere -- the apples-to-apples mode for
+  # zero-gamma research, and mandatory below the Pro tier anyway.
+  prefer_vendor_gamma: false
+  drop_crossed_quotes: true
+  require_open_interest: true
+
+zero_gamma:
+  grid_span_pct: 0.04
+  grid_step_pct: 0.001
+  conventions: [sticky_strike, frozen_iv, sticky_delta]
+  max_dte_for_grid: 60
+  min_points_for_smile_fit: 5
+
+walls:
+  node_min_share_of_max: 0.25
+  max_nodes_per_side: 5
+  void_max_share_of_max: 0.05
+  void_min_width_pct: 0.002
+  band_pct: 0.10
+
+confidence:
+  # Data-quality thresholds: measurable facts, defensible without a backtest.
+  min_chain_completeness_ratio: 0.90
+  max_quote_staleness_sec: 30.0
+  crossed_quote_zero_score_ratio: 0.10
+  max_vendor_lag_sec: 5.0
+  max_oi_age_sessions: 2
+  # Market claims: these need out-of-sample evidence before they mean anything.
+  max_zero_gamma_shift_pct: UNSPECIFIED_CALIBRATE
+  max_sign_model_disagreement: UNSPECIFIED_CALIBRATE
+  max_0dte_dominance_ratio: UNSPECIFIED_CALIBRATE
+
+regime:
+  positive_gex_z_min: UNSPECIFIED_CALIBRATE
+  negative_gex_z_max: UNSPECIFIED_CALIBRATE
+  min_confidence_for_trade: UNSPECIFIED_CALIBRATE
+  max_zero_gamma_shift_pct: UNSPECIFIED_CALIBRATE
+  max_pre_event_window_min: UNSPECIFIED_CALIBRATE
+  min_reward_to_risk: UNSPECIFIED_CALIBRATE
+
+strategy:
+  positive_gex_mean_reversion:
+    enabled: false
+    min_confidence: UNSPECIFIED_CALIBRATE
+    stop_atr_multiple: UNSPECIFIED_CALIBRATE
+    time_stop_bars: UNSPECIFIED_CALIBRATE
+  negative_gex_momentum:
+    enabled: false
+    min_confidence: UNSPECIFIED_CALIBRATE
+    min_breakout_volume_z: UNSPECIFIED_CALIBRATE
+    trailing_stop_atr_multiple: UNSPECIFIED_CALIBRATE
+
+risk:
+  trading_enabled: false
+  instrument: MES
+  point_value: 5.0 # MES: $5/point. ES is $50/point.
+  max_contracts: 1
+  max_open_positions: 1
+  allow_averaging_down: false
+  allow_martingale: false
+  daily_loss_cap_usd: UNSPECIFIED_CALIBRATE
+  weekly_drawdown_cap_usd: UNSPECIFIED_CALIBRATE
+  max_consecutive_losses: UNSPECIFIED_CALIBRATE
+  max_entries_per_day: UNSPECIFIED_CALIBRATE
+  flatten_before_session_end: true
+  overnight_allowed: false
+  kill_switch: false
+
+execution:
+  broker: ibkr_live # none | ibkr_paper | ibkr_live
+  order_type: bracket

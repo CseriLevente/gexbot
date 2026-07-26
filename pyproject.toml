@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gex-futures-bot"
+version = "0.1.0"
+description = "GEX-based regime engine for automated MES/ES futures trading"
+requires-python = ">=3.12"
+# The GEX engine core is intentionally dependency-free: pure stdlib maths, so it
+# runs and is testable anywhere. Service-layer dependencies (FastAPI, Postgres,
+# vendor SDKs) belong in requirements.txt, not here, so that importing
+# src.gex.* can never pull in a web framework.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: zero-gamma grid sweeps and full-chain runs",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"

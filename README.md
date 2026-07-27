@@ -30,40 +30,66 @@ outside the standard library, so the maths is verifiable on a bare interpreter.
 
 ## Status
 
-Precise language throughout: *implemented*, *tested synthetically*, *tested with
-fixtures*, *validated with live vendor data*, *planned*, *not implemented*.
+Every row below carries one of six explicit labels. They mean exactly what they
+say and nothing more:
+
+| Label | Meaning |
+|---|---|
+| `IMPLEMENTED` | The code exists and runs. |
+| `TESTED_SYNTHETICALLY` | Verified against generated inputs and closed-form identities. |
+| `TESTED_WITH_OFFLINE_FIXTURES` | Verified against recorded vendor-shaped payloads. No network. |
+| `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` | Never run against a real subscription. |
+| `PLANNED` | Designed, not built. |
+| `NOT_IMPLEMENTED` | Absent. Some of these are absent on purpose. |
+
+**No component in this repository has ever been validated against live vendor
+data.** Every integration row is `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA`.
 
 | Component | Status |
 |---|---|
-| Black-Scholes shadow pricer | implemented; tested synthetically against closed-form identities |
-| US Eastern clock, SPX/SPXW settlement | implemented; tested synthetically |
-| Trading calendar (holidays, early closes, session ageing) | implemented; tested synthetically |
-| Record validation (finiteness, structure, time) | implemented; tested synthetically |
-| Per-record timestamp preservation | implemented; tested with fixtures |
-| View 1 — unsigned gamma concentration | implemented; tested synthetically |
-| View 2 — naive signed GEX | implemented; tested synthetically |
-| View 3 — expiry buckets | implemented; tested synthetically |
-| View 4 — strike level, walls, classified voids | implemented; tested synthetically |
-| View 5 — zero-gamma grid, 3 of 5 IV conventions | implemented; tested synthetically |
-| Option-universe accounting | implemented; tested synthetically |
-| Confidence model (17 components) | implemented; tested synthetically |
-| Typed config with schema validation | implemented; tested synthetically |
-| ThetaData parsing, join, tier map | implemented; **tested with fixtures only** |
-| HTTP transport, retries, raw-response store | implemented; tested with a deterministic fake |
-| Real network transport (`HttpxTransport`) | implemented; **never executed** |
-| Local gamma vs vendor gamma | **not validated** |
-| `STICKY_DELTA`, `SURFACE_REFIT` conventions | **not implemented** (refuse explicitly) |
-| Feature store, regime classifier, strategies | **not implemented** |
-| Risk engine, broker adapter, order placement | **not implemented, and out of scope** |
-| Futures data (Databento), Cboe Open-Close | **not implemented** |
+| Black-Scholes shadow pricer | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` against closed-form identities |
+| Effective-model resolver (single source of pricing inputs) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| US Eastern clock, SPX/SPXW settlement | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Trading calendar (holidays, early closes, session ageing) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Record validation (finiteness, structure, time) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Per-record timestamp preservation, DST boundary handling | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| View 1 — unsigned gamma concentration | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| View 2 — naive signed GEX | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| View 3 — expiry buckets | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| View 4 — strike level, walls, classified voids, local strike ladder | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| View 5 — zero-gamma grid, 3 of 5 IV conventions | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Option-universe accounting, SPX/SPXW separation | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Confidence model | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; thresholds `NOT_IMPLEMENTED` (uncalibrated by design) |
+| Typed config, ThetaData config section, single client factory | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| ThetaData parsing, join, tier map | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` · `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| HTTP transport, retries, `Retry-After`, size caps | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` (deterministic fake) |
+| Raw-response store (atomic, collision-safe) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Real network transport (`HttpxTransport`) | `IMPLEMENTED` · **never executed** · `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED` — no contract-list endpoint is wired (OD-11) |
+| Local gamma vs vendor gamma | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Whether ThetaData Standard tier suffices | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Zero-gamma stability across real intraday sequences | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| `STICKY_DELTA`, `SURFACE_REFIT` conventions | `NOT_IMPLEMENTED` (refuse explicitly rather than approximate) |
+| `CALENDAR_MIDNIGHT` expiration rule | `NOT_IMPLEMENTED` — declared but rejected; no index option settles at midnight |
+| Feature store, regime classifier, strategies | `NOT_IMPLEMENTED` |
+| Risk engine, broker adapter, order placement, paper trading | `NOT_IMPLEMENTED`, and out of scope |
+| Futures data (Databento), IBKR, Cboe Open-Close | `NOT_IMPLEMENTED` |
 
 ### What is deliberately absent
+
+**This repository cannot trade.** There is no broker adapter, no order type, no
+position sizing, and no execution path — live or paper.
+`tests/unit/test_architecture.py` fails the build if one appears, and CI runs it
+as its own visible check.
 
 There is no risk engine. Earlier documentation claimed `ConfidenceScore.calibrated`
 was "enforced by the risk engine" and that live trading was "blocked" — that was
 wrong, and is corrected in [`docs/CHANGELOG.md`](docs/CHANGELOG.md). Nothing is
 blocked because nothing can trade. `calibrated` is a research signal that market
 thresholds are still unresearched.
+
+No claim is made anywhere in this repository that a strategy is profitable,
+because no strategy exists to make a claim about.
 
 ---
 
@@ -77,7 +103,8 @@ thresholds are still unresearched.
 | [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) | Every output field and what it does *not* mean. |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Record validation rules and test strategy. |
 | [`docs/THETADATA_INTEGRATION.md`](docs/THETADATA_INTEGRATION.md) | Wiring up a real subscription, and what to check first. |
-| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | What changed in v2, including corrected claims. |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | What changed in v2.1, including corrected claims. |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Bootstrap, verification, and how the release archive is produced. |
 | [`docs/handoff/data-requirements.md`](docs/handoff/data-requirements.md) | Vendor endpoints, tiers, prices. |
 
 ---

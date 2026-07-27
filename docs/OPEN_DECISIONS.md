@@ -190,6 +190,137 @@ such change is meaningful for a GEX total measured in billions.
 
 ---
 
+## 11. Chain completeness has no independent source — **PARTIALLY OBSERVED**
+
+**The question.** How do we know a vendor response was not silently truncated?
+
+**What v2 did.** `expected_contract_count = len(quote_rows)` — the length of the
+response being judged. Every response was therefore 100% complete by
+construction, including a truncated one.
+
+**Current behaviour.** `ChainCompleteness` requires the expectation to come from
+somewhere else and records where (`expected_source`). No ThetaData contract-list
+endpoint is wired in this release, so with no caller-supplied universe the
+status is reported as `PARTIALLY_OBSERVED` — never `COMPLETE`.
+
+**Why not resolved.** ThetaData v3 exposes no contract-list endpoint that this
+repository has verified. Inventing a URL and shipping it as though it were
+confirmed would be worse than reporting the limitation.
+
+**What would settle it.** A live account, one call to whatever list endpoint the
+subscription actually exposes, and its response shape recorded as a fixture.
+Then pass those identities as `expected_contract_ids` with
+`expected_source="contract_list"` and completeness becomes measurable.
+
+---
+
+## 12. Retry-After cap — **RESOLVED BY POLICY**
+
+**The question.** A vendor `Retry-After: 99999` asks this process to block for
+27 hours. Honour it?
+
+**Current behaviour.** Honoured up to `RetryPolicy.max_retry_after_seconds`
+(default 120 s), then capped. Beyond the cap the request fails rather than
+sleeping.
+
+**Why this is a decision.** Honouring the header exactly is the polite reading of
+the spec, but it lets a remote server decide how long local code blocks. The cap
+is a local availability choice, not a vendor-compatibility claim.
+
+**What would settle it.** ThetaData's documented rate-limit semantics, and
+whether a long `Retry-After` there means "wait" or "you are cut off".
+
+---
+
+## 13. Duplicate rows — **SAFEST BEHAVIOUR CHOSEN, configurable**
+
+**The question.** Two rows claim the same contract with different values. Which
+one is true?
+
+**Current behaviour.** `duplicate_policy: "reject"` — the chain fails. The
+alternatives (`first`, `last`) exist and are configurable, but the default
+refuses to guess, because taking either silently produces a chain whose numbers
+depend on response ordering.
+
+**What would settle it.** Whether ThetaData's snapshot endpoints can legitimately
+emit duplicates at all (e.g. multi-exchange rows), and if so what distinguishes
+them. If they can, the right fix is a documented tie-break on that field, not a
+positional one.
+
+---
+
+## 14. Local strike spacing window — **HEURISTIC, uncalibrated**
+
+**The question.** SPX ladders are 5-wide near the money and 25-wide in the
+wings. A single global spacing misreports gaps at every strike outside the
+region it was fitted to.
+
+**Current behaviour.** `StrikeLadder` infers spacing piecewise from a rolling
+local median over `LOCAL_WINDOW = 4` neighbours.
+
+**Why this is a decision.** 4 is a smoothing choice. Too small and one missing
+strike redefines the local spacing; too large and the estimate smears across a
+genuine regime change in the ladder.
+
+**What would settle it.** Real SPX/SPXW chains across several expiries, checking
+where the inferred spacing disagrees with the exchange's published increments.
+
+---
+
+## 15. Root topology matching tolerance — **HEURISTIC, uncalibrated**
+
+**The question.** Two consecutive snapshots produce zero-gamma roots at 5050.0
+and 5050.5. Is that the same root that drifted, or a different root?
+
+**Current behaviour.** `match_roots()` pairs roots across snapshots by proximity
+and `score_root_identity_stability` penalises matched drift mildly and
+appearance/disappearance heavily.
+
+**Why not resolved.** The distinction is only knowable from the underlying
+surface, not from the root list. The current pairing is a nearest-neighbour
+heuristic that is stable on synthetic data.
+
+**What would settle it.** Intraday sequences of real chains, where a root that
+genuinely persists can be followed by eye.
+
+---
+
+## 16. `CALENDAR_MIDNIGHT` expiration rule — **REJECTED, not implemented**
+
+**The question.** v2 offered a `CALENDAR_MIDNIGHT` expiration rule.
+
+**Current behaviour.** The rule is declared but `is_supported` is `False` and
+resolution refuses it with `ExpirationTimestampRule.unsupported_reason`.
+
+**Why.** No listed index option expires at midnight. Offering it as a selectable
+rule implied a settlement convention that does not exist, and any operator who
+chose it would have got silently wrong time-to-expiry for every contract.
+
+**What would settle it.** Nothing — the rule is wrong rather than unverified. It
+remains declared only so that an existing config naming it fails loudly rather
+than being ignored.
+
+---
+
+## 17. Ambiguous local times during the DST fall-back — **EXPLICIT, fold-aware**
+
+**The question.** A vendor wall-clock timestamp of `01:30` on the fall-back
+Sunday occurs twice. Which one?
+
+**Current behaviour.** `parse_vendor_timestamp(..., fold=...)` makes the choice
+explicit and records it; `strict_dst=True` refuses the ambiguity outright rather
+than silently resolving to the first occurrence.
+
+**Why this matters even though markets are shut at 01:30.** History endpoints
+and any future overnight session would hit it, and a silent default here is
+exactly the class of bug that only manifests twice a year.
+
+**What would settle it.** Confirmation of whether ThetaData emits UTC internally
+and formats to Eastern (in which case the ambiguity is theirs to resolve and
+they may expose the offset), or stores wall-clock.
+
+---
+
 ## Deferred, with reasons
 
 | Item | Why deferred | Revisit when |

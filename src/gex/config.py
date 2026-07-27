@@ -291,6 +291,10 @@ class ConfidenceConfig:
     ambiguous_root_spacing_pct: float = 0.50
     # Normalised slope at or above which a crossing counts as steep and stable.
     steep_slope_threshold: float = 0.20
+    # Two roots within this % of spot are treated as one level moving,
+    # rather than one disappearing and another appearing. A data-quality
+    # tolerance, not a market claim.
+    root_match_tolerance_pct: float = 0.50
 
     # --- Market claims: each needs out-of-sample evidence. ---
     max_zero_gamma_shift_pct: Calibratable = UNSPECIFIED_CALIBRATE
@@ -306,6 +310,7 @@ class ConfidenceConfig:
             "min_good_iv_ratio": self.min_good_iv_ratio,
             "ambiguous_root_spacing_pct": self.ambiguous_root_spacing_pct,
             "steep_slope_threshold": self.steep_slope_threshold,
+            "root_match_tolerance_pct": self.root_match_tolerance_pct,
             "max_zero_gamma_shift_pct": str(self.max_zero_gamma_shift_pct),
             "max_sign_model_disagreement": str(self.max_sign_model_disagreement),
             "max_0dte_dominance_ratio": str(self.max_0dte_dominance_ratio),

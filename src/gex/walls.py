@@ -27,13 +27,26 @@ from src.gex.config import WallConfig
 class StrikeLadder:
     """The strikes a complete chain would be expected to contain.
 
-    Inferred from the observed spacing rather than assumed, because SPX mixes
-    5-point strikes near the money with 25-point strikes further out, and a
-    hard-coded ladder would report the wide region as permanently missing.
+    Spacing is inferred **locally**, not globally. Real SPX/SPXW chains use
+    5-point strikes near the money and 25- or 50-point strikes in the wings, so a
+    single global median is wrong nearly everywhere: it declares the fine region
+    sparse (five times as many strikes as "expected") and the coarse region
+    complete, hiding genuine omissions in both.
+
+    Method: a rolling local median of the gaps around each strike. Median rather
+    than mean because it is robust to exactly the missing strikes this exists to
+    detect; local rather than global because the ladder genuinely changes.
     """
 
     observed: tuple[float, ...]
     modal_spacing: float | None
+    #: Per-strike local spacing, parallel to ``observed``.
+    local_spacings: tuple[float, ...] = ()
+
+    #: Gaps either side of a strike that contribute to its local spacing. Four is
+    #: enough to survive one or two omissions without smearing across a genuine
+    #: increment change.
+    LOCAL_WINDOW = 4
 
     @classmethod
     def from_strikes(cls, strikes: tuple[float, ...]) -> StrikeLadder:
@@ -43,14 +56,48 @@ class StrikeLadder:
         gaps = [round(b - a, 6) for a, b in itertools.pairwise(ordered) if b > a]
         if not gaps:
             return cls(observed=ordered, modal_spacing=None)
-        # Median rather than mode: robust to a handful of missing strikes, which
-        # is exactly the situation this ladder exists to detect.
-        return cls(observed=ordered, modal_spacing=median(gaps))
+
+        local: list[float] = []
+        for index in range(len(ordered)):
+            lo = max(0, index - cls.LOCAL_WINDOW)
+            hi = min(len(gaps), index + cls.LOCAL_WINDOW)
+            window = gaps[lo:hi] or gaps
+            local.append(median(window))
+        return cls(
+            observed=ordered,
+            modal_spacing=median(gaps),
+            local_spacings=tuple(local),
+        )
+
+    @classmethod
+    def by_group[K](cls, grouped: dict[K, tuple[float, ...]]) -> dict[K, StrikeLadder]:
+        """One ladder per (root, expiry) group.
+
+        Expiries genuinely differ in increment, and roots can too. Pooling them
+        produces a spacing that describes neither, and judges the finer group
+        against the coarser group's expectation.
+        """
+        return {key: cls.from_strikes(strikes) for key, strikes in grouped.items()}
+
+    def local_spacing(self, strike: float) -> float | None:
+        """Expected spacing in the neighbourhood of ``strike``."""
+        if not self.local_spacings:
+            return self.modal_spacing
+        nearest = min(
+            range(len(self.observed)), key=lambda i: abs(self.observed[i] - strike)
+        )
+        return self.local_spacings[nearest]
 
     def expected_count_between(self, low: float, high: float) -> int:
-        if self.modal_spacing is None or self.modal_spacing <= 0.0:
+        """Strikes a complete ladder would contain in ``[low, high]``.
+
+        Uses the spacing local to the midpoint, so a range inside the 5-point
+        core is measured against 5 and one in the wings against 25.
+        """
+        spacing = self.local_spacing((low + high) / 2.0)
+        if spacing is None or spacing <= 0.0:
             return 0
-        return round((high - low) / self.modal_spacing) + 1
+        return round((high - low) / spacing) + 1
 
     def observed_count_between(self, low: float, high: float) -> int:
         return sum(1 for strike in self.observed if low <= strike <= high)
@@ -108,7 +155,14 @@ def classify_void(
         )
 
     coverage = observed / expected if expected > 0 else 0.0
-    if coverage < config.min_ladder_coverage_for_true_void:
+    # ANY absent strike means absent data.
+    #
+    # Previously this triggered on a coverage ratio, which put a threshold
+    # between "some data is missing" and "this is tradable structure" -- so one
+    # omission in a five-strike window (80% coverage, exactly on the floor)
+    # could still be reported as a true void. A region we did not fully receive
+    # is not a region we can characterise, whatever the ratio.
+    if missing > 0 or coverage < config.min_ladder_coverage_for_true_void:
         # Sparse. Two very different causes look identical at first glance, so
         # they are separated by whether the wide spacing REPEATS:
         #
@@ -124,7 +178,8 @@ def classify_void(
         internal_gaps = [
             round(b.strike - a.strike, 6) for a, b in itertools.pairwise(run)
         ]
-        wide = ladder.modal_spacing * config.irregular_spacing_factor
+        local = ladder.local_spacing((low + high) / 2.0) or ladder.modal_spacing
+        wide = local * config.irregular_spacing_factor
         uniformly_wider = (
             len(internal_gaps) >= 2
             and min(internal_gaps) > wide
@@ -135,8 +190,8 @@ def classify_void(
                 GammaVoidKind.IRREGULAR_STRIKE_SPACING,
                 (
                     f"{len(internal_gaps)} consecutive gaps of "
-                    f"{internal_gaps[0]:g} against a modal "
-                    f"{ladder.modal_spacing:g} -- a coarser increment, not omissions"
+                    f"{internal_gaps[0]:g} against a local "
+                    f"{local:g} -- a coarser increment, not omissions"
                 ),
                 missing,
             )

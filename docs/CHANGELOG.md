@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.1.0 — correctness and integration hardening
+
+A narrowly-scoped pass over defects found by review of v2. Every fix was
+introduced test-first: a failing test that reproduced the defect, then the
+smallest correct change, then regression coverage. No financial assumption was
+changed silently; where one was ambiguous it went to
+[OPEN_DECISIONS.md](OPEN_DECISIONS.md).
+
+Nothing was added toward trading. The repository still cannot place an order.
+
+**Status of this release:** `IMPLEMENTED` and
+`TESTED_WITH_OFFLINE_FIXTURES`. `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` —
+no request in this repository has ever reached ThetaData.
+
+### Defects fixed
+
+| # | Defect in v2 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Model inputs were resolved independently in the pricer, the GEX aggregator, the zero-gamma solver and the comparison path | Four code paths could price the same contract differently while each looked correct in isolation | `src/domain/effective_model.py` — one resolver, consumed by all four |
+| 2 | `spec.risk_free_rate or snapshot.risk_free_rate` | `0.0` is falsy, so an explicitly configured zero rate silently borrowed the snapshot's rate; the fingerprint recorded the rate the operator asked for, not the one used | Resolution follows the source enum, never truthiness |
+| 3 | `CALENDAR_MIDNIGHT` expiration rule was selectable | No listed index option settles at midnight; choosing it produced wrong time-to-expiry for every contract | Declared but `is_supported = False`; resolution refuses it |
+| 4 | `underlying_price_source` was declared and ignored | The setting looked applied in review and never reached a calculation | Resolver honours it; unsupported values raise |
+| 5 | The `thetadata:` YAML section was validated then discarded | A setting could be present in the file and never reach a request | `src/config/thetadata.py`, typed, with `build_thetadata_client()` as the single construction path |
+| 6 | "Effective parameters" conflated requested with sent | A parameter the endpoint does not accept was reported as effective | `VendorParameterSet` splits requested / supported / sent / effective-local / unsupported |
+| 7 | Gamma comparison recomputed its own inputs | The comparison could differ from the engine it was auditing | Comparison consumes `contract.effective` |
+| 8 | Zero-gamma pooled SPX and SPXW | AM- and PM-settled contracts have different expiration instants; pooling them mixes two surfaces | `zero_gamma_eligible()` separates roots and reports what it excluded |
+| 9 | One malformed integer killed the whole chain | A single corrupt cell cost every contract in the response | `parse_int_field` records per-record `parse_issues`; one bad record costs one record |
+| 10 | Duplicate rows were resolved positionally | Chain numbers depended on response ordering | `duplicate_policy` defaults to `reject` |
+| 11 | Naive datetimes flowed into the maths | A missing timezone silently became a 4–5 hour error in time-to-expiry | `to_eastern()` raises `NaiveTimestampError` |
+| 12 | The DST fall-back hour resolved silently | `01:30` occurs twice; the parser picked one without saying so | `parse_vendor_timestamp(fold=...)`, `strict_dst` refuses ambiguity |
+| 13 | Snapshot hashing included prose and warnings | Reworded text moved the hash; changed numbers sometimes did not | `hash_payload()` hashes scores and structure, not narration |
+| 14 | Root identity was compared by index | Two roots reordering read as two roots changing | `match_roots()` / `compare_root_topology()` |
+| 15 | Strike spacing was one global number | SPX is 5-wide near the money and 25-wide in the wings, so gaps were misreported everywhere else | `StrikeLadder` infers spacing from a rolling local median |
+| 16 | Callers hand-assembled `ThetaDataClient` | Config drift between call sites | Single factory |
+| 17 | `Retry-After` was ignored | The client hammered a server that had told it to wait | Parsed (delta-seconds and HTTP-date), honoured, capped at 120 s |
+| 18 | Response size was checked after reading | An oversized payload was fully materialised before rejection | `HttpxTransport` aborts mid-stream |
+| 19 | Raw-capture ids were `session-endpoint` | The second request to an endpoint in one session collided, and the store is append-only, so it raised | `build_record_id()` includes sequence and parameter hash; writes are atomic via `mkstemp`/`fsync`/`os.replace` |
+| 20 | `expected_contract_count = len(quote_rows)` | Completeness was measured against the response being measured, so a truncated chain scored 100% | `ChainCompleteness` requires an independent expectation and reports `PARTIALLY_OBSERVED` without one |
+| 21 | Coverage score saturated at its own floor | A grid that skipped a material contract reported 100% coverage | `0.0 if share < floor else share` |
+| 22 | Future-dated open interest aged through the session logic | An impossible timestamp was treated as merely stale | Hard failure before ageing; `latest_open_interest_as_of` added because the chain-level value is the *oldest* |
+| 23 | Voids were classified from coverage alone | Exactly-at-threshold coverage with a missing strike read as a true void | Triggers on `missing > 0 or coverage < threshold` |
+| 24 | Build tooling was unbounded above | A future setuptools release could change the artefact without a commit here | `setuptools>=68,<86` |
+
+### Added
+
+- `docs/RELEASE.md` — the release procedure of record, with Windows and Unix
+  commands and the clean-tree requirement.
+- `tests/unit/test_release_integrity.py` — the build is pinned, the archive is
+  reproducible and credential-free, and the engine computes a snapshot on a
+  bare interpreter (`-S -E`, no site-packages) that agrees with the installed
+  run.
+- CI jobs: `bare-interpreter` (installs nothing), `reproducible-build` (two
+  archives of one commit must be byte-identical), alongside the existing
+  `no-trading-guarantee`.
+
+### Frozen values re-derived
+
+Two frozen regression values changed. Each was re-derived only after every
+other numerical assertion in the suite was confirmed unchanged, and each is
+documented in place in `tests/regression/test_frozen_reference_case.py` with
+the reason and whether the change was representational or behavioural.
+
+### Not added, deliberately
+
+Databento, IBKR, order placement, broker adapters, strategies, position sizing,
+live or paper execution, regime thresholds, and calibrated constants. See
+[MODEL_ASSUMPTIONS.md](MODEL_ASSUMPTIONS.md).
+
+---
+
 ## 0.2.0 — corrective engineering pass
 
 A hardening pass over the mathematical engine, ThetaData adapter, timestamp

@@ -1,10 +1,13 @@
 [build-system]
-requires = ["setuptools>=68"]
+# Bounded at both ends on purpose. An unbounded ``setuptools>=68`` lets a future
+# backend release change the produced artefact without a commit in this
+# repository, which would make the release archive unreproducible.
+requires = ["setuptools>=68,<86"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gex-futures-bot"
-version = "0.2.0"
+version = "2.1.0"
 description = "GEX research engine for SPX/SPXW option chains (research only; cannot trade)"
 requires-python = ">=3.12,<3.14"
 

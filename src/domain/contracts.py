@@ -99,6 +99,12 @@ class OptionQuote:
     # expirations in one chain pull, and that disagreement is measurable only if
     # it is preserved.
     underlying_price: float | None = None
+    #: Machine-readable parse problems the adapter hit on THIS record, as
+    #: ``("field", "issue_code")`` pairs. Populated instead of silently returning
+    #: ``None``: corruption and absence are different facts, and validation turns
+    #: these into a rejection with the right code rather than the record simply
+    #: looking empty.
+    parse_issues: tuple[tuple[str, str], ...] = ()
 
     @property
     def effective_iv(self) -> float | None:
@@ -168,6 +174,19 @@ class SnapshotClocks:
     response_received_at: datetime | None = None
     normalized_at: datetime | None = None
 
+    def __post_init__(self) -> None:
+        # Domain boundary: no naive clocks. Only the vendor adapter may localise,
+        # and it records the assumption it applied.
+        for name in ("request_started_at", "response_received_at", "normalized_at"):
+            value = getattr(self, name)
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError(
+                    f"SnapshotClocks.{name} must be timezone-aware; got a naive "
+                    f"datetime {value.isoformat()}"
+                )
+
     def as_dict(self) -> dict[str, str | None]:
         return {
             "request_started_at": (
@@ -199,10 +218,12 @@ class ChainSnapshot:
     as_of: datetime
     spot: float
     quotes: tuple[OptionQuote, ...]
-    # Continuously-compounded risk-free rate and dividend yield used by the
-    # shadow pricer. SPX carries a material dividend yield, so q != 0.
-    risk_free_rate: float = 0.0
-    dividend_yield: float = 0.0
+    # Continuously-compounded risk-free rate and dividend yield the vendor or
+    # adapter supplied. `None` means "not supplied", which is distinct from 0.0;
+    # only RateSource.SNAPSHOT / DividendSource.SNAPSHOT read them, and they
+    # report absence rather than defaulting.
+    risk_free_rate: float | None = 0.0
+    dividend_yield: float | None = 0.0
     clocks: SnapshotClocks = field(default_factory=SnapshotClocks)
     # Timestamp attached to the spot print itself, distinct from ``as_of``.
     spot_timestamp: datetime | None = None
@@ -229,6 +250,14 @@ class ChainSnapshot:
                 "ChainSnapshot.as_of must be timezone-aware; a naive instant "
                 "cannot be compared against vendor timestamps"
             )
+        if self.spot_timestamp is not None and (
+            self.spot_timestamp.tzinfo is None
+            or self.spot_timestamp.utcoffset() is None
+        ):
+            raise ValueError(
+                "ChainSnapshot.spot_timestamp must be timezone-aware; a naive "
+                "spot clock cannot be compared against the quote clocks"
+            )
 
     @property
     def expiries(self) -> tuple[date, ...]:
@@ -254,12 +283,32 @@ class ChainSnapshot:
 
     @property
     def open_interest_as_of(self) -> date | None:
-        present = [
+        """OLDEST open-interest date in the chain.
+
+        Oldest, so a partially-refreshed OI table reports as stale -- the safe
+        direction for a staleness measure.
+        """
+        present = self._open_interest_dates()
+        return min(present) if present else None
+
+    @property
+    def latest_open_interest_as_of(self) -> date | None:
+        """NEWEST open-interest date in the chain.
+
+        Needed separately because the two questions want opposite extremes: "how
+        stale is this?" wants the oldest, while "is any of this impossible?"
+        wants the newest. Using the oldest for both would let a single
+        future-dated record hide behind its well-behaved neighbours.
+        """
+        present = self._open_interest_dates()
+        return max(present) if present else None
+
+    def _open_interest_dates(self) -> list[date]:
+        return [
             q.timestamps.open_interest_as_of
             for q in self.quotes
             if q.timestamps.open_interest_as_of is not None
         ]
-        return min(present) if present else None
 
     def filter(
         self,

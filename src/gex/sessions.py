@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, tzinfo
 
 from src.domain.contracts import OptionRoot
+from src.domain.model_spec import ExpirationTimestampRule
 
 _EST = timedelta(hours=-5)
 _EDT = timedelta(hours=-4)
@@ -112,16 +113,47 @@ def eastern(
     return datetime(year, month, day, hour, minute, second, tzinfo=EASTERN)
 
 
-def to_eastern(dt: datetime) -> datetime:
-    """Convert to US Eastern. Naive input is *assumed* to already be Eastern.
+class NaiveTimestampError(ValueError):
+    """A naive datetime reached a layer that is not allowed to guess a zone."""
 
-    Assuming rather than guessing is deliberate: every timestamp entering the
-    engine is stamped by an adapter, and adapters are required to attach tzinfo.
-    A naive datetime reaching here means the snapshot was hand-built (tests,
-    fixtures), where Eastern is the useful default.
+
+def require_aware(dt: datetime | None, *, field: str) -> datetime | None:
+    """Assert a timestamp carries a timezone. ``None`` passes through.
+
+    The explicit guard for domain boundaries. Absence is a legitimate state that
+    the validation layer scores; a *naive* value is not, because accepting it
+    means silently choosing a zone.
     """
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=EASTERN)
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise NaiveTimestampError(
+            f"{field}: naive datetime {dt.isoformat()} is not accepted here. "
+            "Vendor timestamps may be localised only by the adapter, which "
+            "records the assumption it applied; see docs/VALIDATION.md."
+        )
+    return dt
+
+
+def to_eastern(dt: datetime) -> datetime:
+    """Convert an aware datetime to US Eastern.
+
+    **Refuses naive input.** Until v2.1 this silently reinterpreted a naive
+    datetime as Eastern, which is a guess of up to five hours made in a
+    general-purpose utility called from the engine, the confidence model and the
+    calendar. A guess made here leaves no record that any assumption was applied
+    and is indistinguishable from a real conversion.
+
+    Localisation now happens at exactly one place -- the vendor parser in
+    ``src/adapters/thetadata/client.py`` -- which records the assumption in
+    snapshot metadata.
+    """
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise NaiveTimestampError(
+            f"to_eastern received a naive datetime ({dt.isoformat()}). Only the "
+            "vendor adapter may localise, and it records the assumption; "
+            "everything downstream must already be timezone-aware."
+        )
     return dt.astimezone(EASTERN)
 
 
@@ -159,6 +191,51 @@ def seconds_to_expiry(
         root, expiry, honour_early_close=honour_early_close
     )
     return (settlement - to_eastern(as_of)).total_seconds()
+
+
+def expiration_timestamp(
+    *,
+    root: OptionRoot,
+    expiry: date,
+    rule: ExpirationTimestampRule,
+) -> datetime:
+    """Resolve the effective expiration instant under a stated rule.
+
+    Every supported rule produces a genuinely different timestamp -- and hence a
+    different time-to-expiry and a different gamma. Before v2.1 two of these
+    rules changed only metadata, which let a fingerprint move while every number
+    stayed identical. A rule that does not affect the calculation is worse than
+    no rule, because it makes the audit trail claim a distinction that the maths
+    never made.
+
+    ``CALENDAR_MIDNIGHT`` raises. Options do not expire at midnight, and the name
+    never disclosed whether it meant the start or the end of the expiration date.
+    Config validation rejects it too, so this is a defence in depth rather than
+    the only guard.
+    """
+    if rule is ExpirationTimestampRule.ROOT_SPECIFIC_SETTLEMENT:
+        return settlement_datetime(root, expiry, honour_early_close=False)
+
+    if rule is ExpirationTimestampRule.ROOT_SPECIFIC_SETTLEMENT_WITH_EARLY_CLOSE:
+        return settlement_datetime(root, expiry, honour_early_close=True)
+
+    if rule is ExpirationTimestampRule.FIXED_1600_ET:
+        # Deliberately ignores the root: this rule exists to quantify what the
+        # AM/PM distinction is worth, so applying AM settlement here would defeat
+        # its only purpose. Early closes are also ignored, for the same reason.
+        # A weekend or holiday expiry date is left as given -- the rule describes
+        # a clock, not a calendar, and silently moving the date would be a bigger
+        # assumption than the one being measured.
+        return eastern(expiry.year, expiry.month, expiry.day, *RTH_CLOSE)
+
+    raise ValueError(
+        f"expiration rule {rule.value} is not supported: {rule.unsupported_reason}"
+    )
+
+
+def seconds_to_expiry_at(as_of: datetime, expiration: datetime) -> float:
+    """Seconds between an instant and an already-resolved expiration timestamp."""
+    return (to_eastern(expiration) - to_eastern(as_of)).total_seconds()
 
 
 def calendar_dte(as_of: datetime, expiry: date) -> int:

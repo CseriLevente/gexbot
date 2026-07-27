@@ -62,6 +62,7 @@ class ValidationCode(str, Enum):
     GAMMA_OUT_OF_RANGE = "gamma_out_of_range"
     EXTREME_IV_SPREAD = "extreme_iv_spread"
     NO_GAMMA_SOURCE = "no_gamma_source"
+    MALFORMED_INTEGER = "malformed_integer"
     MISSING_OPEN_INTEREST = "missing_open_interest"
 
     # Structure
@@ -79,6 +80,7 @@ class ValidationCode(str, Enum):
     TIMESTAMP_SKEW = "timestamp_skew"
     MISSING_TIMESTAMP = "missing_timestamp"
     STALE_OPEN_INTEREST = "stale_open_interest"
+    FUTURE_OPEN_INTEREST = "future_open_interest"
 
 
 @dataclass(frozen=True, slots=True)

@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, NoReturn
 
+from src.config.thetadata import (
+    ThetaDataConfig,
+    ThetaDataConfigError,
+    parse_thetadata_config,
+)
 from src.domain.gex import IVConvention, SignConvention
 from src.domain.iv import IVSource
 from src.domain.model_spec import (
@@ -106,6 +111,9 @@ class LoadedConfig:
     profile: ProfileMetadata
     fingerprint: str
     source_path: str
+    #: Typed vendor settings. Present on every load, so no caller has to
+    #: reach into ``raw`` and hand-assemble a client.
+    thetadata: ThetaDataConfig = field(default_factory=ThetaDataConfig)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -283,8 +291,50 @@ def _parse_model(raw: dict[str, Any], path: str) -> ModelSpec:
         "iv_price_source",
         "risk_free_rate",
         "dividend_yield",
+        "configured_underlying_price",
     }
     _check_unknown(raw, allowed, path)
+    rule = _as_enum(
+        raw.get(
+            "expiration_timestamp_rule",
+            ExpirationTimestampRule.ROOT_SPECIFIC_SETTLEMENT.value,
+        ),
+        ExpirationTimestampRule,
+        f"{path}.expiration_timestamp_rule",
+    )
+    if not rule.is_supported:
+        # Refused rather than accepted-and-ignored. An accepted rule that never
+        # reaches the maths lets the fingerprint claim a distinction the
+        # calculation never made.
+        _fail(
+            f"{path}.expiration_timestamp_rule",
+            f"{rule.value} is not supported: {rule.unsupported_reason}",
+        )
+
+    rate_source = _as_enum(
+        raw.get("risk_free_rate_source", RateSource.CONFIGURED_CONSTANT.value),
+        RateSource,
+        f"{path}.risk_free_rate_source",
+    )
+    if not rate_source.is_available:
+        _fail(
+            f"{path}.risk_free_rate_source",
+            f"{rate_source.value} has no wired-up data source in this repository; "
+            "use configured_constant, snapshot or zero",
+        )
+
+    dividend_source = _as_enum(
+        raw.get("dividend_yield_source", DividendSource.CONFIGURED_CONSTANT.value),
+        DividendSource,
+        f"{path}.dividend_yield_source",
+    )
+    if not dividend_source.is_available:
+        _fail(
+            f"{path}.dividend_yield_source",
+            f"{dividend_source.value} has no wired-up data source in this "
+            "repository; use configured_constant, snapshot or zero",
+        )
+
     return ModelSpec(
         pricing_model=_as_enum(
             raw.get("pricing_model", PricingModel.BLACK_SCHOLES_MERTON.value),
@@ -296,24 +346,13 @@ def _parse_model(raw: dict[str, Any], path: str) -> ModelSpec:
             DayCountConvention,
             f"{path}.day_count_convention",
         ),
-        risk_free_rate_source=_as_enum(
-            raw.get("risk_free_rate_source", RateSource.CONFIGURED_CONSTANT.value),
-            RateSource,
-            f"{path}.risk_free_rate_source",
-        ),
+        risk_free_rate_source=rate_source,
         dividend_yield_source=_as_enum(
             raw.get("dividend_yield_source", DividendSource.CONFIGURED_CONSTANT.value),
             DividendSource,
             f"{path}.dividend_yield_source",
         ),
-        expiration_timestamp_rule=_as_enum(
-            raw.get(
-                "expiration_timestamp_rule",
-                ExpirationTimestampRule.ROOT_SPECIFIC_SETTLEMENT.value,
-            ),
-            ExpirationTimestampRule,
-            f"{path}.expiration_timestamp_rule",
-        ),
+        expiration_timestamp_rule=rule,
         minimum_time_to_expiry_minutes=_as_float(
             raw.get("min_time_to_expiry_minutes", 60.0),
             f"{path}.min_time_to_expiry_minutes",
@@ -708,6 +747,11 @@ def parse_config(raw: dict[str, Any], *, source_path: str = "<memory>") -> Loade
             "the profile enabled: false.",
         )
 
+    try:
+        thetadata = parse_thetadata_config(expanded.get("thetadata", {}) or {})
+    except ThetaDataConfigError as exc:
+        raise ConfigError(str(exc)) from exc
+
     fingerprint = fingerprint_of(expanded)
     return LoadedConfig(
         engine=engine.with_(config_fingerprint=fingerprint),
@@ -727,6 +771,7 @@ def parse_config(raw: dict[str, Any], *, source_path: str = "<memory>") -> Loade
         ),
         fingerprint=fingerprint,
         source_path=str(source_path),
+        thetadata=thetadata,
         raw=expanded,
     )
 

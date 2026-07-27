@@ -8,15 +8,26 @@ executed against a real Theta Terminal or a real subscription.
 
 | Capability | State |
 |---|---|
-| Endpoint map with per-endpoint tier requirements | implemented, tested with fixtures |
-| CSV parsing, schema checks, vendor error detection | implemented, tested with fixtures |
-| Multi-response join preserving every source timestamp | implemented, tested with fixtures |
-| Explicit calculation parameters, persisted in metadata | implemented, tested with fixtures |
-| Transport protocol, retries, backoff, size caps, redaction | implemented, tested with a fake |
-| Raw response store (append-only, content-addressed) | implemented, tested |
-| Real HTTP transport (`HttpxTransport`) | implemented, **never executed** |
-| Live vendor response validated | **not done** |
-| Local gamma compared against vendor gamma | **not done** |
+| Endpoint map with per-endpoint tier requirements | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| CSV parsing, schema checks, vendor error detection | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Per-record parse issues (one bad cell costs one record) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Duplicate-row policy (`reject` by default) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Multi-response join preserving every source timestamp | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| DST-boundary and fold-aware timestamp parsing | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Typed `thetadata:` config → single client factory | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Requested / supported / sent / effective parameter split | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Transport protocol, retries, `Retry-After`, size caps, redaction | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` (deterministic fake) |
+| Raw response store (append-only, atomic, collision-safe) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Real HTTP transport (`HttpxTransport`) | `IMPLEMENTED`, **never executed** |
+| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED` — no contract-list endpoint is wired (OD-11) |
+| Live vendor response validated | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Local gamma compared against vendor gamma | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Whether the Standard tier suffices in practice | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+
+Everything above marked `TESTED_WITH_OFFLINE_FIXTURES` was verified against
+recorded, vendor-*shaped* payloads that this repository wrote. They are not
+captured vendor responses. **No request in this repository has ever reached
+ThetaData.**
 
 ---
 

@@ -465,6 +465,13 @@ class GexSnapshot:
     total_open_interest: int = 0
     warnings: tuple[str, ...] = ()
     config_fingerprint: str | None = None
+    #: Canonical serialisation of the one effective model every contract was
+    #: priced with, plus its fingerprint. Present whenever at least one
+    #: contract resolved; ``None`` on an empty chain.
+    effective_model: dict[str, Any] | None = None
+    #: Cross-convention root topology: which roots survived, how far they
+    #: moved, and whether the selected root kept its identity.
+    root_topology: dict[str, Any] | None = None
     meta: dict[str, object] = field(default_factory=dict)
 
     @property
@@ -522,6 +529,7 @@ class GexSnapshot:
             "model_spec": self.model_spec.as_dict(),
             "model_fingerprint": self.model_spec.fingerprint(),
             "config_fingerprint": self.config_fingerprint,
+            "effective_model": self.effective_model,
             "total_unsigned_gex": self.total_unsigned_gex,
             "total_signed_gex": self.total_signed_gex,
             "contract_count": self.contract_count,
@@ -549,7 +557,8 @@ class GexSnapshot:
             "walls": self.walls.as_dict(),
             "zero_gamma": [z.as_dict() for z in self.zero_gamma],
             "zero_gamma_spread_pct": self.zero_gamma_spread_pct,
-            "zero_gamma_root_identity_stable": self.zero_gamma_root_identity_stable,
+            "zero_gamma_root_identity_stable": (self.zero_gamma_root_identity_stable),
+            "root_topology": self.root_topology,
             "chain_universe": self.chain_universe.as_dict(),
             "zero_gamma_universe": self.zero_gamma_universe.as_dict(),
             "validation": self.validation.as_dict(),
@@ -558,36 +567,77 @@ class GexSnapshot:
             "meta": _jsonable(self.meta),
         }
 
-    def output_hash(self, *, significant_digits: int = HASH_SIGNIFICANT_DIGITS) -> str:
-        """Digest of the numeric output, for replay determinism checks.
+    def hash_payload(self) -> dict[str, Any]:
+        """The canonical, deterministic subset of the snapshot that is hashed.
 
-        Two deliberate exclusions and one deliberate rounding:
+        Exposed as a method so a test can inspect exactly what is covered rather
+        than inferring it from hash collisions.
 
-        * ``validation.examples`` and ``warnings`` are diagnostic prose. Their
-          wording may legitimately improve without any number changing, and a
-          hash that trips on a reworded warning is a hash nobody trusts.
-        * Floats are quantised to ``significant_digits`` (12) before hashing.
-          Full float repr would make the digest sensitive to last-bit summation
-          differences between platforms and libm versions, so "the same data
-          produces the same hash" would hold on one machine and fail on another.
-          Twelve significant figures is far tighter than any change of substance
-          -- a real difference in a GEX total moves several orders of magnitude
-          more than that.
+        **Included** -- every deterministic numeric and state field: totals,
+        buckets, strikes, walls, zero-gamma diagnostics, both universes, the
+        validation counters, the model and config fingerprints, root topology,
+        and the full confidence component structure (name, score, weight,
+        hard_failure, uncalibrated).
+
+        **Excluded** -- free-form human prose only: component ``detail`` strings,
+        snapshot ``warnings``, and the bounded ``validation.examples`` sample.
+        Their wording may legitimately improve without a single number changing,
+        and a hash that trips on a reworded message is a hash nobody trusts. Every
+        machine-readable *code* those messages describe is present elsewhere in
+        the payload.
+
+        v2 excluded the confidence components entirely, so a component score,
+        weight or flag could change while the replay hash stood still.
         """
         payload = self.as_dict()
+
         payload["validation"] = {
             key: value
             for key, value in payload["validation"].items()
             if key != "examples"
         }
         payload.pop("warnings", None)
+
+        confidence = payload["confidence"]
         payload["confidence"] = {
-            key: value
-            for key, value in payload["confidence"].items()
-            if key != "components"
+            "score": confidence["score"],
+            "calibrated": confidence["calibrated"],
+            "hard_failures": sorted(confidence["hard_failures"]),
+            # Sorted by name: two snapshots with the same components in a
+            # different order are semantically identical and must hash the same.
+            "components": sorted(
+                (
+                    {
+                        "name": component["name"],
+                        "score": component["score"],
+                        "weight": component["weight"],
+                        "hard_failure": component["hard_failure"],
+                        "uncalibrated": component["uncalibrated"],
+                    }
+                    for component in confidence["components"]
+                ),
+                key=lambda entry: entry["name"],
+            ),
         }
+
+        for entry in payload["zero_gamma"]:
+            entry.pop("unimplemented_reason", None)
+            entry.pop("curve", None)
+        for void in payload["walls"]["gamma_voids"]:
+            void.pop("detail", None)
+        return payload
+
+    def output_hash(self, *, significant_digits: int = HASH_SIGNIFICANT_DIGITS) -> str:
+        """Digest of the deterministic output, for replay checks.
+
+        Floats are quantised to ``significant_digits`` (12) before hashing. Full
+        float repr would make the digest sensitive to last-bit summation
+        differences between platforms and libm versions, so "same data, same
+        hash" would hold on one machine and fail on another. Twelve significant
+        figures is far tighter than any change of substance.
+        """
         encoded = json.dumps(
-            _quantise(payload, significant_digits),
+            _quantise(self.hash_payload(), significant_digits),
             sort_keys=True,
             separators=(",", ":"),
             default=str,

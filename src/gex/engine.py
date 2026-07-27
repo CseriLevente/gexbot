@@ -17,7 +17,11 @@ from src.domain.model_spec import (
     FloorSensitivityEntry,
     FloorSensitivityReport,
 )
-from src.gex.confidence import ConfidenceInputs, compute_confidence
+from src.gex.confidence import (
+    ConfidenceInputs,
+    compare_root_topology,
+    compute_confidence,
+)
 from src.gex.config import GexEngineConfig
 from src.gex.formulas import (
     ContractGex,
@@ -28,6 +32,7 @@ from src.gex.formulas import (
     compute_contract_gex,
     total_signed_gex,
     total_unsigned_gex,
+    zero_gamma_eligible,
 )
 from src.gex.walls import StrikeLadder, extract_walls
 from src.gex.zero_gamma import compute_zero_gamma
@@ -54,6 +59,25 @@ def compute_gex_snapshot(
     if not contracts:
         warnings.append("no usable contracts in snapshot")
 
+    # The one effective model, taken from a resolved contract. Every contract in
+    # a snapshot shares the same model-level assumptions (only spot, strike, IV
+    # and expiry vary), so any of them serialises the same canonical record --
+    # which is exactly why the fingerprint drops the per-contract fields.
+    effective_model = (
+        {
+            **contracts[0].effective.as_dict(),
+            "effective_model_fingerprint": contracts[0].effective.fingerprint(),
+            "description": contracts[0].effective.describe(),
+        }
+        if contracts
+        else None
+    )
+    if contracts and not contracts[0].effective.is_fully_specified:
+        warnings.append(
+            "effective model is not fully specified: "
+            f"{list(contracts[0].effective.missing_inputs)}"
+        )
+
     unsigned = total_unsigned_gex(contracts)
     signed = total_signed_gex(contracts)
     buckets = aggregate_by_bucket(contracts)
@@ -73,36 +97,50 @@ def compute_gex_snapshot(
         max_dte_used=cfg.max_dte,
         extra_filter_reasons=result.exclusion_counts(),
     )
-    grid_contracts = tuple(
-        c for c in contracts if c.dte <= cfg.zero_gamma.max_dte_for_grid
+    # Eligibility, not just a DTE filter: a contract carried on vendor gamma
+    # with no IV contributes to current GEX but cannot be repriced on the grid.
+    grid_contracts, exclusion_reasons = zero_gamma_eligible(
+        contracts, max_dte=cfg.zero_gamma.max_dte_for_grid
     )
     zero_gamma_universe = build_universe(
         included=grid_contracts,
         all_contracts=contracts,
         max_dte_used=cfg.zero_gamma.max_dte_for_grid,
+        extra_filter_reasons=exclusion_reasons,
     )
     excluded_share = zero_gamma_universe.excluded_unsigned_gex_share
     if excluded_share is not None and excluded_share > 0.0:
         warnings.append(
             f"zero-gamma grid excludes {excluded_share:.1%} of chain unsigned GEX "
-            f"(contracts beyond {cfg.zero_gamma.max_dte_for_grid} DTE); chain "
-            "totals and the zero-gamma level describe different universes"
+            f"({zero_gamma_universe.excluded_contract_count} contracts; reasons "
+            f"{exclusion_reasons}); chain totals and the zero-gamma level "
+            "describe different universes"
         )
 
     # --- View 5 --------------------------------------------------------------
     zero_gamma_results = tuple(
         compute_zero_gamma(
-            contracts,
+            grid_contracts,
             spot=snapshot.spot,
             convention=convention,
             spot_move_pct=cfg.spot_move_pct,
             config=cfg.zero_gamma,
-            risk_free_rate=cfg.model_spec.risk_free_rate or snapshot.risk_free_rate,
-            dividend_yield=cfg.model_spec.dividend_yield or snapshot.dividend_yield,
         )
         for convention in cfg.zero_gamma.conventions
     )
     warnings.extend(_zero_gamma_warnings(zero_gamma_results))
+    root_topology = compare_root_topology(
+        zero_gamma_results,
+        spot=snapshot.spot,
+        tolerance_pct=cfg.confidence.root_match_tolerance_pct,
+    )
+    if root_topology["comparable"] and not root_topology["root_topology_stable"]:
+        warnings.append(
+            "zero-gamma root topology is unstable across IV conventions: "
+            f"{root_topology['unmatched_root_count']} unmatched root(s), "
+            f"worst matched shift "
+            f"{root_topology['maximum_matched_root_shift_pct']:.4f}% of spot"
+        )
 
     if result.exclusions:
         warnings.append(f"contract exclusions: {result.exclusion_counts()}")
@@ -139,6 +177,7 @@ def compute_gex_snapshot(
             options_feed_timestamp=snapshot.options_feed_timestamp,
             spot_feed_timestamp=snapshot.spot_timestamp,
             open_interest_as_of=snapshot.open_interest_as_of,
+            latest_open_interest_as_of=snapshot.latest_open_interest_as_of,
             naive_signed_gex=signed,
             flow_adjusted_signed_gex=flow_adjusted_signed_gex,
         ),
@@ -165,7 +204,13 @@ def compute_gex_snapshot(
         contract_count=len(contracts),
         total_open_interest=sum(c.open_interest for c in contracts),
         warnings=tuple(warnings),
-        config_fingerprint=cfg.config_fingerprint or cfg.fingerprint(),
+        effective_model=effective_model,
+        root_topology=root_topology,
+        config_fingerprint=(
+            cfg.config_fingerprint
+            if cfg.config_fingerprint is not None
+            else cfg.fingerprint()
+        ),
         meta={
             "spot_move_pct": cfg.spot_move_pct,
             "prefer_vendor_gamma": cfg.prefer_vendor_gamma,

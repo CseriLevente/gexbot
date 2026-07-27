@@ -27,6 +27,8 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -43,13 +45,34 @@ class TransportError(RuntimeError):
 
 
 class VendorHTTPError(RuntimeError):
-    """Non-2xx response that will not be retried."""
+    """Non-2xx response.
 
-    def __init__(self, status_code: int, url: str, body_excerpt: str) -> None:
+    Carries the safe response metadata a caller needs to decide what to do --
+    including ``retry_after``, which v2 documented but never retained.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        url: str,
+        body_excerpt: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        request_id: str = "",
+        vendor_error_code: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        # The URL is redacted before it reaches the message: an exception string
+        # ends up in logs and tracebacks, and a credential in a query parameter
+        # would travel with it.
         super().__init__(f"HTTP {status_code} from {_redact(url)}: {body_excerpt}")
         self.status_code = status_code
         self.url = url
         self.body_excerpt = body_excerpt
+        self.headers = dict(headers or {})
+        self.request_id = request_id
+        self.vendor_error_code = vendor_error_code
+        self.retry_after = retry_after
 
 
 class ResponseTooLargeError(RuntimeError):
@@ -93,6 +116,21 @@ class HttpResponse:
     request_id: str = ""
     elapsed_seconds: float = 0.0
     attempts: int = 1
+    #: Vendor error code parsed from the body, when the vendor supplies one.
+    vendor_error_code: str | None = None
+
+    @property
+    def retry_after_seconds(self) -> float | None:
+        """The vendor's own instruction, when it sent one.
+
+        v2 documented Retry-After support without retaining headers, so the
+        claim was unbacked. Headers are now carried on the response and the
+        header is genuinely honoured.
+        """
+        for key, value in self.headers.items():
+            if key.lower() == "retry-after":
+                return parse_retry_after(value)
+        return None
 
     @property
     def ok(self) -> bool:
@@ -101,6 +139,39 @@ class HttpResponse:
     @property
     def byte_length(self) -> int:
         return len(self.text.encode("utf-8"))
+
+
+def parse_retry_after(
+    value: str | None, *, now: datetime | None = None
+) -> float | None:
+    """Parse a ``Retry-After`` header. ``None`` when absent or unusable.
+
+    Both documented forms are supported: delta-seconds (``"120"``) and an
+    HTTP-date (``"Wed, 21 Oct 2026 07:28:00 GMT"``). An unparseable or negative
+    value returns ``None`` so the caller falls back to its own backoff rather
+    than trusting a malformed header.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        pass
+    else:
+        return seconds if seconds >= 0.0 else None
+
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    reference = now or datetime.now(UTC)
+    delta = (parsed - reference).total_seconds()
+    return max(0.0, delta)
 
 
 @runtime_checkable
@@ -120,6 +191,9 @@ class RetryPolicy:
     max_retries: int = 3
     backoff_base_seconds: float = 0.25
     backoff_max_seconds: float = 8.0
+    #: Hard ceiling on an honoured Retry-After. Without it, a remote party
+    #: decides how long this process blocks.
+    max_retry_after_seconds: float = 120.0
     # Full jitter: sleep is drawn from [0, computed_backoff]. Prevents a fleet of
     # clients from retrying in lockstep after a shared outage.
     jitter: bool = True
@@ -247,6 +321,7 @@ class RetryingTransport:
     ) -> HttpResponse:
         request_id = uuid.uuid4().hex[:12]
         last_error: Exception | None = None
+        retry_after: float | None = None
 
         for attempt in range(1, self._policy.max_retries + 2):
             started = time.monotonic()
@@ -265,6 +340,9 @@ class RetryingTransport:
                 )
             else:
                 elapsed = time.monotonic() - started
+                # Belt and braces: streaming transports abort mid-read, but a
+                # non-streaming one (the fake, or a future implementation) is
+                # still checked here so an oversized payload can never be parsed.
                 if response.byte_length > self._max_response_bytes:
                     raise ResponseTooLargeError(
                         f"response of {response.byte_length} bytes exceeds the "
@@ -295,11 +373,23 @@ class RetryingTransport:
                     # A malformed request stays malformed; retrying only wastes
                     # the vendor's rate limit and delays the error.
                     raise VendorHTTPError(
-                        response.status_code, url, response.text[:500]
+                        response.status_code,
+                        url,
+                        response.text[:500],
+                        headers=response.headers,
+                        request_id=request_id,
+                        vendor_error_code=response.vendor_error_code,
                     )
                 last_error = VendorHTTPError(
-                    response.status_code, url, response.text[:500]
+                    response.status_code,
+                    url,
+                    response.text[:500],
+                    headers=response.headers,
+                    request_id=request_id,
+                    vendor_error_code=response.vendor_error_code,
+                    retry_after=response.retry_after_seconds,
                 )
+                retry_after = response.retry_after_seconds
                 logger.warning(
                     "vendor request retryable failure",
                     extra={
@@ -312,33 +402,44 @@ class RetryingTransport:
 
             if attempt > self._policy.max_retries:
                 break
-            delay = self._retry_delay(attempt, last_error)
+            delay = self._retry_delay(attempt, last_error, retry_after)
             self.sleeps.append(delay)
             self._sleep(delay)
 
         assert last_error is not None  # loop always sets it before breaking
         raise RetryBudgetExhaustedError(self._policy.max_retries + 1, last_error)
 
-    def _retry_delay(self, attempt: int, last_error: Exception | None) -> float:
-        """Honour a vendor's Retry-After when it gives one; back off otherwise."""
-        if isinstance(last_error, VendorHTTPError) and last_error.status_code == 429:
-            # Respect an explicit rate-limit instruction over our own guess, but
-            # never below the computed backoff -- the vendor's hint is a floor,
-            # not a licence to hammer.
-            return max(
-                self._policy.delay_for(attempt, random_unit=self._random_unit()),
-                self._policy.backoff_base_seconds,
+    def _retry_delay(
+        self, attempt: int, last_error: Exception | None, retry_after: float | None
+    ) -> float:
+        """Honour the vendor's Retry-After when it gives one; back off otherwise.
+
+        Capped: an unbounded wait taken from a remote header is a remote party
+        deciding how long this process blocks. Never below our own computed
+        backoff either -- the vendor's hint is a floor, not a licence to hammer.
+        """
+        computed = self._policy.delay_for(attempt, random_unit=self._random_unit())
+        if retry_after is not None:
+            return min(
+                max(retry_after, self._policy.backoff_base_seconds),
+                self._policy.max_retry_after_seconds,
             )
-        return self._policy.delay_for(attempt, random_unit=self._random_unit())
+        if isinstance(last_error, VendorHTTPError) and last_error.status_code == 429:
+            return max(computed, self._policy.backoff_base_seconds)
+        return computed
 
 
 class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
     """Real HTTP transport. Imports ``httpx`` lazily.
 
     Not covered by unit tests on purpose: covering it would mean either mocking
-    ``httpx`` internals (testing the mock, not the code) or making a network
-    call (which unit tests must never do). Its retry, redaction and size-cap
-    behaviour lives in :class:`RetryingTransport`, which *is* covered.
+    ``httpx`` internals (testing the mock, not the code) or making a network call
+    (which unit tests must never do). Its retry, redaction and size-cap behaviour
+    lives in :class:`RetryingTransport`, which *is* covered.
+
+    Response bodies are read **as a stream** and aborted the moment the running
+    byte count exceeds the cap, so an oversized payload is never fully held in
+    memory and never reaches a parser.
     """
 
     def __init__(
@@ -347,6 +448,8 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
         connect_timeout_seconds: float = 5.0,
         read_timeout_seconds: float = 30.0,
         headers: Mapping[str, str] | None = None,
+        basic_auth: tuple[str, str] | None = None,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         try:
             import httpx
@@ -355,6 +458,9 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
                 "HttpxTransport needs the 'http' extra: pip install -e '.[http]'"
             ) from exc
         self._httpx = httpx
+        self._max_response_bytes = max_response_bytes
+        # Credentials go to httpx's auth handling, never into the URL: a URL ends
+        # up in logs, tracebacks and the raw-response index.
         self._client = httpx.Client(
             timeout=httpx.Timeout(
                 connect=connect_timeout_seconds,
@@ -363,21 +469,41 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
                 pool=connect_timeout_seconds,
             ),
             headers=dict(headers or {}),
+            auth=httpx.BasicAuth(*basic_auth) if basic_auth else None,
         )
 
     def get(
         self, url: str, params: Mapping[str, Any], timeout_seconds: float
     ) -> HttpResponse:
         try:
-            raw = self._client.get(url, params=dict(params), timeout=timeout_seconds)
+            with self._client.stream(
+                "GET", url, params=dict(params), timeout=timeout_seconds
+            ) as response:
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > self._max_response_bytes:
+                        # Abort mid-stream: close the connection and refuse. The
+                        # partial body is discarded rather than parsed or stored,
+                        # because a truncated payload that looks complete is worse
+                        # than no payload.
+                        response.close()
+                        raise ResponseTooLargeError(
+                            f"response exceeded the {self._max_response_bytes}-byte "
+                            f"cap while streaming from {_redact(url)}; aborted after "
+                            f"{total} bytes"
+                        )
+                    chunks.append(chunk)
+                body = b"".join(chunks).decode(response.encoding or "utf-8")
+                return HttpResponse(
+                    status_code=response.status_code,
+                    text=body,
+                    headers=dict(response.headers),
+                    url=str(response.url),
+                )
         except self._httpx.HTTPError as exc:
             raise TransportError(f"{type(exc).__name__} for {_redact(url)}") from exc
-        return HttpResponse(
-            status_code=raw.status_code,
-            text=raw.text,
-            headers=dict(raw.headers),
-            url=str(raw.url),
-        )
 
     def close(self) -> None:
         self._client.close()

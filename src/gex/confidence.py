@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Any
 
 from src.domain.contracts import OptionQuote
 from src.domain.gex import (
@@ -96,6 +97,10 @@ class ConfidenceInputs:
     options_feed_timestamp: datetime | None = None
     spot_feed_timestamp: datetime | None = None
     open_interest_as_of: date | None = None
+    #: Newest OI date in the chain. The future check uses this; the staleness
+    #: measure uses the oldest. Defaults to ``open_interest_as_of`` when the
+    #: caller supplies only one.
+    latest_open_interest_as_of: date | None = None
     # Signed GEX from the flow-adjusted model, when Cboe Open-Close data is
     # available. ``None`` disables the agreement check.
     flow_adjusted_signed_gex: float | None = None
@@ -190,6 +195,30 @@ def score_oi_freshness(
             weight=config.weights.oi_freshness,
             detail="no open_interest_as_of date supplied",
         )
+    # Ordering matters: the future check runs BEFORE session ageing.
+    #
+    # `sessions_between` returns 0 when end <= start, so a future-dated OI aged to
+    # "0 sessions old" and scored a perfect 1.0 -- the freshest possible reading
+    # for impossible data. Settlement dates get no clock-skew tolerance either:
+    # unlike a quote timestamp, tomorrow's settlement date is not drift between
+    # two machines, it is data that cannot exist.
+    reference_date = to_eastern(inputs.as_of).date()
+    newest = inputs.latest_open_interest_as_of or inputs.open_interest_as_of
+    if newest > reference_date:
+        ahead = (newest - reference_date).days
+        return ConfidenceComponent(
+            name="oi_freshness",
+            score=0.0,
+            weight=config.weights.oi_freshness,
+            detail=(
+                f"open interest is dated {newest}, "
+                f"{ahead} day(s) in the future relative to the snapshot date "
+                f"{reference_date}; settlement data cannot come from the future "
+                "-- DATA_HALT eligible"
+            ),
+            hard_failure=True,
+        )
+
     sessions = sessions_since(inputs.as_of, inputs.open_interest_as_of)
     limit = inputs.limits.max_open_interest_age_sessions
     score = (
@@ -379,7 +408,14 @@ def score_option_universe_coverage(
             detail="no gamma in the chain -- coverage undefined",
         )
     floor = config.min_universe_coverage_ratio
-    score = 1.0 if share >= floor else max(0.0, share / floor)
+    # Monotone in coverage, not a step at the floor.
+    #
+    # A flat "1.0 above the floor" meant 71% coverage scored identically to 100%
+    # -- reporting full confidence for a grid that skipped 29% of the chain's
+    # gamma. Full marks now require full coverage; below the floor the component
+    # collapses, because a grid missing a third of the book is not describing the
+    # book.
+    score = 0.0 if share < floor else share
     return ConfidenceComponent(
         name="option_universe_coverage_score",
         score=score,
@@ -387,7 +423,8 @@ def score_option_universe_coverage(
         detail=(
             f"zero-gamma grid covers {share:.1%} of chain unsigned GEX "
             f"({universe.included_contract_count}/{universe.total_contract_count} "
-            f"contracts, max_dte={universe.max_dte_used}; floor {floor:.0%})"
+            f"contracts, max_dte={universe.max_dte_used}; floor {floor:.0%}); "
+            f"exclusions={universe.filter_reasons}"
         ),
     )
 
@@ -541,32 +578,185 @@ def score_root_boundary(
     )
 
 
+# --- Cross-convention root topology -----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RootMatching:
+    """Result of pairing two conventions' root sets."""
+
+    matched_root_count: int
+    unmatched_root_count: int
+    maximum_matched_root_shift_pct: float | None
+    matched_pairs: tuple[tuple[float, float], ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "matched_root_count": self.matched_root_count,
+            "unmatched_root_count": self.unmatched_root_count,
+            "maximum_matched_root_shift_pct": self.maximum_matched_root_shift_pct,
+        }
+
+
+def match_roots(
+    left: tuple[float, ...],
+    right: tuple[float, ...],
+    *,
+    spot: float,
+    tolerance_pct: float,
+) -> RootMatching:
+    """Pair roots between two conventions, deterministically.
+
+    Comparing root *counts* alone -- the v2 behaviour -- calls two conventions
+    stable when each finds two roots in completely different places. What matters
+    is whether the same levels survived, so the roots are paired and the
+    survivors, the casualties and the displacement are reported separately.
+
+    Algorithm: enumerate every candidate pair within tolerance, then greedily
+    accept in order of (distance, left value, right value). Sorting candidates by
+    *value* rather than input order is what makes the pairing independent of how
+    the roots arrived -- including when two roots sit a hair apart, where an
+    order-dependent rule would flip between runs.
+    """
+    if spot <= 0.0:
+        return RootMatching(0, len(left) + len(right), None)
+
+    tolerance = spot * tolerance_pct / 100.0
+    candidates = sorted(
+        (abs(a - b), a, b, i, j)
+        for i, a in enumerate(sorted(left))
+        for j, b in enumerate(sorted(right))
+        if abs(a - b) <= tolerance
+    )
+
+    used_left: set[int] = set()
+    used_right: set[int] = set()
+    pairs: list[tuple[float, float]] = []
+    worst = 0.0
+    for distance, a, b, i, j in candidates:
+        if i in used_left or j in used_right:
+            continue
+        used_left.add(i)
+        used_right.add(j)
+        pairs.append((a, b))
+        worst = max(worst, distance / spot * 100.0)
+
+    unmatched = (len(left) - len(used_left)) + (len(right) - len(used_right))
+    return RootMatching(
+        matched_root_count=len(pairs),
+        unmatched_root_count=unmatched,
+        maximum_matched_root_shift_pct=worst if pairs else None,
+        matched_pairs=tuple(pairs),
+    )
+
+
+def compare_root_topology(
+    results: tuple[ZeroGammaResult, ...], *, spot: float, tolerance_pct: float
+) -> dict[str, Any]:
+    """Topology metrics across every resolved convention, each compared against
+    the first. Deterministic, and serialised into the snapshot and the hash.
+    """
+    resolved = [r for r in results if r.selected_root is not None]
+    if len(resolved) < 2:
+        return {
+            "comparable": False,
+            "matched_root_count": 0,
+            "unmatched_root_count": 0,
+            "maximum_matched_root_shift_pct": None,
+            "selected_root_identity_stable": None,
+            "root_topology_stable": None,
+        }
+
+    reference = resolved[0]
+    matched = 0
+    unmatched = 0
+    worst_shift = 0.0
+    selected_stable = True
+
+    for other in resolved[1:]:
+        matching = match_roots(
+            reference.all_roots,
+            other.all_roots,
+            spot=spot,
+            tolerance_pct=tolerance_pct,
+        )
+        matched += matching.matched_root_count
+        unmatched += matching.unmatched_root_count
+        if matching.maximum_matched_root_shift_pct is not None:
+            worst_shift = max(worst_shift, matching.maximum_matched_root_shift_pct)
+        assert reference.selected_root is not None
+        assert other.selected_root is not None
+        drift = abs(other.selected_root - reference.selected_root) / spot * 100.0
+        if drift > tolerance_pct:
+            selected_stable = False
+
+    return {
+        "comparable": True,
+        "matched_root_count": matched,
+        "unmatched_root_count": unmatched,
+        "maximum_matched_root_shift_pct": worst_shift,
+        "selected_root_identity_stable": selected_stable,
+        "root_topology_stable": unmatched == 0 and selected_stable,
+    }
+
+
 def score_root_identity_stability(
     inputs: ConfidenceInputs, config: ConfidenceConfig
 ) -> ConfidenceComponent:
-    """Do the conventions agree on the *shape* of the curve, not just the level?
+    """Do the conventions agree on the *shape* of the curve, not just the count?
 
-    A convention change that alters the number of crossings is a stronger warning
-    than one that merely shifts the level a little.
+    v2 compared root counts only, so two conventions each finding two roots in
+    entirely different places scored a perfect 1.0. Full topology is compared
+    now: which roots survived, how far the survivors moved, and whether the
+    selected root kept its identity.
+
+    Penalties, in increasing severity:
+
+    * matched roots that drifted -- a proportionate deduction;
+    * roots that appeared or disappeared -- the curve changed shape;
+    * the selected root changing identity -- the conventions disagree about which
+      level matters at all, which is a hard zero.
     """
-    resolved = _resolved_results(inputs)
-    if len(resolved) < 2:
+    topology = compare_root_topology(
+        inputs.zero_gamma_results,
+        spot=inputs.spot,
+        tolerance_pct=config.root_match_tolerance_pct,
+    )
+    if not topology["comparable"]:
+        resolved = len(_resolved_results(inputs))
         return ConfidenceComponent(
             name="root_identity_stability",
             score=0.0,
             weight=config.weights.root_identity_stability,
-            detail=f"only {len(resolved)} convention(s) resolved -- not comparable",
+            detail=(
+                f"only {resolved} convention(s) resolved -- not comparable; "
+                "matched_root_count=0 unmatched_root_count=0 "
+                "maximum_matched_root_shift_pct=None "
+                "selected_root_identity_stable=None root_topology_stable=None"
+            ),
         )
-    counts = {r.root_count for r in resolved}
-    methods = {r.selection_method for r in resolved}
-    stable = len(counts) == 1 and len(methods) == 1
+
+    if not topology["selected_root_identity_stable"]:
+        score = 0.0
+    else:
+        total = topology["matched_root_count"] + topology["unmatched_root_count"]
+        matched_share = topology["matched_root_count"] / total if total else 0.0
+        shift = topology["maximum_matched_root_shift_pct"] or 0.0
+        drift_penalty = min(1.0, shift / max(config.root_match_tolerance_pct, 1e-9))
+        score = max(0.0, matched_share * (1.0 - 0.5 * drift_penalty))
+
     return ConfidenceComponent(
         name="root_identity_stability",
-        score=1.0 if stable else 0.0,
+        score=score,
         weight=config.weights.root_identity_stability,
         detail=(
-            f"root counts across conventions: {sorted(counts)}"
-            + ("" if stable else " -- conventions disagree on curve shape")
+            f"matched_root_count={topology['matched_root_count']} "
+            f"unmatched_root_count={topology['unmatched_root_count']} "
+            "maximum_matched_root_shift_pct="
+            f"{topology['maximum_matched_root_shift_pct']} "
+            "selected_root_identity_stable="
+            f"{topology['selected_root_identity_stable']} "
+            f"root_topology_stable={topology['root_topology_stable']}"
         ),
     )
 

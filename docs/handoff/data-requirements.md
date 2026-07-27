@@ -10,14 +10,18 @@ quote. Every claim below has a source link at the bottom.
 
 ## TL;DR — the recommendation
 
-| Phase | Buy | Monthly |
-|---|---|---|
-| **Now (engine + backtester)** | nothing | **$0** |
-| **Phase 1 (real GEX research)** | ThetaData **Standard** | **$80** |
-| **Phase 2 (futures execution research)** | + Databento CME **Standard** | **+$199** |
-| **Phase 3 (paper trading)** | + IBKR paper account | **+$0** |
-| **Phase 4 (live)** | + IBKR market data + OPRA clarification | see §5 |
-| **Optional (validation)** | Cboe DataShop Open-Close | from **$2,499** |
+This is a **purchasing plan**, not a description of what exists. Only the "Now"
+row describes this repository. Phases 1–4 are `PLANNED`; the code they would
+require is absent, and phases 2–4 are explicitly out of scope for it.
+
+| Phase | Buy | Monthly | Status in this repo |
+|---|---|---|---|
+| **Now (engine + backtester)** | nothing | **$0** | `IMPLEMENTED` |
+| **Phase 1 (real GEX research)** | ThetaData **Standard** | **$80** | adapter `IMPLEMENTED`, `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| **Phase 2 (futures execution research)** | + Databento CME **Standard** | **+$199** | `NOT_IMPLEMENTED` |
+| **Phase 3 (paper trading)** | + IBKR paper account | **+$0** | `NOT_IMPLEMENTED` — there is no paper-trading path here, and none will be built from this repository |
+| **Phase 4 (live)** | + IBKR market data + OPRA clarification | see §5 | `NOT_IMPLEMENTED`, out of scope |
+| **Optional (validation)** | Cboe DataShop Open-Close | from **$2,499** | `NOT_IMPLEMENTED` |
 
 **Do not buy anything yet.** The engine in this repo runs end-to-end today against
 the synthetic adapter. Buy ThetaData Standard when you want the GEX engine pointed
@@ -156,9 +160,11 @@ research engine must not bake in a calendar assumption the market did not follow
 | CME Plus | $1,750 |
 | CME Unlimited | $4,500 |
 
-Standard is sufficient for MES 1-minute bars and contract metadata. Plus/Unlimited
-are about live-feed breadth and historical volume, not about anything the plan
-needs at LIVE_STAGE_1.
+Per Databento's **published plan documentation**, Standard covers MES 1-minute
+bars and contract metadata, and Plus/Unlimited differ on live-feed breadth and
+historical volume. This is a reading of their pricing page, not a measurement —
+no Databento request has been made from this repository, and the futures
+integration is `NOT_IMPLEMENTED`.
 
 ---
 

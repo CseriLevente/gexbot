@@ -13,7 +13,7 @@ gives us the whole book we keep all three legs plus their spread.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -230,48 +230,77 @@ class GammaComparison:
 
     Not required for normal operation -- vendor gamma sits behind a higher
     ThetaData tier. When it *is* available this is the structure that turns "the
-    numbers look close" into a report that can be sliced by DTE, moneyness, right,
-    time of day and IV level.
+    numbers look close" into a report sliceable by DTE, moneyness, right, time of
+    day and IV level.
+
+    The comparison carries the complete ``EffectiveModelInputs`` it was computed
+    under. Without that, a disagreement cannot be attributed: a 3% gap might be a
+    pricing bug or might be the vendor using a different rate, and the two need
+    opposite responses.
     """
 
     local_gamma: float | None
     vendor_gamma: float | None
-    # Slice keys, carried so a report can group without re-joining the chain.
     dte: int | None = None
     moneyness: float | None = None
     right: str | None = None
     implied_vol: float | None = None
     observed_at: str | None = None
+    #: Serialised effective model, so the comparison is self-describing.
+    effective_model: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def absolute_difference(self) -> float | None:
+    def signed_difference(self) -> float | None:
+        """``local - vendor``. Direction preserved."""
         if self.local_gamma is None or self.vendor_gamma is None:
             return None
         return self.local_gamma - self.vendor_gamma
 
     @property
-    def relative_difference(self) -> float | None:
-        difference = self.absolute_difference
-        if difference is None:
+    def absolute_difference(self) -> float | None:
+        """|local - vendor|. **Never negative.**
+
+        v2 returned the signed value under this name, so a field meaning
+        "magnitude of disagreement" could be negative -- and any mean or sum of it
+        cancelled opposing errors instead of accumulating them, making a badly
+        disagreeing sample look like a well-behaved one.
+        """
+        signed = self.signed_difference
+        return None if signed is None else abs(signed)
+
+    @property
+    def relative_absolute_difference(self) -> float | None:
+        """|local - vendor| / |vendor|.
+
+        Relative to the *vendor* magnitude, which is the reference being compared
+        against. ``None`` when the vendor gamma is zero: there is no meaningful
+        relative measure, and returning 0.0 would assert perfect agreement in
+        precisely the case where nothing can be concluded.
+        """
+        absolute = self.absolute_difference
+        if absolute is None or self.vendor_gamma is None or self.vendor_gamma == 0.0:
             return None
-        scale = max(abs(self.local_gamma or 0.0), abs(self.vendor_gamma or 0.0))
-        return difference / scale if scale > 0.0 else None
+        return absolute / abs(self.vendor_gamma)
 
     @property
     def comparison_status(self) -> str:
-        """``unavailable`` / ``match`` / ``minor_difference`` / ``mismatch``.
+        """``unavailable`` / ``vendor_gamma_zero`` / ``match`` /
+        ``minor_difference`` / ``mismatch``.
 
-        Thresholds here describe numerical agreement between two implementations
-        of the same closed-form formula, not a market claim -- 0.1% is roughly
-        the rounding a vendor's own CSV output introduces.
+        Thresholds describe numerical agreement between two implementations of
+        the same closed-form formula, not a market claim -- 0.1% is roughly the
+        rounding a vendor's CSV output introduces.
         """
-        relative = self.relative_difference
-        if relative is None:
+        if self.local_gamma is None or self.vendor_gamma is None:
             return "unavailable"
-        magnitude = abs(relative)
-        if magnitude <= 1e-3:
+        if self.vendor_gamma == 0.0:
+            return "vendor_gamma_zero"
+        relative = self.relative_absolute_difference
+        if relative is None:  # pragma: no cover - defensive
+            return "unavailable"
+        if relative <= 1e-3:
             return "match"
-        if magnitude <= 1e-2:
+        if relative <= 1e-2:
             return "minor_difference"
         return "mismatch"
 
@@ -279,12 +308,14 @@ class GammaComparison:
         return {
             "local_gamma": self.local_gamma,
             "vendor_gamma": self.vendor_gamma,
+            "signed_difference": self.signed_difference,
             "absolute_difference": self.absolute_difference,
-            "relative_difference": self.relative_difference,
+            "relative_absolute_difference": self.relative_absolute_difference,
             "comparison_status": self.comparison_status,
             "dte": self.dte,
             "moneyness": self.moneyness,
             "right": self.right,
             "implied_vol": self.implied_vol,
             "observed_at": self.observed_at,
+            "effective_model": dict(self.effective_model),
         }

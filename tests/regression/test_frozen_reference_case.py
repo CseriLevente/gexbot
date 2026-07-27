@@ -80,7 +80,7 @@ EXPECTED_ROOTS = {
 }
 EXPECTED_ZERO_GAMMA_SPREAD_PCT = 0.015815788782219897
 
-EXPECTED_CONFIDENCE_SCORE = 93.7428
+EXPECTED_CONFIDENCE_SCORE = 93.6831
 EXPECTED_COMPONENT_SCORES = {
     "chain_completeness": 1.0,
     "quote_freshness": 1.0,
@@ -93,7 +93,11 @@ EXPECTED_COMPONENT_SCORES = {
     "multiple_root_penalty": 1.0,
     "root_slope_score": 1.0,
     "root_boundary_penalty": 1.0,
-    "root_identity_stability": 1.0,
+    # v2.1: was 1.0 under count-only comparison. Full topology now applies a
+    # proportionate deduction because the conventions' roots, while matched,
+    # sit ~0.016% of spot apart. A genuine behaviour change, not a
+    # representation one -- see the note on the hash below.
+    "root_identity_stability": 0.9841842112177801,
     "timestamp_alignment_score": 1.0,
     "future_timestamp_penalty": 1.0,
     "option_universe_coverage_score": 1.0,
@@ -101,18 +105,35 @@ EXPECTED_COMPONENT_SCORES = {
     "model_parameter_completeness": 1.0,
 }
 
-# Re-derived deliberately in the v2 pass, for two stated reasons:
-#   1. contracts are now sorted into canonical order before aggregation, so
-#      float summation no longer depends on vendor row order;
-#   2. the hash now quantises floats to 12 significant figures so it is stable
-#      across platforms rather than only within one machine.
-# Every individual numeric expectation above was UNCHANGED by both, which is
-# what confirms these were representation changes rather than model changes.
+# --- Fingerprint re-derivations, with the reason for each -------------------
+#
+# v2.0 -> v2.0.1 (canonical ordering + hash quantisation): representation only.
+# v2.1 (this release): re-derived again, for two stated reasons.
+#
+#   1. ModelSpec gained `configured_underlying_price`, so the payload the model
+#      fingerprint hashes has one more key. REPRESENTATION ONLY.
+#   2. MODEL_VERSION moved to 2.1.0 because an explicitly configured zero rate or
+#      dividend is now honoured instead of falling through to the snapshot value.
+#      BEHAVIOUR: the version exists precisely to signal this.
+#   3. `output_hash` now covers the confidence component structure and the root
+#      topology, which v2 excluded entirely. REPRESENTATION ONLY -- it widens what
+#      is hashed without changing any number.
+#   4. `root_identity_stability` compares full root topology instead of just
+#      counts. BEHAVIOUR: this moved the component from 1.0 to 0.984 and the
+#      aggregate score from 93.7428 to 93.6831.
+#
+# Review performed before touching any constant: all 43 other frozen
+# expectations -- totals, five buckets, four strikes, walls, voids, three roots,
+# the convention spread and the remaining 16 confidence components -- were
+# verified UNCHANGED at rel=1e-12. The regression case configures its rates
+# explicitly, so the falsy-fallback fix does not move its numbers. Only the two
+# values that the topology change genuinely affects were re-derived, and the hash
+# followed them.
 EXPECTED_OUTPUT_HASH = (
-    "d6368e100a6293283e072196b15c725831a3647fba0b5614c1456a16b40bb12f"
+    "181db88a7a343eda4d874322161e8b236b57faf93db4282f6e383983260d0b16"
 )
 EXPECTED_CONFIG_FINGERPRINT = "8b5b7454ba7c5500"
-EXPECTED_MODEL_FINGERPRINT = "53a805ad198ee52b"
+EXPECTED_MODEL_FINGERPRINT = "db8d44db4b51d7c4"
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

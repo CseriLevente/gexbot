@@ -48,10 +48,6 @@ from src.gex.formulas import ContractGex
 from src.gex.pricing import (
     MAX_IMPLIED_VOL,
     MIN_IMPLIED_VOL,
-    BlackScholesInputs,
-)
-from src.gex.pricing import (
-    gamma as bs_gamma,
 )
 
 _QUADRATIC_TERMS = 3
@@ -229,17 +225,22 @@ def signed_gex_curve(
         else {}
     )
 
-    # Per-contract invariants, hoisted out of the grid loop.
-    prepared: list[tuple[ContractGex, float, float]] = [
-        (c, c.open_interest * c.contract.multiplier * c.sign, c.time_to_expiry)
+    # Per-contract invariants, hoisted out of the grid loop. Only contracts that
+    # resolved a usable effective model can be repriced -- see
+    # ``zero_gamma_eligible`` in formulas.py. A contract carried on vendor gamma
+    # with no IV has nothing to reprice, and silently pricing it at some default
+    # would be inventing data.
+    prepared: list[tuple[ContractGex, float]] = [
+        (c, c.open_interest * c.contract.multiplier * c.sign)
         for c in contracts
+        if c.effective.is_usable
     ]
 
     curve: list[tuple[float, float]] = []
     for grid_spot in grid:
         notional_scale = grid_spot * (spot_move_pct * grid_spot)
         total = 0.0
-        for contract, scale, time_to_expiry in prepared:
+        for contract, scale in prepared:
             iv = _iv_at_grid_point(
                 contract,
                 convention=convention,
@@ -249,16 +250,13 @@ def signed_gex_curve(
             )
             if iv is None or iv <= 0.0:
                 continue
-            gamma = bs_gamma(
-                BlackScholesInputs(
-                    spot=grid_spot,
-                    strike=contract.contract.strike,
-                    time_to_expiry=time_to_expiry,
-                    implied_vol=iv,
-                    rate=risk_free_rate,
-                    dividend_yield=dividend_yield,
-                )
-            )
+            # Reprice the contract's OWN effective model at the grid spot, so the
+            # rate, dividend, day count and time floor are exactly those the
+            # snapshot reports. Rebuilding BlackScholesInputs here is how the grid
+            # used to drift away from the chain totals.
+            gamma = contract.effective.reprice_at(
+                grid_spot, implied_volatility=iv
+            ).gamma()
             total += gamma * scale * notional_scale
         curve.append((grid_spot, total))
     return curve

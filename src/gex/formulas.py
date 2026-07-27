@@ -23,6 +23,11 @@ from src.domain.contracts import (
     OptionQuote,
     OptionRight,
 )
+from src.domain.effective_model import (
+    EffectiveModelInputs,
+    ResolutionIssue,
+    resolve_effective_inputs,
+)
 from src.domain.gex import (
     BucketGex,
     ExpiryBucket,
@@ -30,14 +35,12 @@ from src.domain.gex import (
     SignConvention,
     StrikeGex,
 )
-from src.domain.iv import IVSource
-from src.domain.model_spec import ExpirationTimestampRule, ModelSpec
+from src.domain.iv import GammaComparison, IVSource
+from src.domain.model_spec import ModelSpec
 from src.domain.normalize import validate_chain
 from src.domain.validation import ValidationCode, ValidationReport
 from src.gex.config import BUCKET_BOUNDS, GexEngineConfig
-from src.gex.pricing import BlackScholesInputs
-from src.gex.pricing import gamma as bs_gamma
-from src.gex.sessions import calendar_dte, seconds_to_expiry
+from src.gex.sessions import calendar_dte
 
 
 def bucket_for_dte(dte: int) -> ExpiryBucket:
@@ -119,11 +122,19 @@ class ContractGex:
     # come alive once the zero-gamma grid moves spot toward them.
     sign: float
     gamma_source: GammaSource
+    #: The one resolved model this contract was priced with. Carried so the
+    #: zero-gamma grid and the gamma comparison reprice the SAME model rather
+    #: than rebuilding a similar one.
+    effective: EffectiveModelInputs
     vendor_gamma: float | None = None
 
     @property
     def moneyness(self) -> float | None:
-        return None
+        import math
+
+        if self.effective.spot <= 0.0 or self.contract.strike <= 0.0:
+            return None
+        return math.log(self.contract.strike / self.effective.spot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,27 +178,20 @@ class ContractGexResult:
 def _resolve_gamma(
     quote: OptionQuote,
     *,
-    snapshot: ChainSnapshot,
-    time_to_expiry: float,
+    effective: EffectiveModelInputs,
     config: GexEngineConfig,
 ) -> tuple[float, GammaSource] | None:
-    """Vendor gamma if allowed and present, else Black-Scholes from IV."""
-    spec = config.model_spec
+    """Vendor gamma if allowed and present, else the effective model's own.
+
+    All pricing goes through ``effective.gamma()``. There is no second
+    Black-Scholes call site and no local fallback for rates, dividends or spot --
+    that fragmentation is what let ``spec.risk_free_rate or snapshot.risk_free_rate``
+    silently discard an explicitly configured zero.
+    """
     if config.prefer_vendor_gamma and quote.gamma is not None:
         return quote.gamma, GammaSource.VENDOR
-    iv = quote.effective_iv
-    if iv is not None and iv > 0.0:
-        value = bs_gamma(
-            BlackScholesInputs(
-                spot=snapshot.spot,
-                strike=quote.contract.strike,
-                time_to_expiry=time_to_expiry,
-                implied_vol=iv,
-                rate=spec.risk_free_rate or snapshot.risk_free_rate,
-                dividend_yield=spec.dividend_yield or snapshot.dividend_yield,
-            )
-        )
-        return value, GammaSource.SHADOW_PRICER
+    if effective.is_usable:
+        return effective.gamma(), GammaSource.SHADOW_PRICER
     # Last resort: vendor gamma even though we would have preferred our own.
     if quote.gamma is not None:
         return quote.gamma, GammaSource.VENDOR
@@ -208,10 +212,6 @@ def compute_contract_gex(
 
     cfg = config or GexEngineConfig()
     spec = cfg.model_spec
-    honour_early_close = (
-        spec.expiration_timestamp_rule
-        is ExpirationTimestampRule.ROOT_SPECIFIC_SETTLEMENT_WITH_EARLY_CLOSE
-    )
 
     normalized = validate_chain(
         snapshot,
@@ -230,13 +230,9 @@ def compute_contract_gex(
 
     for quote in normalized.snapshot.quotes:
         contract = quote.contract
-        remaining = seconds_to_expiry(
-            snapshot.as_of,
-            contract.root,
-            contract.expiry,
-            honour_early_close=honour_early_close,
-        )
-        if remaining <= 0.0:
+        # One resolution per contract, reused by every downstream calculation.
+        effective = resolve_effective_inputs(quote=quote, snapshot=snapshot, spec=spec)
+        if ResolutionIssue.EXPIRED in effective.issues:
             exclusions[ExclusionReason.EXPIRED] += 1
             excluded_expiries.add(contract.expiry.isoformat())
             continue
@@ -252,10 +248,7 @@ def compute_contract_gex(
             exclusions[ExclusionReason.NO_OPEN_INTEREST] += 1
             continue
 
-        time_to_expiry = spec.year_fraction(remaining)
-        resolved = _resolve_gamma(
-            quote, snapshot=snapshot, time_to_expiry=time_to_expiry, config=cfg
-        )
+        resolved = _resolve_gamma(quote, effective=effective, config=cfg)
         if resolved is None:
             exclusions[ExclusionReason.NO_GAMMA_SOURCE] += 1
             continue
@@ -269,11 +262,13 @@ def compute_contract_gex(
         else:
             shadow_count += 1
 
+        # The notional scales by the EFFECTIVE spot, which under
+        # VENDOR_PER_CONTRACT differs per contract.
         magnitude = notional_gex(
             gamma=gamma_value,
             open_interest=open_interest,
             multiplier=contract.multiplier,
-            spot=snapshot.spot,
+            spot=effective.spot,
             spot_move_pct=cfg.spot_move_pct,
         )
         sign = sign_for(contract.right, cfg.sign_convention)
@@ -282,7 +277,7 @@ def compute_contract_gex(
                 contract=contract,
                 dte=dte,
                 bucket=bucket_for_dte(dte),
-                time_to_expiry=time_to_expiry,
+                time_to_expiry=effective.time_to_expiry_years,
                 gamma=gamma_value,
                 implied_vol=quote.effective_iv,
                 iv_source=quote.iv.source if quote.effective_iv is not None else None,
@@ -292,6 +287,7 @@ def compute_contract_gex(
                 sign=sign,
                 gamma_source=source,
                 vendor_gamma=quote.gamma,
+                effective=effective,
             )
         )
 
@@ -453,55 +449,69 @@ def build_universe(
     )
 
 
+def zero_gamma_eligible(
+    contracts: tuple[ContractGex, ...], *, max_dte: int
+) -> tuple[tuple[ContractGex, ...], dict[str, int]]:
+    """Split contracts into repricable and not, with machine-readable reasons.
+
+    A contract can contribute to *current* GEX on vendor gamma alone, yet be
+    impossible to reprice on the zero-gamma grid because it has no IV. Counting
+    it as covered reports 100% coverage for a grid that skipped it -- which is
+    the v2 defect this exists to prevent.
+
+    Two exclusion families, deliberately kept apart:
+
+    * ``beyond_max_dte`` -- a deliberate tractability filter.
+    * resolution issues (``iv_missing`` and friends) -- an input we do not have.
+
+    They mean different things: the first is a choice, the second is a gap.
+    """
+    eligible: list[ContractGex] = []
+    reasons: Counter[str] = Counter()
+    for contract in contracts:
+        if contract.dte > max_dte:
+            reasons["beyond_max_dte"] += 1
+            continue
+        if not contract.effective.is_usable:
+            for issue in contract.effective.issues:
+                reasons[issue.value] += 1
+            continue
+        eligible.append(contract)
+    return tuple(eligible), dict(sorted(reasons.items()))
+
+
 def gamma_comparisons(
     contracts: tuple[ContractGex, ...],
     *,
-    spot: float,
     observed_at: str | None = None,
-) -> tuple[object, ...]:
+) -> tuple[GammaComparison, ...]:
     """Local-vs-vendor gamma comparisons, where vendor gamma is available.
 
-    Empty when the subscription tier does not supply gamma, which is the normal
-    case. This is a validation aid, not an operating requirement.
+    Uses each contract's own ``EffectiveModelInputs`` -- the same object the
+    engine priced with -- rather than rebuilding a simplified model here. A
+    comparison computed under different assumptions from the engine would report
+    a disagreement that is an artefact of the comparison itself.
+
+    Empty when the subscription tier supplies no gamma, which is the normal case.
     """
-    import math
-
-    from src.domain.iv import GammaComparison
-
     out: list[GammaComparison] = []
     for c in contracts:
         if c.vendor_gamma is None:
             continue
-        local = (
-            c.gamma
-            if c.gamma_source is GammaSource.SHADOW_PRICER
-            else _recompute_local_gamma(c, spot=spot)
-        )
+        local = c.effective.gamma() if c.effective.is_usable else None
         out.append(
             GammaComparison(
                 local_gamma=local,
                 vendor_gamma=c.vendor_gamma,
                 dte=c.dte,
-                moneyness=(math.log(c.contract.strike / spot) if spot > 0.0 else None),
+                moneyness=c.moneyness,
                 right=c.contract.right.value,
                 implied_vol=c.implied_vol,
                 observed_at=observed_at,
+                effective_model=c.effective.as_dict(),
             )
         )
     return tuple(out)
-
-
-def _recompute_local_gamma(contract: ContractGex, *, spot: float) -> float | None:
-    if contract.implied_vol is None or contract.implied_vol <= 0.0:
-        return None
-    return bs_gamma(
-        BlackScholesInputs(
-            spot=spot,
-            strike=contract.contract.strike,
-            time_to_expiry=contract.time_to_expiry,
-            implied_vol=contract.implied_vol,
-        )
-    )
 
 
 def apply_model_spec(config: GexEngineConfig, spec: ModelSpec) -> GexEngineConfig:

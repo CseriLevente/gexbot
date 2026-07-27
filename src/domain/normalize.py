@@ -39,6 +39,7 @@ from src.domain.validation import (
     check_timezone_aware,
     collect,
 )
+from src.gex.sessions import to_eastern
 
 # Sanity bounds. These are not market predictions -- they are the range outside
 # which a number is certainly a data error rather than an unusual market.
@@ -191,6 +192,19 @@ def validate_quote(
             )
         )
 
+    # --- Adapter parse issues -------------------------------------------------
+    # Recorded by the adapter rather than swallowed. One corrupt cell costs one
+    # contract, not the whole chain -- but it is never invisible.
+    for field_name, issue_code in quote.parse_issues:
+        issues.append(
+            ValidationIssue(
+                code=ValidationCode.MALFORMED_INTEGER,
+                field=f"quote.{field_name}",
+                detail=f"vendor value could not be parsed as an integer ({issue_code})",
+                observed=issue_code,
+            )
+        )
+
     # --- Greeks and IV -------------------------------------------------------
     issues.append(check_finite(quote.gamma, field_name="quote.gamma"))
     issues.append(
@@ -330,6 +344,25 @@ def _validate_timestamps(
                 tolerance_seconds=limits.max_future_timestamp_seconds,
             )
         )
+
+    # Open interest is a settlement DATE, not a clock reading, so it gets no
+    # sub-second skew tolerance: tomorrow's settlement date is not clock drift,
+    # it is impossible data.
+    if stamps.open_interest_as_of is not None:
+        reference_date = to_eastern(reference).date()
+        if stamps.open_interest_as_of > reference_date:
+            issues.append(
+                ValidationIssue(
+                    code=ValidationCode.FUTURE_OPEN_INTEREST,
+                    field="timestamps.open_interest_as_of",
+                    detail=(
+                        f"open interest is dated {stamps.open_interest_as_of}, "
+                        f"after the snapshot date {reference_date}; settlement "
+                        "data cannot come from the future"
+                    ),
+                    observed=stamps.open_interest_as_of.isoformat(),
+                )
+            )
 
     quote_ts = stamps.quote_timestamp
     if quote_ts is not None and quote_ts.tzinfo is not None:

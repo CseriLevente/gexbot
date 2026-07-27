@@ -48,6 +48,7 @@ from src.adapters.thetadata.endpoints import (
 from src.adapters.transport import FakeTransport
 from src.domain.contracts import OptionRight, OptionRoot, SnapshotClocks
 from src.domain.iv import IVQualityFlag, IVSource
+from src.domain.model_spec import ModelSpec
 from src.gex.config import GexEngineConfig
 from src.gex.engine import compute_gex_snapshot
 from src.gex.sessions import eastern
@@ -378,6 +379,12 @@ def test_standard_tier_chain_still_produces_a_full_gex_snapshot():
     assert snapshot.meta["shadow_gamma_count"] == 20
 
 
+# The fixture's gamma column was generated at these rates. The model spec has to
+# state them, because an explicitly configured zero now genuinely means zero --
+# see the regression test immediately below.
+FIXTURE_MODEL = ModelSpec(risk_free_rate=0.042, dividend_yield=0.013)
+
+
 def test_vendor_gamma_and_shadow_gamma_agree_on_fixture_shaped_input():
     """The fixture's gamma column was generated from the documented inputs with
     the project's own pricer, so a drift in the settlement clock, the day count
@@ -386,13 +393,46 @@ def test_vendor_gamma_and_shadow_gamma_agree_on_fixture_shaped_input():
     This is a *fixture* consistency check, NOT evidence that our gamma matches
     live ThetaData output. That comparison has not been run.
     """
-    vendor = compute_gex_snapshot(build(), GexEngineConfig(prefer_vendor_gamma=True))
-    shadow = compute_gex_snapshot(build(), GexEngineConfig(prefer_vendor_gamma=False))
+    vendor = compute_gex_snapshot(
+        build(),
+        GexEngineConfig(prefer_vendor_gamma=True, model_spec=FIXTURE_MODEL),
+    )
+    shadow = compute_gex_snapshot(
+        build(),
+        GexEngineConfig(prefer_vendor_gamma=False, model_spec=FIXTURE_MODEL),
+    )
     assert vendor.meta["vendor_gamma_count"] == 20
     assert shadow.meta["shadow_gamma_count"] == 20
     assert vendor.total_unsigned_gex == pytest.approx(
         shadow.total_unsigned_gex, rel=1e-6
     )
+
+
+def test_a_default_zero_rate_no_longer_silently_borrows_the_snapshot_rate():
+    """Regression for the v2 falsy-fallback bug, caught by this very test file.
+
+    Before v2.1 the test above passed with the *default* model spec, whose
+    ``risk_free_rate`` is an explicit ``0.0``. It passed because
+    ``spec.risk_free_rate or snapshot.risk_free_rate`` discarded the zero and
+    silently used the snapshot's 4.2% -- the same rate the fixture was generated
+    at. The agreement was an artefact of the bug.
+
+    Now an explicit zero means zero, so the shadow price genuinely differs from a
+    vendor gamma computed at 4.2%. If this assertion ever starts finding the two
+    equal again, the fallback bug has returned.
+    """
+    zero_rate = compute_gex_snapshot(
+        build(),
+        GexEngineConfig(prefer_vendor_gamma=False, model_spec=ModelSpec()),
+    )
+    vendor = compute_gex_snapshot(
+        build(),
+        GexEngineConfig(prefer_vendor_gamma=True, model_spec=FIXTURE_MODEL),
+    )
+    assert zero_rate.total_unsigned_gex != pytest.approx(
+        vendor.total_unsigned_gex, rel=1e-6
+    )
+    assert zero_rate.model_spec.risk_free_rate == 0.0
 
 
 def test_missing_open_interest_leaves_the_field_none_and_is_counted():

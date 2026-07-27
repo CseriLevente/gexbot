@@ -462,11 +462,21 @@ def test_boundary_roots_are_penalised_and_report_expansions():
     assert "artefact" in component.detail
 
 
-def test_root_identity_is_stable_when_conventions_agree_on_the_count():
-    assert score_root_identity_stability(make_inputs(), CFG).score == pytest.approx(1.0)
+def test_root_identity_is_stable_when_conventions_agree_on_topology():
+    """v2.1: topology, not just counts.
+
+    The two fixture roots sit 1 point apart (0.02% of spot), well inside the
+    match tolerance, so they are the same level having moved slightly -- stable,
+    with a small proportionate deduction for the drift. One convention finding a
+    root the other does not is covered separately below; fuller coverage lives in
+    tests/unit/test_hash_and_topology.py.
+    """
+    component = score_root_identity_stability(make_inputs(), CFG)
+    assert 0.9 < component.score <= 1.0
+    assert "root_topology_stable=True" in component.detail
 
 
-def test_root_identity_is_unstable_when_conventions_find_different_counts():
+def test_root_identity_is_penalised_when_a_root_appears_in_one_convention():
     inputs = make_inputs(
         zero_gamma_results=(
             make_root(convention=IVConvention.STICKY_STRIKE, all_roots=(5050.0,)),
@@ -478,8 +488,9 @@ def test_root_identity_is_unstable_when_conventions_find_different_counts():
         )
     )
     component = score_root_identity_stability(inputs, CFG)
-    assert component.score == 0.0
-    assert "disagree on curve shape" in component.detail
+    assert component.score < 1.0
+    assert "unmatched_root_count=1" in component.detail
+    assert "root_topology_stable=False" in component.detail
 
 
 def test_root_components_report_zero_when_nothing_resolved():

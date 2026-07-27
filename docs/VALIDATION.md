@@ -100,16 +100,36 @@ make it look worse.
 
 ### Layers
 
-| Layer | Marker | What it proves |
-|---|---|---|
-| Unit | — | Each rule and formula in isolation |
-| Integration | `integration` | Fixture to parser to validation to GEX to confidence to metadata |
-| Regression | `regression` | Frozen expected values, hand-transcribed |
-| Replay | `replay` | Same inputs produce the same output hash |
+| Layer | Marker | What it proves | Label |
+|---|---|---|---|
+| Unit | — | Each rule and formula in isolation | `TESTED_SYNTHETICALLY` |
+| Integration | `integration` | Fixture to parser to validation to GEX to confidence to metadata | `TESTED_WITH_OFFLINE_FIXTURES` |
+| Regression | `regression` | Frozen expected values, hand-transcribed | `TESTED_SYNTHETICALLY` |
+| Replay | `replay` | Same inputs produce the same output hash | `TESTED_SYNTHETICALLY` |
+| Release integrity | — | Bare-interpreter run, pinned build, reproducible archive | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 
 **No test touches the network.** `FakeTransport` raises on an unregistered route
 rather than silently succeeding, so an accidental real call surfaces as a loud
-failure.
+failure — `test_no_unit_test_performs_a_real_network_call` asserts exactly that.
+
+**What none of these layers prove.** The fixtures are vendor-*shaped* payloads
+written by this repository, not captured vendor responses. Passing them
+establishes that the parser, the join and the maths behave as specified on the
+inputs we imagined. It does not establish that ThetaData emits those inputs.
+Every integration claim in this repository is
+`NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA`.
+
+### Environment independence
+
+`tests/unit/test_release_integrity.py` runs the engine in a subprocess under
+`python -S -E`: no site-packages, no `PYTHON*` environment influence. Under `-S`
+the third-party packages are not merely unimported, they are *unimportable*, so
+an accidental `import yaml` in the engine core fails there even though it would
+succeed in the dev environment. The bare run's GEX total is then asserted equal
+to the installed run's — if those diverge, something in the maths depends on an
+installed package.
+
+CI goes one step further: the `bare-interpreter` job installs nothing at all.
 
 ### What makes a test worth having here
 
@@ -193,15 +213,38 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
+Current: **93.30%** across 3,879 statements, against a `fail_under` of 90.
+
 ### Commands
+
+**Unix (bash):**
 
 ```bash
 python -m pytest                     # everything
 python -m pytest -m integration      # offline pipeline
 python -m pytest -m regression       # frozen values
 python -m pytest -m replay           # determinism
+python -m pytest tests/unit/test_architecture.py   # cannot trade
+python -m pytest tests/unit/test_release_integrity.py
 python -m pytest --cov --cov-report=term-missing
 python -m ruff check .
 python -m ruff format --check .
 python -m mypy src
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest -m integration
+.\.venv\Scripts\python.exe -m pytest -m regression
+.\.venv\Scripts\python.exe -m pytest -m replay
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_architecture.py
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_release_integrity.py
+.\.venv\Scripts\python.exe -m pytest --cov --cov-report=term-missing
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m mypy src
+```
+
+See [RELEASE.md](RELEASE.md) for the bootstrap and the release procedure.

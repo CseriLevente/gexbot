@@ -24,7 +24,11 @@ from src.domain.iv import IVSource
 
 # Bumped whenever a change alters numeric output for identical inputs. The replay
 # test pins snapshot hashes, so this is the deliberate way to invalidate them.
-MODEL_VERSION = "gex-engine/2.0.0"
+#
+# 2.1.0: an explicitly configured zero rate or dividend is now honoured rather
+# than falling through to the snapshot value. That genuinely changes numbers for
+# any config that relied on the old behaviour, so the version moves with it.
+MODEL_VERSION = "gex-engine/2.1.0"
 
 SECONDS_PER_DAY = 86_400.0
 
@@ -60,40 +64,106 @@ class DayCountConvention(str, Enum):
 
 
 class RateSource(str, Enum):
+    """Where the risk-free rate comes from.
+
+    ``ZERO`` is a decision, not an absence: it resolves to 0.0 and counts as
+    fully specified. That distinction is why resolution follows this enum rather
+    than picking the first non-None number -- an explicitly configured zero must
+    not be overridden merely because zero is falsy.
+    """
+
     CONFIGURED_CONSTANT = "configured_constant"
+    SNAPSHOT = "snapshot"
+    ZERO = "zero"
+    # Declared but unavailable: no vendor rate feed is wired up. Selecting one
+    # produces RATE_SOURCE_UNSUPPORTED rather than a silent default.
     VENDOR_SOFR = "vendor_sofr"
     VENDOR_TREASURY = "vendor_treasury"
-    ZERO = "zero"
+
+    @property
+    def is_available(self) -> bool:
+        return self in (
+            RateSource.CONFIGURED_CONSTANT,
+            RateSource.SNAPSHOT,
+            RateSource.ZERO,
+        )
 
 
 class DividendSource(str, Enum):
     CONFIGURED_CONSTANT = "configured_constant"
-    VENDOR_ANNUAL_DIVIDEND = "vendor_annual_dividend"
+    SNAPSHOT = "snapshot"
     ZERO = "zero"
+    # Declared but unavailable: no vendor dividend feed is wired up.
+    VENDOR_ANNUAL_DIVIDEND = "vendor_annual_dividend"
+
+    @property
+    def is_available(self) -> bool:
+        return self in (
+            DividendSource.CONFIGURED_CONSTANT,
+            DividendSource.SNAPSHOT,
+            DividendSource.ZERO,
+        )
 
 
 class ExpirationTimestampRule(str, Enum):
     """When a series stops accruing gamma.
 
-    ``ROOT_SPECIFIC_SETTLEMENT`` is the correct rule and the default: SPXW is
-    PM-settled at 16:00 ET, SPX standard is AM-settled at the 09:30 ET open. The
-    alternatives exist to quantify how much that distinction is worth, not
-    because they are defensible.
+    Every supported rule produces a genuinely different effective timestamp, and
+    therefore a different time-to-expiry and a different gamma. A rule that only
+    changed metadata would let two fingerprints differ while the numbers were
+    identical, which is worse than having no rule at all.
+
+    ``CALENDAR_MIDNIGHT`` is deliberately **unsupported**. Options do not expire
+    at midnight; the rule has no financial meaning, and its name never made clear
+    whether it meant the start or the end of the expiration date. It remains in
+    the enum so it can be explicitly refused rather than silently accepted.
     """
 
+    #: SPXW PM-settled at 16:00 ET, SPX standard AM-settled at the 09:30 ET open.
     ROOT_SPECIFIC_SETTLEMENT = "root_specific_settlement"
+    #: As above, but a PM settlement on an early-close session moves to 13:00 ET.
     ROOT_SPECIFIC_SETTLEMENT_WITH_EARLY_CLOSE = (
         "root_specific_settlement_with_early_close"
     )
+    #: Always 16:00 ET, ignoring the root. Quantifies what the AM/PM distinction
+    #: is worth; not a defensible production rule.
     FIXED_1600_ET = "fixed_1600_et"
+    #: UNSUPPORTED -- rejected by config validation and by the resolver.
     CALENDAR_MIDNIGHT = "calendar_midnight"
+
+    @property
+    def is_supported(self) -> bool:
+        return self is not ExpirationTimestampRule.CALENDAR_MIDNIGHT
+
+    @property
+    def unsupported_reason(self) -> str | None:
+        if self is ExpirationTimestampRule.CALENDAR_MIDNIGHT:
+            return (
+                "options do not expire at midnight; the rule has no financial "
+                "meaning and its name does not say whether it means the start or "
+                "the end of the expiration date"
+            )
+        return None
 
 
 class UnderlyingPriceSource(str, Enum):
+    """Which underlying price prices each contract.
+
+    ``VENDOR_PER_CONTRACT`` is operational: it uses the underlying print the
+    vendor returned alongside *that contract*, and a missing or non-finite value
+    excludes the contract rather than falling back to the chain spot. Silently
+    falling back would hide exactly what selecting this source was meant to
+    detect.
+    """
+
     VENDOR_INDEX_SNAPSHOT = "vendor_index_snapshot"
     VENDOR_PER_CONTRACT = "vendor_per_contract"
     CONFIGURED_CONSTANT = "configured_constant"
     SYNTHETIC = "synthetic"
+
+    @property
+    def is_available(self) -> bool:
+        return True
 
 
 # Minimum-time-to-expiry floors under evaluation. Gamma diverges as T -> 0 for an
@@ -129,9 +199,14 @@ class ModelSpec:
         UnderlyingPriceSource.VENDOR_INDEX_SNAPSHOT
     )
     iv_price_source: IVSource = IVSource.VENDOR_DEFAULT_IV
-    # Effective numeric values actually used, not just their provenance.
-    risk_free_rate: float = 0.0
-    dividend_yield: float = 0.0
+    # Configured numeric values. `None` means "not supplied", which is
+    # DIFFERENT from 0.0 -- an explicit zero is a decision and is honoured. The
+    # v2 code used `spec.risk_free_rate or snapshot.risk_free_rate`, which could
+    # not tell the two apart because zero is falsy.
+    risk_free_rate: float | None = 0.0
+    dividend_yield: float | None = 0.0
+    #: Only used by UnderlyingPriceSource.CONFIGURED_CONSTANT.
+    configured_underlying_price: float | None = None
     model_version: str = MODEL_VERSION
 
     @property
@@ -162,6 +237,7 @@ class ModelSpec:
             "iv_price_source": self.iv_price_source.value,
             "risk_free_rate": self.risk_free_rate,
             "dividend_yield": self.dividend_yield,
+            "configured_underlying_price": self.configured_underlying_price,
             "model_version": self.model_version,
         }
 

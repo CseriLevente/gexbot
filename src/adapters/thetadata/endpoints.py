@@ -6,10 +6,20 @@ this file: it is what turns "buy ThetaData" into a decision with a price on it.
 The single most consequential fact here: **gamma is a second-order greek**, and
 ``/v3/option/snapshot/greeks/second_order`` requires **Pro** ($160/mo).
 ``implied_vol`` is returned by ``/v3/option/snapshot/greeks/first_order``, which
-needs only **Standard** ($80/mo). Since the zero-gamma grid has to reprice gamma
-in-house anyway, taking IV from Standard and deriving gamma with our own
-Black-Scholes is both $80/mo cheaper *and* internally consistent -- the gamma at
-spot and the gamma on the grid then come from one model instead of two.
+needs only **Standard** ($80/mo).
+
+ThetaData Standard therefore *appears* to expose the inputs a local gamma
+calculation requires. Two things follow from that, and only two:
+
+* it is $80/mo cheaper, which is a fact about a price list;
+* the gamma at spot and the gamma on the zero-gamma grid would come from one
+  model rather than two, which is a property of our own code.
+
+What does **not** follow, and is claimed nowhere: that Standard is sufficient in
+practice, or that a locally-derived gamma agrees numerically with ThetaData's
+own. **Numerical consistency with ThetaData vendor gamma has not been validated
+on live data** -- no request in this repository has ever reached the vendor.
+See ``docs/OPEN_DECISIONS.md`` OD-3.
 
 See ``docs/handoff/data-requirements.md`` for the full comparison.
 

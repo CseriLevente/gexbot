@@ -100,6 +100,10 @@ class ExclusionReason(str, Enum):
     NO_OPEN_INTEREST = "no_open_interest"
     NO_GAMMA_SOURCE = "no_gamma_source"
     NON_FINITE_GAMMA = "non_finite_gamma"
+    #: The configured underlying-price source produced nothing usable for
+    #: this contract. GEX scales by spot squared, so there is no number to
+    #: report -- not a number computed against a different spot.
+    NO_UNDERLYING_PRICE = "no_underlying_price"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,11 +134,17 @@ class ContractGex:
 
     @property
     def moneyness(self) -> float | None:
+        """Log-moneyness, or None when there is no spot to measure against.
+
+        A contract without a resolved spot has no moneyness -- not a moneyness
+        of zero, which would place it exactly at the money.
+        """
         import math
 
-        if self.effective.spot <= 0.0 or self.contract.strike <= 0.0:
+        spot = self.effective.spot
+        if spot is None or spot <= 0.0 or self.contract.strike <= 0.0:
             return None
-        return math.log(self.contract.strike / self.effective.spot)
+        return math.log(self.contract.strike / spot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +247,18 @@ def compute_contract_gex(
             excluded_expiries.add(contract.expiry.isoformat())
             continue
 
+        if not effective.has_valid_spot:
+            # A vendor gamma does not rescue this: gamma is one factor of the
+            # product and the spot is another. v2.1 recorded the missing spot
+            # and priced the contract anyway against the chain-level spot the
+            # operator had explicitly not selected.
+            #
+            # Checked on the spot specifically rather than on full resolution,
+            # so that a vendor-gamma contract with no IV -- which needs neither
+            # an IV nor a rate -- is not swept up and mislabelled.
+            exclusions[ExclusionReason.NO_UNDERLYING_PRICE] += 1
+            continue
+
         dte = calendar_dte(snapshot.as_of, contract.expiry)
         if cfg.max_dte is not None and dte > cfg.max_dte:
             exclusions[ExclusionReason.BEYOND_MAX_DTE] += 1
@@ -264,6 +286,9 @@ def compute_contract_gex(
 
         # The notional scales by the EFFECTIVE spot, which under
         # VENDOR_PER_CONTRACT differs per contract.
+        # ``has_valid_spot`` was checked above, which is what makes this
+        # narrowing sound: an unresolved spot never reaches the arithmetic.
+        assert effective.spot is not None
         magnitude = notional_gex(
             gamma=gamma_value,
             open_interest=open_interest,

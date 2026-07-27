@@ -46,6 +46,7 @@ from src.adapters.thetadata.endpoints import (
     tier_satisfies,
 )
 from src.adapters.transport import FakeTransport
+from src.domain.completeness import CompletenessStatus
 from src.domain.contracts import OptionRight, OptionRoot, SnapshotClocks
 from src.domain.iv import IVQualityFlag, IVSource
 from src.domain.model_spec import ModelSpec
@@ -452,7 +453,12 @@ def test_missing_greeks_leaves_iv_none_and_is_counted():
 def test_partial_chain_produces_only_the_contracts_that_were_sent():
     chain = build(quote_rows=parse_csv(fixture("quotes_partial_chain.csv")))
     assert len(chain.quotes) == 2
-    assert chain.expected_contract_count == 2
+    # v2.1 asserted ``expected_contract_count == 2`` here -- which is the defect
+    # stated as an expectation. This chain is *called* partial in its own
+    # fixture name; nothing in the response says how many contracts were owed,
+    # so the expected count is unknown and must stay that way.
+    assert chain.expected_contract_count is None
+    assert chain.completeness_status is CompletenessStatus.PARTIALLY_OBSERVED
 
 
 def test_extra_open_interest_rows_without_a_quote_are_ignored():

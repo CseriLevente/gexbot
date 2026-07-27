@@ -107,6 +107,8 @@ make it look worse.
 | Regression | `regression` | Frozen expected values, hand-transcribed | `TESTED_SYNTHETICALLY` |
 | Replay | `replay` | Same inputs produce the same output hash | `TESTED_SYNTHETICALLY` |
 | Release integrity | — | Bare-interpreter run, pinned build, reproducible archive | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Core isolation | — | Static import graph + `-S -E` subprocess, host-independent | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Store integrity | — | Orphans, hash/size mismatch, incomplete writes, duplicate ids | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 
 **No test touches the network.** `FakeTransport` raises on an unregistered route
 rather than silently succeeding, so an accidental real call surfaces as a loud
@@ -117,7 +119,7 @@ written by this repository, not captured vendor responses. Passing them
 establishes that the parser, the join and the maths behave as specified on the
 inputs we imagined. It does not establish that ThetaData emits those inputs.
 Every integration claim in this repository is
-`NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA`.
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
 
 ### Environment independence
 
@@ -213,7 +215,7 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
-Current: **93.30%** across 3,879 statements, against a `fail_under` of 90.
+Current: **93.89%** across 4,192 statements, against a `fail_under` of 90.
 
 ### Commands
 

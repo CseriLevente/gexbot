@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gex-futures-bot"
-version = "2.1.0"
+version = "2.1.1"
 description = "GEX research engine for SPX/SPXW option chains (research only; cannot trade)"
 requires-python = ">=3.12,<3.14"
 
@@ -112,7 +112,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately reach into private helpers and build odd inputs on purpose.
-"tests/*" = ["S105", "S106", "PT006", "PT007"]
+# TID251: the banned-api rule targets production code importing from tests;
+# test modules sharing fixture builders with each other is intended. The
+# real rule is enforced against src/ by test_architecture.py.
+"tests/*" = ["S105", "S106", "PT006", "PT007", "TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "tests".msg = "Production code must never import from tests. Use src.synthetic instead."

@@ -28,13 +28,20 @@ import io
 import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from src.adapters.raw_store import CaptureSession, NullRawStore, RawResponseStore
+from src.adapters.raw_store import (
+    PARSER_VERSION,
+    CaptureSession,
+    NullRawStore,
+    RawResponseStore,
+)
 from src.adapters.thetadata.endpoints import (
     DEFAULT_BASE_URL,
     MINIMUM_TIER,
@@ -45,6 +52,7 @@ from src.adapters.thetadata.endpoints import (
     tier_satisfies,
 )
 from src.adapters.transport import HttpResponse, HttpTransport
+from src.domain.completeness import CompletenessStatus
 from src.domain.contracts import (
     ChainSnapshot,
     OptionContract,
@@ -72,6 +80,105 @@ class DuplicateRowError(ThetaDataError):
     """Two rows claim the same contract identity and cannot be reconciled."""
 
 
+class TimestampSource(str, Enum):
+    """Which vendor response a timestamp came from.
+
+    v2.1 tracked one chain-wide ``localisation_applied`` boolean, and set it
+    from the quote loop alone. A chain with timezone-aware quotes and naive
+    greeks therefore reported that no assumption had been applied while an
+    assumption had in fact been applied to every greek record -- and the greeks
+    carry the IV and the underlying price, so the assumption was doing real work
+    where it was invisible.
+    """
+
+    QUOTE = "quote"
+    OPEN_INTEREST = "open_interest"
+    FIRST_ORDER_GREEKS = "first_order_greeks"
+    SECOND_ORDER_GREEKS = "second_order_greeks"
+    IMPLIED_VOL = "implied_vol"
+    UNDERLYING = "underlying"
+    CONTRACT_METADATA = "contract_metadata"
+
+
+@dataclass(slots=True)
+class TimestampLocalizationSummary:
+    """What we assumed about one source's clock, and how often."""
+
+    source: TimestampSource
+    rows_seen: int = 0
+    naive_rows_localized: int = 0
+    aware_rows_preserved: int = 0
+    invalid_rows: int = 0
+
+    def record(self, *, parsed: datetime | None, assumed: bool) -> None:
+        self.rows_seen += 1
+        if parsed is None:
+            self.invalid_rows += 1
+        elif assumed:
+            self.naive_rows_localized += 1
+        else:
+            self.aware_rows_preserved += 1
+
+    @property
+    def assumed_timezone(self) -> str | None:
+        """Named only when an assumption was actually applied to this source."""
+        return VENDOR_TIMEZONE_ASSUMPTION if self.naive_rows_localized else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source.value,
+            "rows_seen": self.rows_seen,
+            "naive_rows_localized": self.naive_rows_localized,
+            "aware_rows_preserved": self.aware_rows_preserved,
+            "invalid_rows": self.invalid_rows,
+            "assumed_timezone": self.assumed_timezone,
+        }
+
+
+class LocalizationLedger:
+    """Collects per-source summaries during assembly."""
+
+    def __init__(self) -> None:
+        self._by_source: dict[TimestampSource, TimestampLocalizationSummary] = {
+            source: TimestampLocalizationSummary(source=source)
+            for source in TimestampSource
+        }
+
+    def parse(self, value: str | None, *, source: TimestampSource) -> datetime | None:
+        parsed, assumed = parse_vendor_timestamp(value)
+        self._by_source[source].record(parsed=parsed, assumed=assumed)
+        return parsed
+
+    @property
+    def any_assumption_applied(self) -> bool:
+        return any(s.naive_rows_localized for s in self._by_source.values())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "any_assumption_applied": self.any_assumption_applied,
+            "assumption_status": VENDOR_TIMEZONE_ASSUMPTION_STATUS,
+            "by_source": {
+                source.value: summary.as_dict()
+                for source, summary in self._by_source.items()
+                if summary.rows_seen
+            },
+        }
+
+
+class ThetaDataVendorError(ThetaDataError):
+    """The vendor returned a non-success status, or a vendor error document.
+
+    The client checks the status itself rather than trusting the transport to
+    have raised. ``RetryingTransport`` does raise on non-2xx, but the transport
+    is a *protocol*: a caller may supply any implementation, and v2.1's
+    contract did not say that a non-2xx response could never arrive here. One
+    that returned a 500 handed an HTML error page straight to ``parse_csv``,
+    which parsed it happily into rows with no recognised columns -- surfacing
+    several layers later as a confusing schema error rather than as "the vendor
+    said 500".
+    """
+
+
 class IntegerParseIssue(str, Enum):
     """Why an integer field could not be read.
 
@@ -87,6 +194,68 @@ class IntegerParseIssue(str, Enum):
     NON_INTEGER_INPUT = "non_integer_input"
     NEGATIVE_VALUE = "negative_value"
     OUT_OF_RANGE = "out_of_range"
+
+
+#: Fast path for the overwhelmingly common case: an optionally-signed run of
+#: digits, which ``int()`` parses exactly and without ceremony.
+_INTEGER_GRAMMAR = re.compile(r"^[+-]?\d+$")
+
+
+class FloatParseIssue(str, Enum):
+    """Why a float field did not yield a number.
+
+    v2.1 had ``_to_float`` return ``None`` for a missing field and ``None`` for
+    ``"oops"``. Downstream, a vendor that sent nothing and a vendor that sent
+    garbage produced identical state, so corruption was indistinguishable from
+    absence -- and absence is normal, so corruption looked normal.
+    """
+
+    MISSING_VALUE = "missing_value"
+    MALFORMED_VALUE = "malformed_value"
+    NON_FINITE_INPUT = "non_finite_input"
+    OUT_OF_RANGE = "out_of_range"
+    CROSSED_MARKET = "crossed_market"
+    ZERO_BID = "zero_bid"
+
+
+def parse_float_field(
+    value: str | float | None,
+    *,
+    field: str,
+    allow_negative: bool = True,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> tuple[float | None, FloatParseIssue | None]:
+    """Strictly parse a float vendor field, distinguishing every failure.
+
+    Absence and corruption get different codes, so that "the vendor did not
+    send a bid" and "the vendor sent the word oops" stop looking the same three
+    layers downstream.
+    """
+    del field  # present for call-site readability
+    if value is None:
+        return None, FloatParseIssue.MISSING_VALUE
+    if isinstance(value, bool):
+        return None, FloatParseIssue.MALFORMED_VALUE
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None, FloatParseIssue.MISSING_VALUE
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None, FloatParseIssue.MALFORMED_VALUE
+    else:
+        parsed = float(value)
+    if not math.isfinite(parsed):
+        return None, FloatParseIssue.NON_FINITE_INPUT
+    if not allow_negative and parsed < 0.0:
+        return None, FloatParseIssue.OUT_OF_RANGE
+    if minimum is not None and parsed < minimum:
+        return None, FloatParseIssue.OUT_OF_RANGE
+    if maximum is not None and parsed > maximum:
+        return None, FloatParseIssue.OUT_OF_RANGE
+    return parsed, None
 
 
 def parse_int_field(
@@ -120,15 +289,26 @@ def parse_int_field(
         text = str(value).strip()
         if not text:
             return None, IntegerParseIssue.MISSING_VALUE
-        try:
-            as_float = float(text)
-        except ValueError:
-            return None, IntegerParseIssue.MALFORMED_VALUE
-        if math.isnan(as_float) or math.isinf(as_float):
-            return None, IntegerParseIssue.NON_FINITE_INPUT
-        if not as_float.is_integer():
-            return None, IntegerParseIssue.NON_INTEGER_INPUT
-        parsed = int(as_float)
+        # Decimal, not float. v2.1 reached the integer via ``float(text)``,
+        # which is exact only below 2^53: "9007199254740993" became
+        # 9007199254740992 -- a different number, equally plausible, with
+        # nothing to indicate it had changed. Open interest is precisely the
+        # field where a large integer is realistic.
+        if _INTEGER_GRAMMAR.match(text):
+            parsed = int(text)
+        else:
+            try:
+                as_decimal = Decimal(text)
+            except InvalidOperation:
+                return None, IntegerParseIssue.MALFORMED_VALUE
+            if as_decimal.is_nan() or as_decimal.is_infinite():
+                return None, IntegerParseIssue.NON_FINITE_INPUT
+            # Exact integrality checked in decimal arithmetic, so "12.0" and
+            # "9007199254740993.0" are both handled without a float ever
+            # existing.
+            if as_decimal != as_decimal.to_integral_value():
+                return None, IntegerParseIssue.NON_INTEGER_INPUT
+            parsed = int(as_decimal)
     if not allow_negative and parsed < 0:
         return None, IntegerParseIssue.NEGATIVE_VALUE
     if maximum is not None and abs(parsed) > maximum:
@@ -376,12 +556,32 @@ def detect_vendor_error(text: str) -> str | None:
 
 
 def _to_float(value: str | None) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    """Lenient read for fields where absence and corruption are equivalent.
+
+    Prefer :func:`_to_float_recorded` on anything that reaches a number the
+    operator will read.
+    """
+    parsed, _ = parse_float_field(value, field="")
+    return parsed
+
+
+def _to_float_recorded(
+    value: str | None,
+    *,
+    field: str,
+    sink: list[tuple[str, str]],
+    allow_negative: bool = True,
+) -> float | None:
+    """Parse a float and record *why* it failed, when it failed for a reason.
+
+    A missing field is not recorded: absence is ordinary and would drown the
+    signal. A malformed or non-finite one is, because that is the vendor
+    sending something wrong rather than sending nothing.
+    """
+    parsed, issue = parse_float_field(value, field=field, allow_negative=allow_negative)
+    if issue is not None and issue is not FloatParseIssue.MISSING_VALUE:
+        sink.append((field, issue.value))
+    return parsed
 
 
 def _to_int_recorded(
@@ -678,13 +878,27 @@ class ChainCompleteness:
         return min(self.joined_contract_count / self.expected_contract_count, 1.0)
 
     @property
-    def status(self) -> str:
+    def status(self) -> CompletenessStatus:
+        """Measurement or absence. Never "complete" on the strength of itself."""
         if not self.independently_observed:
-            return "PARTIALLY_OBSERVED"
+            # An expectation taken from the response being judged is not an
+            # expectation. Rows arrived and joined; whether more were owed is
+            # unknowable from here.
+            return (
+                CompletenessStatus.UNKNOWN
+                if self.joined_contract_count == 0
+                else CompletenessStatus.PARTIALLY_OBSERVED
+            )
         ratio = self.completeness_ratio
         if ratio is None:
-            return "PARTIALLY_OBSERVED"
-        return "COMPLETE" if ratio >= 1.0 else "INCOMPLETE"
+            # independently_observed with no usable ratio means the universe was
+            # supplied but empty -- nothing was claimed, so nothing is measured.
+            return CompletenessStatus.UNKNOWN
+        return (
+            CompletenessStatus.MEASURED_COMPLETE
+            if ratio >= 1.0
+            else CompletenessStatus.MEASURED_INCOMPLETE
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -697,7 +911,7 @@ class ChainCompleteness:
             "joined_contract_count": self.joined_contract_count,
             "completeness_ratio": self.completeness_ratio,
             "independently_observed": self.independently_observed,
-            "status": self.status,
+            "status": self.status.value,
             "missing_by_source": dict(sorted(self.missing_by_source.items())),
             "unexpected_identities": list(self.unexpected_identities),
         }
@@ -766,18 +980,36 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
     ]
 
     quotes: list[OptionQuote] = []
-    localisation_applied = False
-    for row in inputs.quote_rows:
-        key = row_key(row)
+    ledger = LocalizationLedger()
+    # Iterate the DEDUPLICATED rows, not ``inputs.quote_rows``. v2.1 computed
+    # ``quote_indexed`` -- selecting a canonical row per identity and reporting
+    # what it discarded -- and then walked the original unfiltered list anyway.
+    # A duplicated quote was therefore assembled twice while the duplicate
+    # report described a collapse that had not happened. Sorted by key so the
+    # assembled order cannot depend on the order the vendor happened to send.
+    for key in sorted(quote_indexed.rows):
+        row = quote_indexed.rows[key]
         first = first_by_key.get(key, {})
         second = second_by_key.get(key, {})
         oi_row = oi_by_key.get(key, {})
 
         parse_issues: list[tuple[str, str]] = []
-        quote_ts, assumed = parse_vendor_timestamp(row.get("timestamp"))
-        localisation_applied = localisation_applied or assumed
-        bid = _to_float(row.get("bid"))
-        ask = _to_float(row.get("ask"))
+        quote_ts = ledger.parse(row.get("timestamp"), source=TimestampSource.QUOTE)
+        if oi_row:
+            ledger.parse(oi_row.get("timestamp"), source=TimestampSource.OPEN_INTEREST)
+        if first:
+            ledger.parse(
+                first.get("timestamp"), source=TimestampSource.FIRST_ORDER_GREEKS
+            )
+            ledger.parse(
+                first.get("underlying_timestamp"), source=TimestampSource.UNDERLYING
+            )
+        if second:
+            ledger.parse(
+                second.get("timestamp"), source=TimestampSource.SECOND_ORDER_GREEKS
+            )
+        bid = _to_float_recorded(row.get("bid"), field="bid", sink=parse_issues)
+        ask = _to_float_recorded(row.get("ask"), field="ask", sink=parse_issues)
         crossed = bid is not None and ask is not None and ask < bid
 
         contract = OptionContract(
@@ -873,20 +1105,27 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
         clocks=inputs.clocks,
         spot_timestamp=inputs.spot_timestamp,
         source="thetadata",
-        # The INDEPENDENT expectation when one exists; otherwise the
-        # received count, which chain_completeness then treats as only
-        # partially observed rather than as proof of completeness.
+        # The INDEPENDENT expectation, or None. v2.1 substituted
+        # ``len(inputs.quote_rows)`` here, which made a truncated response
+        # complete by construction: the measure and the measured were the same
+        # number. ``None`` must survive to the confidence model.
         expected_contract_count=(
             completeness.expected_contract_count
             if completeness.independently_observed
-            else len(inputs.quote_rows)
+            else None
         ),
+        completeness_status=completeness.status,
         meta={
             **dict(inputs.meta),
             "duplicate_reports": [r.as_dict() for r in duplicate_reports],
             "chain_completeness": completeness.as_dict(),
+            "parser_version": PARSER_VERSION,
+            # Per source, not one chain-wide flag. See TimestampSource.
+            "timestamp_localization": ledger.as_dict(),
             "vendor_timezone_assumption": {
-                "applied": localisation_applied,
+                # Retained for compatibility; the per-source breakdown above is
+                # the authoritative record.
+                "applied": ledger.any_assumption_applied,
                 "assumed_timezone": VENDOR_TIMEZONE_ASSUMPTION,
                 "status": VENDOR_TIMEZONE_ASSUMPTION_STATUS,
             },
@@ -984,9 +1223,20 @@ class ThetaDataClient:
                 request_id=response.request_id,
             )
 
+        # Status first, unconditionally, before the body is looked at at all.
+        # A 500 is a 500 whether or not its body happens to resemble a vendor
+        # error document, and an HTML error page must never reach the CSV
+        # parser as though it were data.
+        if not 200 <= response.status_code < 300:
+            raise ThetaDataVendorError(
+                f"{endpoint.value} returned HTTP {response.status_code}; "
+                f"refusing to parse a non-success body as CSV "
+                f"({len(response.text)} bytes)"
+            )
+
         vendor_error = detect_vendor_error(response.text)
         if vendor_error:
-            raise ThetaDataError(
+            raise ThetaDataVendorError(
                 f"{endpoint.value} returned a vendor error body: {vendor_error}"
             )
         rows = parse_csv(response.text)
@@ -1045,6 +1295,7 @@ class ThetaDataClient:
         risk_free_rate: float = 0.0,
         dividend_yield: float = 0.0,
         iv_source: IVSource = IVSource.VENDOR_DEFAULT_IV,
+        duplicate_policy: str = "reject",
         capture: CaptureSession | None = None,
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
@@ -1089,6 +1340,7 @@ class ThetaDataClient:
                     normalized_at=received,
                 ),
                 iv_source=iv_source,
+                duplicate_policy=duplicate_policy,
                 expected_contract_ids=expected_contract_ids,
                 expected_source=expected_source,
                 meta={"thetadata_request": self.effective_request_parameters()},

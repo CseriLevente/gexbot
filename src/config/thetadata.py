@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import pathlib
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -28,7 +30,10 @@ from urllib.parse import urlparse
 from src.domain.iv import IVSource
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from src.adapters.thetadata.client import ThetaDataClient
+    from datetime import date, datetime
+
+    from src.adapters.thetadata.client import ChainRequest, ThetaDataClient
+    from src.domain.contracts import ChainSnapshot
 
 
 class AuthenticationMode(str, Enum):
@@ -114,11 +119,43 @@ class ThetaDataConfig:
     duplicate_policy: str = "reject"
 
     def credentials(self) -> tuple[str | None, str | None]:
-        """Read credentials from the environment. Never from a file."""
+        """Read credentials from the environment. Never from a file.
+
+        Returns whatever is there, including ``None``. Use
+        :meth:`resolved_credentials` where a missing value must be an error.
+        """
         if not self.authentication_mode.requires_credentials:
             return None, None
         username = os.environ.get(self.username_env) if self.username_env else None
         password = os.environ.get(self.password_env) if self.password_env else None
+        return username, password
+
+    def resolved_credentials(self) -> tuple[str | None, str | None]:
+        """Credentials, or a loud failure naming the variables that are empty.
+
+        Whitespace counts as empty: an environment variable set to " " is a
+        configuration accident, not a password.
+        """
+        if not self.authentication_mode.requires_credentials:
+            return None, None
+        username, password = self.credentials()
+        missing = [
+            name
+            for name, value in (
+                (self.username_env, username),
+                (self.password_env, password),
+            )
+            if name and not (value or "").strip()
+        ]
+        if missing:
+            raise MissingCredentialsError(
+                f"authentication_mode is {self.authentication_mode.value} but "
+                f"{sorted(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} unset or empty in the "
+                "environment. Refusing to build an unauthenticated client: a "
+                "silent downgrade turns a configuration error into an "
+                "unexplained 401 from the vendor."
+            )
         return username, password
 
     def as_dict(self) -> dict[str, Any]:
@@ -204,6 +241,19 @@ class ThetaDataConfigError(ValueError):
     """Invalid ThetaData configuration."""
 
 
+class MissingCredentialsError(ThetaDataConfigError):
+    """BASIC auth was selected but the environment holds no usable credential.
+
+    Raised at construction rather than at the first request. v2.1 built the
+    client with ``basic_auth=... if username and password else None``, so an
+    unset environment variable produced a perfectly good *unauthenticated*
+    client and the resulting 401 looked like a vendor outage rather than a
+    configuration mistake.
+
+    Names the environment variables. Never their values.
+    """
+
+
 ALLOWED_KEYS = frozenset(
     {
         "base_url",
@@ -234,7 +284,27 @@ ALLOWED_KEYS = frozenset(
 )
 
 VALID_TIERS = ("free", "value", "standard", "pro")
-VALID_DUPLICATE_POLICIES = ("reject", "newest_timestamp")
+#: How to resolve two rows claiming the same contract.
+#:
+#: ``reject`` and ``collapse_exact`` both collapse byte-identical rows -- a
+#: duplicate that carries no conflicting information has nothing to arbitrate --
+#: and both refuse rows that disagree. ``collapse_exact`` exists as the explicit
+#: spelling of that behaviour, so a config can state it rather than rely on a
+#: reader knowing what ``reject`` quietly permits. See docs/OPEN_DECISIONS.md
+#: OD-13.
+VALID_DUPLICATE_POLICIES = ("reject", "collapse_exact", "newest_timestamp")
+
+
+#: ThetaData's ``min_time`` filter is a wall-clock time of day, HH:MM:SS with
+#: optional milliseconds. Accepting anything serialisable would let "nine
+#: thirty" reach the vendor and come back as an unexplained empty chain.
+MIN_TIME_GRAMMAR = re.compile(r"^([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,3})?$")
+
+
+def _required(value: float | None) -> float:
+    """Narrow ``float | None`` where the parser has already refused ``None``."""
+    assert value is not None
+    return value
 
 
 def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataConfig:
@@ -260,16 +330,48 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
         )
 
     def number(
-        key: str, default: float, *, low: float, high: float | None = None
-    ) -> float:
+        key: str,
+        default: float | None,
+        *,
+        low: float,
+        high: float | None = None,
+        optional: bool = False,
+    ) -> float | None:
         value = raw.get(key, default)
+        if value is None:
+            if optional:
+                return None
+            fail("expected a number, got null", key)
         if isinstance(value, bool) or not isinstance(value, int | float):
             fail(f"expected a number, got {type(value).__name__}", key)
+        # isfinite before the range checks, not after: NaN compares False
+        # against every bound, so `value < low` and `value > high` are both
+        # False and a range check alone waves it straight through.
+        if not math.isfinite(float(value)):
+            fail(f"expected a finite number, got {value!r}", key)
         if value < low:
             fail(f"value {value} is below the minimum {low}", key)
         if high is not None and value > high:
             fail(f"value {value} is above the maximum {high}", key)
         return float(value)
+
+    def text(key: str, default: str | None, *, optional: bool = False) -> str | None:
+        """A configured string must be a non-empty string.
+
+        An empty ``greeks_version`` or ``username_env`` is not a value, it is a
+        typo that survives serialisation.
+        """
+        value = raw.get(key, default)
+        if value is None:
+            if optional:
+                return None
+            fail("expected a string, got null", key)
+        if isinstance(value, bool) or not isinstance(value, str):
+            fail(f"expected a string, got {type(value).__name__}", key)
+        text_value = str(value)
+        if not text_value.strip():
+            fail("expected a non-empty string", key)
+        return text_value
 
     def integer(
         key: str, default: int | None, *, low: int, high: int | None = None
@@ -285,9 +387,8 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
             fail(f"value {value} is above the maximum {high}", key)
         return int(value)
 
-    base_url = raw.get("base_url", "http://127.0.0.1:25503")
-    if not isinstance(base_url, str):
-        fail("expected a string", "base_url")
+    base_url = text("base_url", "http://127.0.0.1:25503") or ""
+
     parsed_url = urlparse(base_url)
     if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
         fail(
@@ -305,8 +406,8 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
             "authentication_mode",
         )
 
-    username_env = raw.get("username_env")
-    password_env = raw.get("password_env")
+    username_env = text("username_env", None, optional=True)
+    password_env = text("password_env", None, optional=True)
     if mode.requires_credentials and not (username_env and password_env):
         fail(
             "basic authentication requires username_env and password_env to name "
@@ -326,7 +427,7 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
             "duplicate_policy",
         )
 
-    rate_type = raw.get("rate_type", "sofr")
+    rate_type = text("rate_type", "sofr", optional=True)
     if rate_type is not None and rate_type not in SUPPORTED_RATE_TYPES:
         fail(
             f"{rate_type!r} is not a documented ThetaData rate type; supported "
@@ -369,18 +470,30 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
             "stock_price_source",
         )
 
+    min_time = text("min_time", None, optional=True)
+    if min_time is not None and not MIN_TIME_GRAMMAR.match(min_time):
+        fail(
+            f"{min_time!r} is not a valid min_time; expected HH:MM:SS or "
+            "HH:MM:SS.mmm in 24-hour wall-clock form",
+            "min_time",
+        )
+
     return ThetaDataConfig(
         base_url=base_url,
         authentication_mode=mode,
         username_env=username_env,
         password_env=password_env,
         tier=tier,
-        timeout_seconds=number("timeout_seconds", 30.0, low=0.001, high=600.0),
-        connect_timeout_seconds=number(
-            "connect_timeout_seconds", 5.0, low=0.001, high=600.0
+        timeout_seconds=_required(
+            number("timeout_seconds", 30.0, low=0.001, high=600.0)
+        ),
+        connect_timeout_seconds=_required(
+            number("connect_timeout_seconds", 5.0, low=0.001, high=600.0)
         ),
         max_retries=integer("max_retries", 3, low=0, high=20) or 0,
-        backoff_base_seconds=number("backoff_base_seconds", 0.25, low=0.0, high=60.0),
+        backoff_base_seconds=_required(
+            number("backoff_base_seconds", 0.25, low=0.0, high=60.0)
+        ),
         max_response_bytes=integer(
             "max_response_bytes", 64 * 1024 * 1024, low=1024, high=2**31
         )
@@ -389,14 +502,16 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
         raw_capture_path=(
             pathlib.Path(str(capture_path_raw)) if capture_path_raw else None
         ),
-        greeks_version=raw.get("greeks_version", "latest"),
+        greeks_version=text("greeks_version", "latest"),
         rate_type=rate_type,
-        rate_value=raw.get("rate_value"),
-        annual_dividend=raw.get("annual_dividend"),
+        rate_value=number("rate_value", None, low=-100.0, high=100.0, optional=True),
+        annual_dividend=number(
+            "annual_dividend", None, low=0.0, high=10_000.0, optional=True
+        ),
         use_market_value=use_market_value,
         max_dte=integer("max_dte", None, low=0, high=3650),
         strike_range=integer("strike_range", None, low=1, high=10_000),
-        min_time=raw.get("min_time"),
+        min_time=min_time,
         iv_source=iv_source,
         duplicate_policy=duplicate_policy,
     )
@@ -428,10 +543,13 @@ def build_thetadata_client(
     from src.adapters.thetadata.endpoints import Tier
     from src.adapters.transport import RetryingTransport, RetryPolicy
 
+    # Resolve credentials BEFORE anything is constructed, so that a missing
+    # secret cannot yield a usable unauthenticated client.
+    username, password = config.resolved_credentials()
+
     if transport is None:  # pragma: no cover - needs the http extra and a network
         from src.adapters.transport import HttpxTransport
 
-        username, password = config.credentials()
         transport = HttpxTransport(
             connect_timeout_seconds=config.connect_timeout_seconds,
             read_timeout_seconds=config.timeout_seconds,
@@ -476,3 +594,103 @@ def build_thetadata_client(
         raw_store=store,
         clock=clock,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ThetaDataRuntime:
+    """Everything a configured ThetaData session needs, assembled once.
+
+    v2.1 introduced the typed config and a client factory, which fixed half the
+    problem: the ``thetadata:`` section stopped being validated and discarded.
+    But five settings -- ``iv_source``, ``duplicate_policy``, ``max_dte``,
+    ``strike_range`` and ``min_time`` -- reached the typed object and stopped
+    there. ``build_thetadata_client`` never read them, and nothing told a caller
+    they had to re-supply them by hand on every ``fetch_chain``.
+
+    A setting that is parsed, validated, type-checked and hashed into the config
+    fingerprint but never applied is worse than a missing one, because it
+    survives review: somebody reads ``max_dte: 45`` in the YAML and believes it.
+
+    This object is the single place where configuration becomes behaviour. The
+    client carries the transport-level settings, ``default_chain_request``
+    carries the server-side filters, and the assembly settings carry the ones
+    that only matter once rows come back.
+    """
+
+    client: ThetaDataClient
+    default_chain_request: ChainRequest
+    iv_source: IVSource
+    duplicate_policy: str
+    config: ThetaDataConfig
+
+    @classmethod
+    def from_config(
+        cls,
+        config: ThetaDataConfig,
+        *,
+        symbol: str = "SPXW",
+        transport: Any = None,
+        clock: Any = None,
+    ) -> ThetaDataRuntime:
+        """The one sanctioned entry point. Nothing else assembles a session."""
+        from src.adapters.thetadata.client import ChainRequest
+
+        return cls(
+            client=build_thetadata_client(config, transport=transport, clock=clock),
+            default_chain_request=ChainRequest(
+                symbol=symbol,
+                max_dte=config.max_dte,
+                strike_range=config.strike_range,
+                min_time=config.min_time,
+            ),
+            iv_source=config.iv_source,
+            duplicate_policy=config.duplicate_policy,
+            config=config,
+        )
+
+    def fetch_chain(
+        self,
+        *,
+        as_of: datetime,
+        spot: float,
+        request: ChainRequest | None = None,
+        spot_timestamp: datetime | None = None,
+        open_interest_as_of: date | None = None,
+        risk_free_rate: float = 0.0,
+        dividend_yield: float = 0.0,
+        capture: Any = None,
+        expected_contract_ids: tuple[str, ...] | None = None,
+        expected_source: str = "none",
+    ) -> ChainSnapshot:
+        """Fetch and assemble using the configured settings.
+
+        Deliberately takes no ``iv_source``, ``duplicate_policy``, ``max_dte``,
+        ``strike_range`` or ``min_time`` argument. Those are configuration; a
+        caller who could pass them here could also disagree with the config, and
+        then the YAML would be a suggestion rather than a setting.
+        """
+        if capture is None and self.config.raw_capture_enabled:
+            # Configuring a capture path and then getting no audit trail because
+            # nobody threaded a session through is the same class of defect as
+            # a setting that never reaches a request.
+            from src.adapters.raw_store import CaptureSession
+
+            capture = CaptureSession(
+                store=self.client.raw_store,
+                session_id=f"{as_of.date().isoformat()}-{as_of.strftime('%H%M%S')}",
+            )
+
+        return self.client.fetch_chain(
+            request if request is not None else self.default_chain_request,
+            as_of=as_of,
+            spot=spot,
+            spot_timestamp=spot_timestamp,
+            open_interest_as_of=open_interest_as_of,
+            risk_free_rate=risk_free_rate,
+            dividend_yield=dividend_yield,
+            iv_source=self.iv_source,
+            duplicate_policy=self.duplicate_policy,
+            capture=capture,
+            expected_contract_ids=expected_contract_ids,
+            expected_source=expected_source,
+        )

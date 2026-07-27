@@ -85,6 +85,18 @@ def _finite(value: float | None) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelRealismWarning:
+    """A specified-but-implausible assumption. Never a completeness failure."""
+
+    code: str
+    field: str
+    detail: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "field": self.field, "detail": self.detail}
+
+
+@dataclass(frozen=True, slots=True)
 class EffectiveModelInputs:
     """Everything the pricer needs, plus where each value came from.
 
@@ -93,7 +105,7 @@ class EffectiveModelInputs:
     """
 
     # --- Resolved values ---
-    spot: float
+    spot: float | None
     strike: float
     right: str
     risk_free_rate: float
@@ -123,6 +135,102 @@ class EffectiveModelInputs:
         """False when the contract cannot be priced under this configuration."""
         return not self.issues
 
+    #: Issues that specifically invalidate the underlying price.
+    _SPOT_ISSUES = (
+        ResolutionIssue.UNDERLYING_MISSING,
+        ResolutionIssue.UNDERLYING_NOT_FINITE,
+        ResolutionIssue.UNDERLYING_NON_POSITIVE,
+        ResolutionIssue.UNDERLYING_SOURCE_UNSUPPORTED,
+    )
+
+    @property
+    def has_valid_spot(self) -> bool:
+        return self.spot is not None and _finite(self.spot) and self.spot > 0.0
+
+    @property
+    def eligible_for_current_gex(self) -> bool:
+        """Whether this contract may contribute to a current GEX total.
+
+        GEX = gamma x OI x multiplier x spot^2 x 0.01, so a contract without a
+        valid *selected* spot has no GEX -- not a GEX computed against some
+        other spot. Vendor gamma does not substitute: it supplies one factor of
+        the product, not the missing one.
+
+        Deliberately narrower than "no issues at all". A contract with a vendor
+        gamma needs no IV and no rate, because nothing is being priced locally;
+        requiring full resolution here would throw away contracts the vendor
+        already answered for. Only the inputs GEX *itself* consumes are
+        required: identity, expiry, and the spot.
+        """
+        blocking = (
+            *self._SPOT_ISSUES,
+            ResolutionIssue.EXPIRED,
+            ResolutionIssue.STRIKE_INVALID,
+        )
+        return self.has_valid_spot and not [i for i in self.issues if i in blocking]
+
+    @property
+    def eligible_for_local_gamma(self) -> bool:
+        """Whether Black-Scholes can be evaluated for this contract."""
+        return self.has_valid_spot and not self.issues
+
+    @property
+    def eligible_for_zero_gamma_repricing(self) -> bool:
+        """Whether this contract can be repriced at a hypothetical spot.
+
+        Repricing replaces the spot, but still needs every other input -- rate,
+        dividend, IV, expiry -- to have resolved.
+        """
+        return (
+            not [issue for issue in self.issues if issue not in self._SPOT_ISSUES]
+            and self.implied_volatility > 0.0
+        )
+
+    @property
+    def eligible_for_vendor_gamma_comparison(self) -> bool:
+        """Whether local and vendor gamma can be compared for this contract.
+
+        Needs the local side to be computable; the vendor side is checked by the
+        caller, which holds the quote.
+        """
+        return self.eligible_for_local_gamma
+
+    @property
+    def realism_warnings(self) -> tuple[ModelRealismWarning, ...]:
+        """Assumptions that are fully specified but economically unusual.
+
+        Kept strictly separate from ``missing_inputs``. An explicitly configured
+        zero rate is a complete specification; it is also implausible for an SPX
+        chain. Calling it "missing" conflates a provenance question with a
+        realism one, and then a deliberate choice looks like a bug.
+        """
+        warnings: list[ModelRealismWarning] = []
+        if self.risk_free_rate == 0.0:
+            warnings.append(
+                ModelRealismWarning(
+                    code="MODEL_REALISM_WARNING",
+                    field="risk_free_rate",
+                    detail=(
+                        "risk-free rate is exactly zero, which is fully specified "
+                        f"via {self.risk_free_rate_source.value} but unusual for a "
+                        "USD index chain"
+                    ),
+                )
+            )
+        if self.dividend_yield == 0.0:
+            warnings.append(
+                ModelRealismWarning(
+                    code="MODEL_REALISM_WARNING",
+                    field="dividend_yield",
+                    detail=(
+                        "dividend yield is exactly zero, which is fully specified "
+                        f"via {self.dividend_yield_source.value} but unusual for "
+                        "SPX, which carries a material yield"
+                    ),
+                )
+            )
+        return tuple(warnings)
+
     @property
     def is_fully_specified(self) -> bool:
         """Provenance-based completeness.
@@ -144,6 +252,11 @@ class EffectiveModelInputs:
         from src.gex.pricing import BlackScholesInputs
 
         self._require_usable()
+        if self.spot is None:  # pragma: no cover - _require_usable covers this
+            raise ModelResolutionError(
+                "cannot price without a resolved underlying price; the "
+                f"{self.underlying_price_source.value} source produced nothing"
+            )
         return BlackScholesInputs(
             spot=self.spot,
             strike=self.strike,
@@ -240,7 +353,18 @@ class EffectiveModelInputs:
 
 def _resolve_underlying(
     *, quote: OptionQuote, snapshot: ChainSnapshot, spec: ModelSpec
-) -> tuple[float, list[ResolutionIssue], list[str]]:
+) -> tuple[float | None, list[ResolutionIssue], list[str]]:
+    """Resolve the spot for THIS contract, or return ``None``.
+
+    v2.1 recorded the issue and then returned ``snapshot.spot`` anyway, under a
+    comment claiming it was "deliberately NOT falling back". Nothing downstream
+    read the issue, so the fallback happened in fact while the code said it did
+    not. Since GEX scales by spot squared, substituting a different underlying
+    silently reprices the contract.
+
+    ``None`` is the honest answer, and it makes every downstream use a type
+    error rather than a quiet arithmetic one.
+    """
     source = spec.underlying_price_source
     issues: list[ResolutionIssue] = []
     missing: list[str] = []
@@ -259,13 +383,13 @@ def _resolve_underlying(
             # which is exactly what the source was selected to detect.
             issues.append(ResolutionIssue.UNDERLYING_MISSING)
             missing.append("underlying_price (vendor_per_contract)")
-            return snapshot.spot, issues, missing
+            return None, issues, missing
         if not _finite(value):
             issues.append(ResolutionIssue.UNDERLYING_NOT_FINITE)
-            return snapshot.spot, issues, missing
+            return None, issues, missing
         if value <= 0.0:
             issues.append(ResolutionIssue.UNDERLYING_NON_POSITIVE)
-            return snapshot.spot, issues, missing
+            return None, issues, missing
         return value, issues, missing
 
     if source is UnderlyingPriceSource.CONFIGURED_CONSTANT:
@@ -273,14 +397,14 @@ def _resolve_underlying(
         if value is None:
             issues.append(ResolutionIssue.UNDERLYING_MISSING)
             missing.append("configured_underlying_price")
-            return snapshot.spot, issues, missing
+            return None, issues, missing
         if not _finite(value) or value <= 0.0:
             issues.append(ResolutionIssue.UNDERLYING_NOT_FINITE)
-            return snapshot.spot, issues, missing
+            return None, issues, missing
         return value, issues, missing
 
     issues.append(ResolutionIssue.UNDERLYING_SOURCE_UNSUPPORTED)
-    return snapshot.spot, issues, missing
+    return None, issues, missing
 
 
 def _resolve_rate(

@@ -23,11 +23,21 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 # Bumped when the parser's interpretation of a payload changes, so a stored
 # record says which code read it.
-PARSER_VERSION = "thetadata-v3-parser/2.0.0"
+#: The single definition. Bump this whenever parsing behaviour changes in a way
+#: that could alter a parsed value -- duplicate resolution, integer parsing,
+#: timestamp localisation, float classification. It participates in the replay
+#: hash, so a parser change that quietly alters numbers cannot masquerade as the
+#: same output.
+#:
+#: 2.1.1 changed: exact Decimal integer parsing (was float round-trip),
+#: structured float parse issues, per-source timestamp localisation, and
+#: assembly from deduplicated rows.
+PARSER_VERSION = "thetadata-v3-parser/2.1.1"
 
 
 class RawStoreError(RuntimeError):
@@ -126,6 +136,84 @@ def _safe_component(value: str) -> str:
     if not cleaned or cleaned.strip("-") == "":
         raise RawStoreError(f"unsafe identifier component: {value!r}")
     return cleaned
+
+
+class IntegrityStatus(str, Enum):
+    """What a scan found for one artefact.
+
+    Payload and index writes are each atomic, but not atomic *together*: a
+    crash between them leaves a consistent-looking store with one half of a
+    pair. Nothing in v2.1 could tell you afterwards which pairs had come apart,
+    which meant an audit trail whose own completeness was unverifiable.
+    """
+
+    VALID = "VALID"
+    #: A payload file with no index entry -- crash after rename, before append.
+    ORPHAN_PAYLOAD = "ORPHAN_PAYLOAD"
+    #: An index entry with no payload -- crash after append, before rename.
+    MISSING_PAYLOAD = "MISSING_PAYLOAD"
+    HASH_MISMATCH = "HASH_MISMATCH"
+    SIZE_MISMATCH = "SIZE_MISMATCH"
+    #: A leftover temp file. Evidence, not garbage: reported, never removed.
+    INCOMPLETE_WRITE = "INCOMPLETE_WRITE"
+    DUPLICATE_ID = "DUPLICATE_ID"
+    INVALID_METADATA = "INVALID_METADATA"
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrityFinding:
+    status: IntegrityStatus
+    artifact: str
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "artifact": self.artifact,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrityReport:
+    """The result of a scan. Describes; never repairs."""
+
+    findings: tuple[IntegrityFinding, ...]
+
+    @property
+    def ok(self) -> bool:
+        return all(f.status is IntegrityStatus.VALID for f in self.findings)
+
+    def counts(self) -> dict[str, int]:
+        counter: dict[str, int] = {}
+        for finding in self.findings:
+            counter[finding.status.value] = counter.get(finding.status.value, 0) + 1
+        return dict(sorted(counter.items()))
+
+    def recovery_plan(self) -> tuple[str, ...]:
+        """What a human *could* do, phrased so nobody mistakes it for done.
+
+        Deliberately returns strings rather than callables. Silently deleting an
+        artefact destroys the only evidence of how the store came apart, and the
+        artefact may be the more trustworthy half of the pair.
+        """
+        actions: list[str] = []
+        for finding in self.findings:
+            if finding.status is IntegrityStatus.VALID:
+                continue
+            actions.append(
+                f"proposed: inspect {finding.artifact} "
+                f"({finding.status.value}) -- {finding.detail or 'no further detail'}"
+            )
+        return tuple(actions)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "counts": self.counts(),
+            "findings": [f.as_dict() for f in self.findings],
+            "recovery_plan": list(self.recovery_plan()),
+        }
 
 
 @runtime_checkable
@@ -288,6 +376,118 @@ class FileRawStore:
             handle.write(json.dumps(record.as_dict(), sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+
+    @property
+    def root(self) -> pathlib.Path:
+        """Where the artefacts live. Exposed so an integrity scan is auditable."""
+        return self._root
+
+    def verify_integrity(self) -> IntegrityReport:
+        """Scan the store and classify every artefact. Never modifies anything.
+
+        Answers the question an auditor actually has -- "is this audit trail
+        itself trustworthy?" -- which v2.1 had no way to answer.
+        """
+        findings: list[IntegrityFinding] = []
+        seen_ids: set[str] = set()
+        indexed_paths: set[pathlib.Path] = set()
+
+        if self._index.exists():
+            for number, line in enumerate(
+                self._index.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    record_id = str(data["record_id"])
+                    expected_hash = str(data["payload_hash"])
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.INVALID_METADATA,
+                            artifact=f"{self._index.name}:{number}",
+                            detail=str(exc),
+                        )
+                    )
+                    continue
+
+                if record_id in seen_ids:
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.DUPLICATE_ID,
+                            artifact=record_id,
+                            detail=f"repeated at {self._index.name}:{number}",
+                        )
+                    )
+                    continue
+                seen_ids.add(record_id)
+
+                path = self._payload_path(record_id)
+                indexed_paths.add(path)
+                if not path.exists():
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.MISSING_PAYLOAD,
+                            artifact=record_id,
+                            detail="index entry has no payload file",
+                        )
+                    )
+                    continue
+
+                payload = path.read_text(encoding="utf-8")
+                actual_hash = payload_hash(payload)
+                expected_length = data.get("byte_length")
+                if actual_hash != expected_hash:
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.HASH_MISMATCH,
+                            artifact=record_id,
+                            detail=f"expected {expected_hash}, found {actual_hash}",
+                        )
+                    )
+                elif expected_length is not None and len(
+                    payload.encode("utf-8")
+                ) != int(expected_length):
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.SIZE_MISMATCH,
+                            artifact=record_id,
+                            detail=(
+                                f"expected {expected_length} bytes, found "
+                                f"{len(payload.encode('utf-8'))}"
+                            ),
+                        )
+                    )
+                else:
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.VALID, artifact=record_id
+                        )
+                    )
+
+        for path in sorted(self._root.iterdir()):
+            if path == self._index or not path.is_file():
+                continue
+            if path.name.startswith(".") and path.suffix == ".tmp":
+                findings.append(
+                    IntegrityFinding(
+                        status=IntegrityStatus.INCOMPLETE_WRITE,
+                        artifact=path.name,
+                        detail="temp file from an interrupted write",
+                    )
+                )
+                continue
+            if path not in indexed_paths:
+                findings.append(
+                    IntegrityFinding(
+                        status=IntegrityStatus.ORPHAN_PAYLOAD,
+                        artifact=path.name,
+                        detail="payload file with no index entry",
+                    )
+                )
+
+        return IntegrityReport(findings=tuple(findings))
 
     def incomplete_captures(self) -> tuple[str, ...]:
         """Temp files left behind by an interrupted write.

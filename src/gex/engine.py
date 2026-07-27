@@ -10,6 +10,7 @@ Anything added here that breaks purity breaks the replay test along with it.
 
 from __future__ import annotations
 
+from src.domain.completeness import CompletenessStatus
 from src.domain.contracts import ChainSnapshot
 from src.domain.gex import ExpiryBucket, GexSnapshot, IVConvention
 from src.domain.model_spec import (
@@ -174,6 +175,17 @@ def compute_gex_snapshot(
                 if expected_contract_count is not None
                 else snapshot.expected_contract_count
             ),
+            # A caller who overrides the count is asserting an independent
+            # universe; without one, the snapshot's own status governs, and
+            # UNKNOWN must reach the scorer rather than being smoothed away.
+            completeness_status=(
+                CompletenessStatus.MEASURED_COMPLETE
+                if expected_contract_count is not None
+                and expected_contract_count <= len(result.contracts)
+                else CompletenessStatus.MEASURED_INCOMPLETE
+                if expected_contract_count is not None
+                else snapshot.completeness_status
+            ),
             options_feed_timestamp=snapshot.options_feed_timestamp,
             spot_feed_timestamp=snapshot.spot_timestamp,
             open_interest_as_of=snapshot.open_interest_as_of,
@@ -212,6 +224,19 @@ def compute_gex_snapshot(
             else cfg.fingerprint()
         ),
         meta={
+            # Provenance the adapter established travels with the snapshot: a
+            # replay that cannot see which parser read the bytes, or which
+            # source needed a timezone assumed, cannot detect a change in
+            # either.
+            **{
+                key: snapshot.meta[key]
+                for key in (
+                    "parser_version",
+                    "timestamp_localization",
+                    "chain_completeness",
+                )
+                if key in snapshot.meta
+            },
             "spot_move_pct": cfg.spot_move_pct,
             "prefer_vendor_gamma": cfg.prefer_vendor_gamma,
             "vendor_gamma_count": result.vendor_gamma_count,

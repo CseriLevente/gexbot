@@ -1,7 +1,7 @@
 # Release procedure
 
 Status: `IMPLEMENTED` — the archive step, the integrity checks, and the CI job
-that runs them all exist and pass. `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` —
+that runs them all exist and pass. `NOT_VALIDATED_WITH_LIVE_THETADATA` —
 no release has been cut against a live ThetaData subscription.
 
 This repository is a **research engine**. A release publishes analysis code and
@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.1.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.zip
+sha256sum gex-bot-v2.1.1.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.1.zip -Algorithm SHA256
 ```
 
 ---
@@ -145,6 +145,25 @@ Get-FileHash gex-bot-v2.1.zip -Algorithm SHA256
 - [ ] `docs/OPEN_DECISIONS.md` lists every unresolved ambiguity
 - [ ] no documentation claims live-vendor validation that has not happened
 - [ ] the archive digest is recorded
+- [ ] the archive was extracted to a temporary directory and the smoke tests below passed
+
+### Post-extraction smoke test
+
+An archive that cannot be used is not a release. From an extraction of the zip:
+
+```bash
+# Core import + engine smoke test
+python -c "import src.gex.engine, src.domain.contracts, src.synthetic.chains"
+
+# Configuration smoke test
+python -c "from src.config.schema import load_config; print(load_config('config/research.yaml').thetadata.tier)"
+
+# Demo
+python -m src.app
+
+# Release integrity
+python -m pytest tests/unit/test_release_integrity.py -q
+```
 
 ---
 

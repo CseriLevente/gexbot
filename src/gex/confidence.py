@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from src.domain.completeness import COMPLETENESS_WARNING_CODE, CompletenessStatus
 from src.domain.contracts import OptionQuote
 from src.domain.gex import (
     ConfidenceComponent,
@@ -94,6 +95,10 @@ class ConfidenceInputs:
     zero_gamma_universe: OptionUniverse
     quotes: tuple[OptionQuote, ...] = ()
     expected_contract_count: int | None = None
+    #: Whether ``expected_contract_count`` is a measurement or an absence.
+    #: Defaults to UNKNOWN so that a caller who forgets to pass it gets the
+    #: conservative answer rather than a free perfect score.
+    completeness_status: CompletenessStatus = CompletenessStatus.UNKNOWN
     options_feed_timestamp: datetime | None = None
     spot_feed_timestamp: datetime | None = None
     open_interest_as_of: date | None = None
@@ -117,13 +122,41 @@ class ConfidenceInputs:
 def score_chain_completeness(
     inputs: ConfidenceInputs, config: ConfidenceConfig
 ) -> ConfidenceComponent:
+    """Completeness is only scorable against an INDEPENDENT universe.
+
+    v2.1 fell back to ``result.usable_ratio`` -- received divided by received --
+    whenever no expected count was supplied. That is 1.0 by construction, so a
+    chain whose universe was unknown scored full marks for completeness. The
+    adapter had already worked this out and reported ``PARTIALLY_OBSERVED``; the
+    information was thrown away twice on the way here.
+
+    Every received quote being usable says nothing about the quotes that were
+    never sent.
+    """
     result = inputs.result
-    ratio = (
-        len(result.contracts) / inputs.expected_contract_count
-        if inputs.expected_contract_count
-        else result.usable_ratio
-    )
-    ratio = min(ratio, 1.0)
+    status = inputs.completeness_status
+
+    if not status.is_measured:
+        return ConfidenceComponent(
+            name="chain_completeness",
+            # Not 0.0: the chain is not known to be bad. Not a number at all,
+            # because any number here would be an assertion we cannot support.
+            # A None component is excluded from the weighted mean.
+            score=None,
+            weight=config.weights.chain_completeness,
+            uncalibrated=True,
+            warning_code=COMPLETENESS_WARNING_CODE,
+            detail=(
+                f"completeness unknown ({status.value}): "
+                f"{len(result.contracts)} usable of {result.total_quotes} received "
+                "quotes, but no independent contract universe was supplied, so "
+                "whether the response was truncated cannot be determined. See "
+                "docs/OPEN_DECISIONS.md OD-11."
+            ),
+        )
+
+    expected = inputs.expected_contract_count or 0
+    ratio = min(len(result.contracts) / expected, 1.0) if expected else 0.0
     floor = config.min_chain_completeness_ratio
     if ratio >= floor:
         score = 1.0
@@ -135,8 +168,8 @@ def score_chain_completeness(
         score=score,
         weight=config.weights.chain_completeness,
         detail=(
-            f"{len(result.contracts)} usable of {result.total_quotes} quotes "
-            f"(ratio {ratio:.3f}, floor {floor:.3f}); exclusions="
+            f"{len(result.contracts)} usable of {expected} expected "
+            f"({status.value}, ratio {ratio:.3f}, floor {floor:.3f}); exclusions="
             f"{result.exclusion_counts()}"
         ),
     )
@@ -434,29 +467,54 @@ def score_model_parameter_completeness(
 ) -> ConfidenceComponent:
     """Whether the pricing assumptions are fully specified.
 
-    A zero rate and a zero dividend yield on an SPX chain are almost certainly
-    "nobody configured this" rather than a deliberate choice, and both bias gamma.
+    Completeness is a question about **provenance**, not about magnitude. v2.1
+    asked ``if spec.risk_free_rate == 0.0`` and called the result missing, so a
+    deliberately configured zero -- ``RateSource.ZERO``, an explicit modelling
+    decision -- was reported as an unspecified parameter. The operator was told
+    to configure something they had already configured.
+
+    What is genuinely incomplete is a source that promised a value and did not
+    supply one: ``CONFIGURED_CONSTANT`` with no constant, ``SNAPSHOT`` with no
+    snapshot value, ``VENDOR_ANNUAL_DIVIDEND`` with no vendor dividend.
+
+    Whether a zero rate is *plausible* is a separate question with a separate
+    answer -- see ``EffectiveModelInputs.realism_warnings``.
     """
     spec = inputs.model_spec
-    missing: list[str] = []
-    if spec.risk_free_rate == 0.0:
-        missing.append("risk_free_rate=0")
-    if spec.dividend_yield == 0.0:
-        missing.append("dividend_yield=0 (SPX carries a material yield)")
+    # Read the resolved provenance rather than reconstructing completeness from
+    # the numbers. Two independent implementations of "is this specified?" is
+    # how the two answers drift apart.
+    resolved = [c.effective for c in inputs.result.contracts if c.effective is not None]
+    missing: list[str] = sorted(
+        {entry for effective in resolved for entry in effective.missing_inputs}
+    )
+    realism: list[str] = sorted(
+        {
+            f"{w.field}: {w.detail}"
+            for effective in resolved
+            for w in effective.realism_warnings
+        }
+    )
+
     from src.domain.iv import IVSource
 
     if spec.iv_price_source is IVSource.VENDOR_DEFAULT_IV:
         missing.append("iv_price_source is the undocumented vendor default")
-    score = 1.0 - (len(missing) / 3.0)
+
+    # Four provenance slots: rate, dividend, underlying, IV source.
+    score = 1.0 - (len(missing) / 4.0)
+    detail = (
+        f"model {spec.fingerprint()}; unspecified: {missing}"
+        if missing
+        else f"model {spec.fingerprint()} fully specified"
+    )
+    if realism:
+        detail += f"; specified but unusual: {realism}"
     return ConfidenceComponent(
         name="model_parameter_completeness",
         score=max(0.0, score),
         weight=config.weights.model_parameter_completeness,
-        detail=(
-            f"model {spec.fingerprint()}; unspecified: {missing}"
-            if missing
-            else f"model {spec.fingerprint()} fully specified"
-        ),
+        detail=detail,
     )
 
 
@@ -930,11 +988,16 @@ def compute_confidence(
     """
     cfg = config or ConfidenceConfig()
     components = tuple(scorer(inputs, cfg) for scorer in _SCORERS)
-    total_weight = sum(c.weight for c in components)
+    # A component with score None could not be evaluated at all. Averaging it in
+    # as 0.0 would claim the data is bad; as 1.0 would claim it is good. It is
+    # excluded from the mean and surfaced as a warning instead.
+    scored = [c for c in components if c.score is not None]
+    total_weight = sum(c.weight for c in scored)
     if total_weight <= 0.0:
         raise ValueError("confidence weights sum to zero")
 
-    weighted = sum(c.score * c.weight for c in components) / total_weight
+    weighted = sum(c.score * c.weight for c in scored if c.score is not None)
+    weighted /= total_weight
     value = round(100.0 * min(max(weighted, 0.0), 1.0), 4)
     if math.isnan(value):  # pragma: no cover - defensive
         raise ValueError("confidence score is NaN")
@@ -945,6 +1008,12 @@ def compute_confidence(
         value = 0.0
         warnings.extend(f"HARD FAILURE {c.name}: {c.detail}" for c in hard)
     warnings.extend(
-        f"{c.name} is uncalibrated: {c.detail}" for c in components if c.uncalibrated
+        (
+            f"{c.warning_code}: {c.detail}"
+            if c.warning_code
+            else f"{c.name} is uncalibrated: {c.detail}"
+        )
+        for c in components
+        if c.uncalibrated
     )
     return ConfidenceScore(value=value, components=components, warnings=tuple(warnings))

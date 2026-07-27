@@ -20,7 +20,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 702 tests, 92% coverage
+.venv/Scripts/python.exe -m pytest         # 1294 tests, 94% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) imports **nothing**
@@ -38,12 +38,12 @@ say and nothing more:
 | `IMPLEMENTED` | The code exists and runs. |
 | `TESTED_SYNTHETICALLY` | Verified against generated inputs and closed-form identities. |
 | `TESTED_WITH_OFFLINE_FIXTURES` | Verified against recorded vendor-shaped payloads. No network. |
-| `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` | Never run against a real subscription. |
+| `NOT_VALIDATED_WITH_LIVE_THETADATA` | Never run against a real subscription. |
 | `PLANNED` | Designed, not built. |
 | `NOT_IMPLEMENTED` | Absent. Some of these are absent on purpose. |
 
 **No component in this repository has ever been validated against live vendor
-data.** Every integration row is `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA`.
+data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 
 | Component | Status |
 |---|---|
@@ -61,14 +61,25 @@ data.** Every integration row is `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA`.
 | Option-universe accounting, SPX/SPXW separation | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Confidence model | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; thresholds `NOT_IMPLEMENTED` (uncalibrated by design) |
 | Typed config, ThetaData config section, single client factory | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
-| ThetaData parsing, join, tier map | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` · `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| ThetaData parsing, join, tier map | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` · `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | HTTP transport, retries, `Retry-After`, size caps | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` (deterministic fake) |
 | Raw-response store (atomic, collision-safe) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
-| Real network transport (`HttpxTransport`) | `IMPLEMENTED` · **never executed** · `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
-| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED` — no contract-list endpoint is wired (OD-11) |
-| Local gamma vs vendor gamma | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
-| Whether ThetaData Standard tier suffices | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
-| Zero-gamma stability across real intraday sequences | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Real network transport (`HttpxTransport`) | `IMPLEMENTED` · **never executed** · `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED`/`UNKNOWN` end to end — no contract-list endpoint is wired (OD-11) |
+| Unknown completeness cannot score full confidence | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| ThetaData config → effective runtime (`ThetaDataRuntime`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Strict config validation (finite, typed, non-empty) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Current-GEX eligibility by underlying-price source | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Exact integer parsing (no float round trip) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Malformed vs missing float classification | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Streaming response-size cap (`ByteLimitedReader`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| BASIC auth fails construction without credentials | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Per-source timezone localisation summaries | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Raw-store integrity scanning (`verify_integrity`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Host-independent minimal-core check | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Local gamma vs vendor gamma | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| Whether ThetaData Standard tier suffices | `NOT_VALIDATED_WITH_LIVE_THETADATA` — it *appears* to expose the required inputs; that is not the same claim |
+| Zero-gamma stability across real intraday sequences | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | `STICKY_DELTA`, `SURFACE_REFIT` conventions | `NOT_IMPLEMENTED` (refuse explicitly rather than approximate) |
 | `CALENDAR_MIDNIGHT` expiration rule | `NOT_IMPLEMENTED` — declared but rejected; no index option settles at midnight |
 | Feature store, regime classifier, strategies | `NOT_IMPLEMENTED` |

@@ -326,7 +326,9 @@ def test_the_release_procedure_is_documented():
     assert release.exists(), "docs/RELEASE.md is the release procedure of record"
     text = release.read_text(encoding="utf-8")
     assert "git status --porcelain" in text
-    assert "git archive --format=zip --output=gex-bot-v2.1.zip HEAD" in text
+    # An archive nobody has extracted is an archive nobody knows works.
+    assert "smoke test" in text.lower()
+    assert "git archive --format=zip --output=gex-bot-v2.1.1.zip HEAD" in text
 
 
 def test_ci_runs_the_release_integrity_checks():

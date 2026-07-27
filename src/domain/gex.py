@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -365,9 +365,16 @@ class OptionUniverse:
 @dataclass(frozen=True, slots=True)
 class ConfidenceComponent:
     name: str
-    score: float  # 0.0 - 1.0
+    #: ``None`` means "this component could not be evaluated" -- distinct from
+    #: 0.0, which means "evaluated, and bad". A ``None`` component is excluded
+    #: from the weighted mean rather than contributing an invented number.
+    score: float | None  # 0.0 - 1.0, or None when unevaluable
     weight: float
     detail: str = ""
+    #: Stable machine-readable reason, when there is one. Deterministic for a
+    #: given cause so that a log scraper can match on it; empty when the
+    #: component evaluated normally.
+    warning_code: str = ""
     # True when this component's threshold is still UNSPECIFIED_CALIBRATE, i.e.
     # the score was produced with a placeholder and must not gate real money.
     uncalibrated: bool = False
@@ -381,6 +388,7 @@ class ConfidenceComponent:
             "score": self.score,
             "weight": self.weight,
             "detail": self.detail,
+            "warning_code": self.warning_code,
             "uncalibrated": self.uncalibrated,
             "hard_failure": self.hard_failure,
         }
@@ -626,6 +634,10 @@ class GexSnapshot:
         for void in payload["walls"]["gamma_voids"]:
             void.pop("detail", None)
         return payload
+
+    def with_meta(self, **changes: Any) -> GexSnapshot:
+        """Copy with extra metadata. Used to prove metadata reaches the hash."""
+        return replace(self, meta={**self.meta, **changes})
 
     def output_hash(self, *, significant_digits: int = HASH_SIGNIFICANT_DIGITS) -> str:
         """Digest of the deterministic output, for replay checks.

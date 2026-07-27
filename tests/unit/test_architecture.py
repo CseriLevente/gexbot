@@ -30,7 +30,70 @@ THIRD_PARTY_FORBIDDEN_IN_CORE = {
     "fastapi",
     "sqlalchemy",
 }
-CORE_PACKAGES = ("gex", "domain", "synthetic")
+CORE_PACKAGES = frozenset({"gex", "domain", "synthetic"})
+CORE_ENTRY_POINTS = (
+    "src.gex.engine",
+    "src.gex.pricing",
+    "src.gex.zero_gamma",
+    "src.gex.confidence",
+    "src.gex.walls",
+    "src.domain.contracts",
+    "src.domain.effective_model",
+    "src.synthetic.chains",
+)
+
+
+def import_closure_from(
+    src_root: pathlib.Path, *, entry_points: tuple[str, ...]
+) -> set[str]:
+    """Every top-level module name reachable from ``entry_points``, statically.
+
+    Walks the project's own modules transitively, so a core module that reaches
+    NumPy *through* another project module is caught. Purely a graph over source
+    files -- it imports nothing, executes nothing, and therefore cannot be
+    influenced by what the running interpreter happens to have loaded.
+    """
+    reached: set[str] = set()
+    seen: set[str] = set()
+    queue = list(entry_points)
+    while queue:
+        module = queue.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        relative = pathlib.Path(*module.split(".")[1:]).with_suffix(".py")
+        path = src_root / relative
+        if not path.exists():
+            package_init = (
+                src_root / pathlib.Path(*module.split(".")[1:]) / "__init__.py"
+            )
+            if not package_init.exists():
+                continue
+            path = package_init
+        for root in _imported_roots(path):
+            reached.add(root)
+        for imported in _imported_modules(path):
+            if imported.startswith("src."):
+                queue.append(imported)
+    return reached
+
+
+def core_import_closure() -> set[str]:
+    """The transitive closure for this repository's engine core."""
+    return import_closure_from(SRC, entry_points=CORE_ENTRY_POINTS)
+
+
+def _imported_modules(path: pathlib.Path) -> set[str]:
+    """Fully-qualified module names imported by a file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return modules
 
 
 def _python_files(root: pathlib.Path) -> list[pathlib.Path]:
@@ -108,28 +171,47 @@ def test_engine_core_has_no_third_party_imports(path: pathlib.Path) -> None:
 
 
 def test_engine_core_imports_on_a_bare_interpreter() -> None:
-    """Executable version of the rule above: import the core in a subprocess with
-    site-packages shadowed, so a missing third-party package would surface.
+    """Executable version of the rule above, measured as a DELTA.
+
+    v2.1 asserted on the absolute contents of ``sys.modules``, which includes
+    whatever the interpreter loaded on its way up -- a ``sitecustomize``, a
+    tracing hook, a preloaded NumPy. On such a host the test failed while the
+    code was entirely correct: it was measuring the machine, not the
+    repository.
+
+    Comparing before and after the import asks the question that actually
+    matters -- what did importing the core *cause* to be loaded -- and is
+    unaffected by anything already resident. ``-S -E`` additionally removes
+    site-packages and PYTHON* influence; see tests/unit/test_core_isolation.py
+    for the static import-graph counterpart.
     """
+    import os
     import subprocess
     import sys
 
     script = (
         f"import sys; sys.path.insert(0, r'{REPO_ROOT}');"
+        "before = set(sys.modules);"
         "import src.gex.engine, src.gex.pricing, src.gex.zero_gamma,"
         "src.gex.confidence, src.gex.walls, src.domain.contracts,"
         "src.synthetic.chains;"
-        "loaded = {m.split('.')[0] for m in sys.modules};"
-        f"bad = loaded & {THIRD_PARTY_FORBIDDEN_IN_CORE!r};"
+        "added = {m.split('.')[0] for m in set(sys.modules) - before};"
+        f"bad = added & {set(THIRD_PARTY_FORBIDDEN_IN_CORE)!r};"
         "assert not bad, bad;"
         "print('ok')"
     )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("PYTHON", "VIRTUAL_ENV", "COV_CORE"))
+    }
     result = subprocess.run(  # noqa: S603
-        [sys.executable, "-c", script],
+        [sys.executable, "-S", "-E", "-c", script],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
         check=False,
+        env=environment,
     )
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout

@@ -124,11 +124,18 @@ def test_invalid_numeric_values_are_refused(field, value, match):
 
 
 @pytest.mark.parametrize(
-    "url", ["not-a-url", "ftp://host/x", "//host/x", "", "127.0.0.1:25503"]
+    "url", ["not-a-url", "ftp://host/x", "//host/x", "127.0.0.1:25503"]
 )
 def test_invalid_urls_are_refused(url):
     with pytest.raises(ThetaDataConfigError, match="valid absolute"):
         parse(base_url=url)
+
+
+def test_an_empty_url_is_refused_as_an_empty_string():
+    """Caught by the string check before the URL check ever runs, which is the
+    more precise complaint: "" is not a malformed URL, it is a missing value."""
+    with pytest.raises(ThetaDataConfigError, match="non-empty string"):
+        parse(base_url="")
 
 
 def test_an_unsupported_authentication_mode_is_refused():

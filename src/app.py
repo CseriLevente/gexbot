@@ -182,8 +182,11 @@ def _print_confidence(snapshot: GexSnapshot) -> None:
             flag = "*"
         else:
             flag = " "
+        # "?" rather than a number when the component could not be evaluated at
+        # all -- printing 0.000 would read as "measured, and bad".
+        shown = f"{component.score:>6.3f}" if component.score is not None else "     ?"
         print(
-            f" {flag}{component.name:<32}{component.score:>6.3f}"
+            f" {flag}{component.name:<32}{shown}"
             f"  w={component.weight:.2f}  {component.detail}"
         )
     if confidence.hard_failures:

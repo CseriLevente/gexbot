@@ -1,5 +1,80 @@
 # Changelog
 
+## 2.1.1 — correctness at the layer below
+
+v2.1 fixed a class of defect at the layer where it was first noticed. This
+release fixes the seventeen places where the fix was correct there and something
+downstream still behaved as though it had not happened.
+
+The recurring shape: **a value was computed correctly and then discarded**.
+`ChainCompleteness` worked out that a chain's universe was unknown, and
+`assemble_chain` overwrote the answer. `index_rows` selected a canonical row per
+identity, and assembly iterated the original list. `_resolve_underlying`
+recorded that a spot was missing, and returned one anyway. In each case the
+diagnostic was right and the behaviour was unchanged — which is worse than no
+diagnostic, because the diagnostic makes it look handled.
+
+**Status:** `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `TESTED_WITH_OFFLINE_FIXTURES`
+· `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+Nothing was added toward trading. The repository remains incapable of placing an
+order.
+
+### Defects fixed
+
+| § | Defect in v2.1 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | `assemble_chain` replaced `expected_contract_count=None` with `len(quote_rows)`, and `score_chain_completeness` fell back to `usable_ratio` | Two layers independently turned "we don't know the universe" into "we got everything"; a truncated chain scored 1.0 for completeness | `CompletenessStatus` carried on the snapshot; `None` stays `None`; unknown scores `None`, uncalibrated, with code `CHAIN_COMPLETENESS_NOT_INDEPENDENTLY_OBSERVED` |
+| 2 | `iv_source`, `duplicate_policy`, `max_dte`, `strike_range`, `min_time` were parsed, validated, fingerprinted — and never read | A setting visible in YAML that survives review and never reaches a request | `ThetaDataRuntime.from_config()` as the one construction path; tests assert against outgoing requests, not config objects |
+| 3 | `number()` range-checked without `isfinite`; strings and optionals were unvalidated | NaN compares `False` against every bound, so a range check alone passes it | `math.isfinite` before every range check; non-empty string checks; `min_time` grammar; booleans refused as integers |
+| 4 | `_resolve_underlying` recorded `UNDERLYING_MISSING` then returned `snapshot.spot`, under a comment saying it deliberately did not | GEX scales by spot², so substituting a different underlying silently reprices the contract | Returns `None`; `has_valid_spot` gates current GEX; new `no_underlying_price` exclusion; per-purpose eligibility |
+| 5 | Assembly iterated `inputs.quote_rows` after computing `quote_indexed` | Duplicates were reported as collapsed and assembled twice | Iterates the deduplicated rows, sorted by key so order cannot depend on the vendor |
+| 6 | `if spec.risk_free_rate == 0.0: missing.append(...)` | A deliberately configured zero was reported as unspecified; the only way to satisfy the check was to change the number | Completeness reads resolved provenance; realism moved to `MODEL_REALISM_WARNING` |
+| 7 | The size cap lived in `RetryingTransport`, which receives an already-buffered body | The cap protected the parser, not the process | `ByteLimitedReader` aborts mid-stream, closes the connection, discards the partial body; retry layer retained as defence in depth |
+| 8 | `basic_auth=... if username and password else None` | An unset environment variable produced a working *unauthenticated* client, and the 401 looked like a vendor outage | `MissingCredentialsError` at construction, naming the variables and never the values |
+| 9 | `parse_int_field` reached the integer via `float(text)` | Exact only below 2⁵³; `"9007199254740993"` became `...992`, and open interest is exactly where a large integer is plausible | `Decimal` with an exact-integrality check, plus a digit fast path |
+| 10 | One chain-wide `localisation_applied`, set from the quote loop | Aware quotes + naive greeks reported "no assumption applied" while assuming a timezone for every greek | `TimestampLocalizationSummary` per `TimestampSource`, in snapshot metadata |
+| 11 | `PARSER_VERSION` still `2.0.0` after v2.1 changed parsing three ways | A replay hash that does not move when the parser changes cannot detect that the parser changed | One constant, bumped to `thetadata-v3-parser/2.1.1`, carried into the replay hash |
+| 12 | Payload and index writes atomic individually, not together | Nothing could say afterwards which pairs had come apart | `verify_integrity()` classifying eight states; proposes, never deletes |
+| 13 | The bare-interpreter test asserted on absolute `sys.modules` | Failed on any host whose `sitecustomize` preloaded NumPy — measuring the machine, not the repository | Static transitive import graph + `-S -E` subprocess + delta measurement |
+| 14 | "both $80/mo cheaper *and* internally consistent" | Asserted a numerical agreement that has never been measured | Rewritten to state what follows from the price list and what does not |
+| 15 | `_to_float` returned `None` for missing and for `"oops"` | Corruption was indistinguishable from absence, and absence is normal | `FloatParseIssue` with six codes; malformed values recorded on the quote, missing ones not |
+| 16 | Nothing checked the HTTP status inside the client | A custom transport returning 500 handed an HTML error page to `parse_csv` | Status checked first, unconditionally, before the body is touched |
+
+### Frozen values
+
+**No frozen hash changed.** `EXPECTED_OUTPUT_HASH` remains
+`181db88a7a343eda4d874322161e8b236b57faf93db4282f6e383983260d0b16`.
+
+This is a result, not an oversight. The reference case is built by
+`build_synthetic_chain()`, which knows its own universe exactly and therefore
+declares `MEASURED_COMPLETE` — so the completeness fix does not perturb it, and
+the parser-version and localisation metadata belong to the ThetaData adapter,
+which the synthetic path does not use. Every individual numeric assertion was
+reviewed and none moved.
+
+One test bound was widened deliberately:
+`test_a_broken_snapshot_scores_near_zero` from `< 10.0` to `< 12.0`, because an
+explicitly configured zero rate is no longer counted as an unspecified
+parameter (§6). Documented in place.
+
+### Behavioural changes worth knowing
+
+* `ConfidenceComponent.score` is now `float | None`. A `None` component is
+  excluded from the weighted mean rather than contributing an invented number.
+* `EffectiveModelInputs.spot` is now `float | None`.
+* `duplicate_policy` accepts `collapse_exact` as an explicit third value; see
+  OPEN_DECISIONS OD-19 for why it behaves identically to `reject`.
+* The client now raises `ThetaDataVendorError` on any non-2xx status.
+
+### Not added, deliberately
+
+Databento, futures features, trading strategies, regime thresholds, a risk
+engine, position sizing, IBKR, broker integration, paper trading, live trading,
+order definitions, execution code, and arbitrary calibrated values.
+
+---
+
 ## 2.1.0 — correctness and integration hardening
 
 A narrowly-scoped pass over defects found by review of v2. Every fix was

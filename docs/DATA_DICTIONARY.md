@@ -203,3 +203,67 @@ Each carries `name`, `score` (0–1), `weight`, `detail`, `uncalibrated`,
 the numeric content with floats quantised to 12 significant figures, excluding
 warning prose and validation examples — a hash that trips on a reworded warning
 is a hash nobody trusts.
+
+
+---
+
+## v2.1.1 fields
+
+Status: `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+### `completeness_status` (on `ChainSnapshot`, and in `meta.chain_completeness`)
+
+| Value | Means | Does **not** mean |
+|---|---|---|
+| `MEASURED_COMPLETE` | An independent universe was supplied and every member arrived | that the universe itself was correct |
+| `MEASURED_INCOMPLETE` | An independent universe was supplied and some of it did not arrive | which contracts are missing, unless `missing_by_source` says |
+| `PARTIALLY_OBSERVED` | Rows arrived and joined; nothing independent says how many were owed | that the chain is whole. It may be page one of a truncated response |
+| `UNKNOWN` | Not even the received counts are meaningful | that an error occurred |
+
+`expected_contract_count` is `None` whenever no independent universe exists, and
+**must stay `None`**. Substituting the received count is what let a truncated
+chain score full completeness in v2.1.
+
+### `chain_completeness` score component
+
+`score` is `None` when completeness is not measured — distinct from `0.0`, which
+would assert the chain is bad. A `None` component is excluded from the weighted
+mean and carries `warning_code = CHAIN_COMPLETENESS_NOT_INDEPENDENTLY_OBSERVED`.
+
+### `meta.timestamp_localization`
+
+Per-source summaries keyed by `TimestampSource` (`quote`, `open_interest`,
+`first_order_greeks`, `second_order_greeks`, `underlying`). Each carries
+`rows_seen`, `naive_rows_localized`, `aware_rows_preserved`, `invalid_rows` and
+`assumed_timezone` — the last is `null` unless an assumption was actually applied
+*to that source*. `any_assumption_applied` rolls them up.
+
+A chain-wide boolean cannot express "aware quotes, naive greeks", which is why
+v2.1's single flag reported no assumption while assuming one for every greek.
+
+### `meta.parser_version`
+
+`thetadata-v3-parser/2.1.1`. Defined once, in `src/adapters/raw_store.py`, and
+carried into the replay hash. If parsing behaviour changes and this does not, a
+replay cannot detect the change.
+
+### `exclusions.no_underlying_price`
+
+Contracts excluded from current GEX because the *selected* underlying-price
+source produced nothing usable. A vendor gamma does not rescue these: gamma is
+one factor of the product and spot² is another.
+
+### `parse_issues` (on `OptionQuote`)
+
+`(field, code)` pairs. Codes come from `IntegerParseIssue` or `FloatParseIssue`.
+`missing_value` is **not** recorded — absence is ordinary and would drown the
+signal. `malformed_value` and `non_finite_input` are, because those are the
+vendor sending something wrong rather than sending nothing.
+
+### `IntegrityReport` (from `FileRawStore.verify_integrity()`)
+
+Classifies each artefact as `VALID`, `ORPHAN_PAYLOAD`, `MISSING_PAYLOAD`,
+`HASH_MISMATCH`, `SIZE_MISMATCH`, `INCOMPLETE_WRITE`, `DUPLICATE_ID` or
+`INVALID_METADATA`. `recovery_plan()` returns proposed actions as strings and
+executes nothing — deleting an artefact destroys the evidence of how the store
+came apart.

@@ -278,6 +278,11 @@ class FakeTransport:
     def urls(self) -> list[str]:
         return [call.url for call in self.calls]
 
+    def timeouts(self) -> list[float]:
+        """Per-call read timeouts, so a test can prove the configured value
+        reached the wire rather than merely reaching a dataclass."""
+        return [call.timeout_seconds for call in self.calls]
+
 
 def _unwrap(item: HttpResponse | Exception, url: str) -> HttpResponse:
     if isinstance(item, Exception):
@@ -429,6 +434,54 @@ class RetryingTransport:
         return computed
 
 
+class ByteLimitedReader:
+    """Reads a chunked body and stops the moment the cap is crossed.
+
+    v2.1 enforced ``max_response_bytes`` in :class:`RetryingTransport`, which
+    receives an ``HttpResponse`` -- an object whose body has *already* been read
+    into memory. The cap therefore protected the parser from a large payload but
+    did nothing about the payload itself: by the time it fired, the bytes were
+    resident. On a vendor response large enough to matter, that is precisely the
+    failure the limit exists to prevent.
+
+    This reader is the authoritative limit. The retry layer keeps its own check
+    as defence in depth for custom transports that buffer, but it is no longer
+    the first line.
+
+    On abort the partial body is discarded rather than returned: a truncated CSV
+    that parses cleanly is worse than no CSV at all.
+    """
+
+    def __init__(self, *, max_bytes: int) -> None:
+        if max_bytes <= 0:
+            raise ValueError(f"max_bytes must be positive, got {max_bytes}")
+        self.max_bytes = max_bytes
+        self.bytes_read = 0
+        self.aborted = False
+
+    def read(self, stream: Any, *, encoding: str = "utf-8") -> str:
+        chunks: list[bytes] = []
+        for chunk in stream:
+            self.bytes_read += len(chunk)
+            if self.bytes_read > self.max_bytes:
+                self.aborted = True
+                chunks.clear()
+                self._close(stream)
+                raise ResponseTooLargeError(
+                    f"response exceeded the {self.max_bytes}-byte cap while "
+                    f"streaming; aborted after {self.bytes_read} bytes and "
+                    "discarded the partial body"
+                )
+            chunks.append(chunk)
+        return b"".join(chunks).decode(encoding, errors="replace")
+
+    @staticmethod
+    def _close(stream: Any) -> None:
+        closer = getattr(stream, "close", None)
+        if callable(closer):
+            closer()
+
+
 class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
     """Real HTTP transport. Imports ``httpx`` lazily.
 
@@ -479,23 +532,12 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
             with self._client.stream(
                 "GET", url, params=dict(params), timeout=timeout_seconds
             ) as response:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > self._max_response_bytes:
-                        # Abort mid-stream: close the connection and refuse. The
-                        # partial body is discarded rather than parsed or stored,
-                        # because a truncated payload that looks complete is worse
-                        # than no payload.
-                        response.close()
-                        raise ResponseTooLargeError(
-                            f"response exceeded the {self._max_response_bytes}-byte "
-                            f"cap while streaming from {_redact(url)}; aborted after "
-                            f"{total} bytes"
-                        )
-                    chunks.append(chunk)
-                body = b"".join(chunks).decode(response.encoding or "utf-8")
+                # One authoritative implementation of the cap, shared with
+                # the tests. Aborts mid-stream, closes the connection, and
+                # discards the partial body.
+                body = ByteLimitedReader(max_bytes=self._max_response_bytes).read(
+                    response.iter_bytes(), encoding=response.encoding or "utf-8"
+                )
                 return HttpResponse(
                     status_code=response.status_code,
                     text=body,

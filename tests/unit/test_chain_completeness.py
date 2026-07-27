@@ -120,7 +120,7 @@ def test_a_truncated_chain_is_not_reported_as_complete():
         build([4950, 4960], expected=full, source="contract_list")
     )
     payload = completeness_of(truncated)
-    assert payload["status"] == "INCOMPLETE"
+    assert payload["status"] == "MEASURED_INCOMPLETE"
     assert payload["completeness_ratio"] < 1.0
 
 
@@ -144,7 +144,7 @@ def test_without_an_independent_source_completeness_is_partially_observed():
 
 def test_partially_observed_is_never_reported_as_complete():
     payload = completeness_of(assemble_chain(build([4950])))
-    assert payload["status"] != "COMPLETE"
+    assert payload["status"] != "MEASURED_COMPLETE"
 
 
 # =============================================================================
@@ -208,7 +208,7 @@ def test_a_matching_universe_scores_complete():
     payload = completeness_of(
         assemble_chain(build([4950, 4960], expected=ids, source="contract_list"))
     )
-    assert payload["status"] == "COMPLETE"
+    assert payload["status"] == "MEASURED_COMPLETE"
     assert payload["completeness_ratio"] == pytest.approx(1.0)
 
 
@@ -228,6 +228,7 @@ def test_the_ratio_never_exceeds_one():
 
 
 def test_an_empty_expectation_does_not_divide_by_zero():
+    """An empty universe claims nothing, so nothing is measured."""
     measure = ChainCompleteness(
         received_quote_count=0,
         received_oi_count=0,
@@ -238,7 +239,7 @@ def test_an_empty_expectation_does_not_divide_by_zero():
         expected_source="contract_list",
     )
     assert measure.completeness_ratio is None
-    assert measure.status == "PARTIALLY_OBSERVED"
+    assert measure.status.value == "UNKNOWN"
 
 
 def test_the_expected_source_is_recorded_so_the_claim_can_be_audited():
@@ -281,7 +282,7 @@ def test_the_client_passes_an_independent_universe_through(monkeypatch):
     )
     payload = snapshot.meta["chain_completeness"]
     assert payload["expected_contract_count"] == 3
-    assert payload["status"] == "INCOMPLETE"
+    assert payload["status"] == "MEASURED_INCOMPLETE"
 
 
 def test_without_a_universe_the_client_reports_partially_observed():

@@ -18,6 +18,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from src.domain.completeness import CompletenessStatus
 from src.domain.gex import (
     IVConvention,
     OptionUniverse,
@@ -133,6 +134,12 @@ def make_inputs(**overrides: object) -> ConfidenceInputs:
         "chain_universe": universe,
         "zero_gamma_universe": universe,
         "quotes": chain.quotes,
+        # The synthetic generator built this chain, so its universe is genuinely
+        # known. Without this the status defaults to UNKNOWN and completeness
+        # becomes unscorable -- which is correct for a vendor chain, and wrong
+        # for one we generated ourselves.
+        "expected_contract_count": len(chain.quotes),
+        "completeness_status": CompletenessStatus.MEASURED_COMPLETE,
         "options_feed_timestamp": AS_OF,
         "spot_feed_timestamp": AS_OF,
         "open_interest_as_of": date(2026, 3, 16),
@@ -394,16 +401,49 @@ def test_model_parameter_completeness_is_full_when_everything_is_stated():
     ).score == pytest.approx(1.0)
 
 
-def test_zero_rate_and_dividend_are_treated_as_unspecified():
-    """Zero rate and zero dividend on an SPX chain are almost certainly "nobody
-    configured this", and both bias gamma.
+def test_an_explicitly_configured_zero_is_complete_not_missing():
+    """v2.1 asked ``if spec.risk_free_rate == 0.0`` and called it missing.
+
+    ``ModelSpec()`` defaults to CONFIGURED_CONSTANT with 0.0 -- a value that was
+    supplied, by a source that was selected. That is a complete specification.
+    The operator was previously told to configure something they had already
+    configured, and the only way to satisfy the check was to change the number.
     """
     component = score_model_parameter_completeness(
         make_inputs(model_spec=ModelSpec()), CFG
     )
-    assert component.score < 0.5
-    assert "risk_free_rate=0" in component.detail
-    assert "dividend_yield=0" in component.detail
+    assert (
+        "unspecified: []" in component.detail or "fully specified" in component.detail
+    )
+    assert component.score > 0.5
+
+
+def test_a_zero_rate_is_still_reported_as_unusual():
+    """Complete and plausible are different questions, so they get different
+    fields. The zero does not vanish from the report -- it stops being called
+    missing."""
+    component = score_model_parameter_completeness(
+        make_inputs(model_spec=ModelSpec()), CFG
+    )
+    assert "specified but unusual" in component.detail
+    assert "risk_free_rate" in component.detail
+    assert "dividend_yield" in component.detail
+
+
+def test_a_source_that_promised_a_value_and_supplied_none_is_incomplete():
+    from src.domain.model_spec import RateSource
+
+    component = score_model_parameter_completeness(
+        make_inputs(
+            model_spec=ModelSpec(
+                risk_free_rate_source=RateSource.CONFIGURED_CONSTANT,
+                risk_free_rate=None,
+            )
+        ),
+        CFG,
+    )
+    assert "risk_free_rate" in component.detail
+    assert component.score < 1.0
 
 
 # --- Root diagnostics -------------------------------------------------------
@@ -643,7 +683,13 @@ def test_a_broken_snapshot_scores_near_zero():
             excluded_unsigned_gex=1.0e11,
         ),
     )
-    assert compute_confidence(broken, CFG).value < 10.0
+    # Was < 10.0 before v2.1.1. The bound moved because an explicitly
+    # configured zero rate/dividend is no longer counted as an unspecified
+    # parameter (§6), so model_parameter_completeness contributes ~0.75 instead
+    # of ~0.0 even on a snapshot that is broken in every other way. Everything
+    # this test is actually about -- stale feeds, ancient open interest, an
+    # unreachable expected count -- still collapses the score.
+    assert compute_confidence(broken, CFG).value < 12.0
 
 
 def test_weights_are_normalised_so_the_scale_survives_reweighting():

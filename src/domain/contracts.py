@@ -16,6 +16,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
+from src.domain.completeness import CompletenessStatus
 from src.domain.iv import ImpliedVolQuote, IVQualityFlag, missing_iv
 from src.domain.timestamps import ContractTimestamps
 
@@ -228,9 +229,12 @@ class ChainSnapshot:
     # Timestamp attached to the spot print itself, distinct from ``as_of``.
     spot_timestamp: datetime | None = None
     source: str = "unknown"
-    # Number of contracts the adapter expected to receive, when knowable. Feeds
-    # chain_completeness; ``None`` falls back to the usable/received ratio.
+    # Number of contracts an INDEPENDENT source said to expect. ``None`` means
+    # no independent source existed, and must stay ``None``: substituting the
+    # received count here is what let a truncated chain score as complete.
     expected_contract_count: int | None = None
+    #: Whether ``expected_contract_count`` is a measurement or an absence.
+    completeness_status: CompletenessStatus = CompletenessStatus.UNKNOWN
     meta: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -258,6 +262,24 @@ class ChainSnapshot:
                 "ChainSnapshot.spot_timestamp must be timezone-aware; a naive "
                 "spot clock cannot be compared against the quote clocks"
             )
+
+    def with_completeness(
+        self, status: CompletenessStatus, *, expected_contract_count: int | None = None
+    ) -> ChainSnapshot:
+        """Return a copy carrying a different completeness claim.
+
+        Used by callers that learn the universe after assembly, and by tests
+        that need to exercise an unknown universe without hand-building a chain.
+        """
+        return replace(
+            self,
+            completeness_status=status,
+            expected_contract_count=(
+                expected_contract_count
+                if expected_contract_count is not None or status.is_measured
+                else None
+            ),
+        )
 
     @property
     def expiries(self) -> tuple[date, ...]:

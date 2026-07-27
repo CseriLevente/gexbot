@@ -23,6 +23,7 @@ import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 
+from src.domain.completeness import CompletenessStatus
 from src.domain.contracts import (
     ChainSnapshot,
     OptionContract,
@@ -237,7 +238,11 @@ def build_synthetic_chain(spec: SyntheticChainSpec | None = None) -> ChainSnapsh
         clocks=clocks,
         spot_timestamp=underlying_ts,
         source="synthetic",
+        # The generator built this chain, so it knows the universe exactly.
+        # This is a genuine independent expectation, not the received count
+        # dressed up as one -- which is why it may claim MEASURED_COMPLETE.
         expected_contract_count=len(quotes),
+        completeness_status=CompletenessStatus.MEASURED_COMPLETE,
     )
 
 
@@ -291,6 +296,7 @@ def build_single_contract_chain(
         spot_timestamp=as_of,
         source="synthetic-single",
         expected_contract_count=1,
+        completeness_status=CompletenessStatus.MEASURED_COMPLETE,
     )
 
 

@@ -321,6 +321,97 @@ they may expose the offset), or stores wall-clock.
 
 ---
 
+## 18. Unknown completeness is scored as `None`, not as a number — **RESOLVED BY POLICY**
+
+**The question.** When the chain's universe is unknown, what should the
+`chain_completeness` confidence component contribute?
+
+**Current behaviour.** `score = None`. The component is excluded from the
+weighted mean, marked `uncalibrated`, and emits the deterministic code
+`CHAIN_COMPLETENESS_NOT_INDEPENDENTLY_OBSERVED`.
+
+**Why not a conservative constant.** Any constant is an assertion. 0.0 says the
+chain is bad; 1.0 says it is good; 0.5 says it is half good. All three are
+claims the data does not support, and picking one would be exactly the
+"arbitrary calibrated value" this repository refuses elsewhere.
+
+**Consequence.** The overall score is computed over fewer components, so it is
+renormalised rather than dragged in either direction — and the snapshot reports
+`calibrated = False` so nothing can mistake it for a measured result.
+
+**What would settle it.** A verified contract-list endpoint (see OD-11). Then
+completeness is measured and the question does not arise.
+
+---
+
+## 19. `reject` and `collapse_exact` behave identically today — **DELIBERATE**
+
+**The question.** Should `duplicate_policy: reject` refuse *any* duplicate
+identity, including byte-identical rows?
+
+**Current behaviour.** No. Both `reject` and `collapse_exact` collapse
+byte-identical rows and refuse rows that disagree. `collapse_exact` exists as
+the explicit spelling of that behaviour.
+
+**Why.** Two identical rows carry no conflicting information — there is nothing
+to arbitrate, and no ordering dependence to worry about. Failing on them would
+reject a chain over a vendor retransmission.
+
+**Consequence.** An operator choosing between the two names gets the same
+behaviour. That is a naming redundancy, not a silent difference.
+
+**What would settle it.** Whether ThetaData's snapshot endpoints can emit
+duplicates at all, and if so whether an exact repeat is normal or a symptom.
+
+---
+
+## 20. Underlying-price fallback policy — **NOT IMPLEMENTED, deliberately**
+
+**The question.** When `underlying_price_source = VENDOR_PER_CONTRACT` and a
+contract has no per-contract underlying, should the chain-level spot be used?
+
+**Current behaviour.** No. The contract is excluded from current GEX with the
+machine-readable reason `no_underlying_price`, and the resolved spot is `None`
+rather than a placeholder.
+
+**Why this is a decision.** GEX scales by spot squared, so substituting a
+different underlying silently reprices the contract. v2.1 recorded the issue and
+then returned `snapshot.spot` anyway, under a comment saying it did not.
+
+**What is NOT implemented.** A configured fallback source. Adding one would
+require naming it in `ModelSpec`, recording which contracts used it, and
+hashing it into the model fingerprint. Until an operator asks for it with a
+reason, the safest behaviour is to exclude and count.
+
+**What would settle it.** Evidence of how often ThetaData omits the
+per-contract underlying, and whether the omissions cluster (illiquid wings) or
+scatter.
+
+---
+
+## 21. Realism warnings are not thresholds — **UNCALIBRATED by design**
+
+**The question.** A zero risk-free rate is fully specified but implausible for
+a USD index chain. What should the engine do about it?
+
+**Current behaviour.** `EffectiveModelInputs.realism_warnings` emits
+`MODEL_REALISM_WARNING` naming the field, separately from `missing_inputs`.
+Nothing is scored on it and nothing is blocked.
+
+**Why separate.** v2.1 asked `if spec.risk_free_rate == 0.0` and called the
+result *missing* — so a deliberately configured zero, chosen via
+`RateSource.ZERO`, was reported as an unspecified parameter. The operator was
+told to configure something they had already configured, and the only way to
+satisfy the check was to change the number.
+
+**What is explicitly not claimed.** That zero is wrong. Only that it is
+unusual, and unusual is a different question from unspecified.
+
+**What would settle it.** Nothing in this repository — it is a market
+observation, and the threshold for "implausible" would be a calibrated value.
+
+---
+
 ## Deferred, with reasons
 
 | Item | Why deferred | Revisit when |

@@ -40,3 +40,8 @@ raw_responses/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Release archives are build output, produced by docs/RELEASE.md step 4.
+# They must never be tracked: a tracked artefact makes the tree dirty at the
+# exact moment the release procedure requires it to be clean.
+gex-bot-*.zip

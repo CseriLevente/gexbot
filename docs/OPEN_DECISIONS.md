@@ -412,6 +412,101 @@ observation, and the threshold for "implausible" would be a calibrated value.
 
 ---
 
+## 22. ThetaData rate units - **UNKNOWN, blocks vendor-IV mixing**
+
+**The question.** Is `rate_value: 4.2` four-point-two percent, or four-point-two
+as a decimal?
+
+**Current behaviour.** `VendorRateUnits.UNKNOWN` is the default, and it blocks
+`VENDOR_IV_LOCAL_GAMMA` compatibility. An operator who knows the answer can set
+`percent` or `decimal` and the conversion becomes explicit.
+
+**Why it matters.** A factor of one hundred in the rate. A vendor 4.2 matching a
+local 4.2 on the raw numbers is the *bug*, not the confirmation.
+
+**What would settle it.** Vendor documentation, or one live IV compared against
+a local solve at both interpretations.
+
+---
+
+## 23. ThetaData `annual_dividend` convention - **UNKNOWN, blocks mixing**
+
+**The question.** Is it an annual cash amount, or a continuous yield?
+
+**Current behaviour.** `DividendConvention.UNKNOWN_VENDOR_DIVIDEND_CONVENTION`
+by default; blocks compatibility. `ANNUAL_CASH_DIVIDEND` is explicitly *not*
+convertible here -- Black-Scholes discounts spot by `exp(-qT)`, and turning a
+cash figure into `q` needs the spot and the payment schedule.
+
+**Why v2.1.1 got this wrong.** It passed the number through and let
+`DividendSource` treat it as a yield.
+
+**What would settle it.** Vendor documentation, or a live comparison against a
+known-dividend underlying.
+
+---
+
+## 24. Five undocumented vendor IV conventions - **UNKNOWN**
+
+Reported as `unknown_fields`, never as compatible: the settlement instant the
+vendor used, its day count, its short-dated floor, which price it solved
+against, and its solver version.
+
+**Consequence.** `VENDOR_IV_LOCAL_GAMMA` cannot claim model consistency. It can
+still be *selected*; it just cannot be described as verified.
+
+**What would settle it.** The adapter-certification session - see
+[ADAPTER_CERTIFICATION.md](ADAPTER_CERTIFICATION.md).
+
+---
+
+## 25. Spot synchronisation tolerance - **LOCAL POLICY, uncalibrated**
+
+**Current setting.** `SpotProvenance.tolerance_seconds = 1.0`.
+
+**Why this is a decision.** One second is a guess at how stale a spot print may
+be before pairing it with a chain stops being meaningful. It is a local policy,
+not a vendor fact, and it blocks certification when exceeded.
+
+**What would settle it.** Measured round-trip and staleness distributions from a
+real session.
+
+---
+
+## 26. Open-interest settlement date - **CALLER-SUPPLIED, unverified**
+
+**The question.** Which settlement date does ThetaData's open interest belong
+to?
+
+**Current behaviour.** `OpenInterestProvenance` records `source` and
+`caller_supplied`. A caller-supplied date is accepted and listed in
+`unverified_fields`; it is never described as observed.
+
+**Why it matters.** Open interest is the weight on every GEX term.
+
+**What would settle it.** One live response inspected for a settlement-date
+field.
+
+---
+
+## 27. Mixed-model policy default - **RESEARCH MODE, documented**
+
+**The question.** Should a chain priced under several effective models be
+refused, or reported?
+
+**Current behaviour.** Reported. `require_uniform_effective_model` defaults to
+`False`; the distribution is published, the snapshot is marked uncalibrated, and
+`effective_model_uniformity` scores the dominant model's share.
+
+**Why not strict by default.** Per-contract IV fallback is normal on a real
+chain. Refusing every mixed chain would refuse most of them, which would not
+make the data more uniform - it would make it absent.
+
+**What would settle it.** Measured fallback rates on real chains. If mixing is
+rare, strict becomes a reasonable default.
+
+---
+
 ## Deferred, with reasons
 
 | Item | Why deferred | Revisit when |

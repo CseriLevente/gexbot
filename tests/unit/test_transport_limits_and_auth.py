@@ -32,6 +32,11 @@ from src.config.thetadata import (
     parse_thetadata_config,
 )
 
+#: A valid CSV response with a header and no data rows -- the honest shape
+#: of "no contracts". A zero-byte body is not an empty chain, it is a body
+#: that is not CSV, and the client refuses it (see §15).
+EMPTY_CSV_BODY = "timestamp,symbol,expiration,strike,right,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,ask,ask_condition\n"
+
 
 def parse(**overrides):
     return parse_thetadata_config(overrides)
@@ -235,7 +240,9 @@ def test_local_terminal_needs_no_credentials(monkeypatch):
 def test_local_terminal_sends_no_authorization_header(monkeypatch):
     from src.adapters.transport import FakeTransport
 
-    transport = FakeTransport(default=HttpResponse(status_code=200, text=""))
+    transport = FakeTransport(
+        default=HttpResponse(status_code=200, text=EMPTY_CSV_BODY)
+    )
     client = build_thetadata_client(parse(), transport=transport)
     from src.adapters.thetadata.client import ChainRequest
 

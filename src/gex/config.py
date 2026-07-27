@@ -251,6 +251,10 @@ class ConfidenceWeights:
     future_timestamp_penalty: float = 0.04
     option_universe_coverage_score: float = 0.06
     iv_spread_quality: float = 0.04
+    #: Mixed effective models are a research caveat, not a data fault, so
+    #: the weight is small -- enough to be visible in the score, not enough
+    #: to dominate it.
+    effective_model_uniformity: float = 0.03
     model_parameter_completeness: float = 0.02
 
     def as_dict(self) -> dict[str, float]:
@@ -272,6 +276,7 @@ class ConfidenceWeights:
             "option_universe_coverage_score": self.option_universe_coverage_score,
             "iv_spread_quality": self.iv_spread_quality,
             "model_parameter_completeness": self.model_parameter_completeness,
+            "effective_model_uniformity": self.effective_model_uniformity,
         }
 
 
@@ -320,6 +325,13 @@ class ConfidenceConfig:
 @dataclass(frozen=True, slots=True)
 class GexEngineConfig:
     """Top-level engine settings."""
+
+    #: Refuse a chain whose included contracts were priced under more than one
+    #: effective model. Off by default: per-contract IV fallback is normal on a
+    #: real chain, and refusing every such chain would refuse most of them. On,
+    #: it is the correct setting for anything that aggregates across contracts
+    #: and states a single model in its result.
+    require_uniform_effective_model: bool = False
 
     # The 1% convention: GEX_i = gamma_i * OI_i * M * S * (0.01*S).
     spot_move_pct: float = 0.01

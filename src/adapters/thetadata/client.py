@@ -36,6 +36,47 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+from src.adapters.errors import (
+    ThetaDataAuthenticationError,
+    ThetaDataConfigurationError,
+    ThetaDataError,
+    ThetaDataHTTPError,
+    ThetaDataRateLimitError,
+    ThetaDataRetryExhaustedError,
+    ThetaDataSchemaError,
+    ThetaDataVendorError,
+    http_error_for,
+)
+
+#: The adapter's exception hierarchy is defined in ``src.adapters.errors`` so
+#: that the raw store can share it without importing this module, and re-exported
+#: here because this is where callers already look for it.
+__all__ = [
+    "ChainAssemblyInputs",
+    "ChainCompleteness",
+    "ChainRequest",
+    "ChainSnapshot",
+    "CsvBodyStatus",
+    "DuplicateRowError",
+    "FloatParseIssue",
+    "IntegerParseIssue",
+    "ThetaDataAuthenticationError",
+    "ThetaDataClient",
+    "ThetaDataConfigurationError",
+    "ThetaDataError",
+    "ThetaDataHTTPError",
+    "ThetaDataRateLimitError",
+    "ThetaDataRetryExhaustedError",
+    "ThetaDataSchemaError",
+    "ThetaDataSettings",
+    "ThetaDataVendorError",
+    "TimestampSource",
+    "assemble_chain",
+    "parse_float_field",
+    "parse_int_field",
+    "parse_strike",
+    "validate_csv_body",
+]
 from src.adapters.raw_store import (
     PARSER_VERSION,
     CaptureSession,
@@ -51,7 +92,14 @@ from src.adapters.thetadata.endpoints import (
     requires_shadow_gamma,
     tier_satisfies,
 )
-from src.adapters.transport import HttpResponse, HttpTransport
+from src.adapters.transport import (
+    HttpResponse,
+    HttpTransport,
+    ResponseTooLargeError,
+    RetryBudgetExhaustedError,
+    TransportError,
+    VendorHTTPError,
+)
 from src.domain.completeness import CompletenessStatus
 from src.domain.contracts import (
     ChainSnapshot,
@@ -65,15 +113,9 @@ from src.domain.iv import IVSource, build_iv_quote
 from src.domain.timestamps import ContractTimestamps
 from src.gex.sessions import EASTERN, to_eastern
 
-ContractKey = tuple[str, date, float, str]
-
-
-class ThetaDataError(RuntimeError):
-    pass
-
-
-class ThetaDataSchemaError(ThetaDataError):
-    """A response is missing a column the parser requires."""
+#: ``(symbol, expiry, canonical strike, right)``. The strike is the exact
+#: decimal spelling, not a float -- see ``parse_strike``.
+ContractKey = tuple[str, date, str, str]
 
 
 class DuplicateRowError(ThetaDataError):
@@ -165,20 +207,6 @@ class LocalizationLedger:
         }
 
 
-class ThetaDataVendorError(ThetaDataError):
-    """The vendor returned a non-success status, or a vendor error document.
-
-    The client checks the status itself rather than trusting the transport to
-    have raised. ``RetryingTransport`` does raise on non-2xx, but the transport
-    is a *protocol*: a caller may supply any implementation, and v2.1's
-    contract did not say that a non-2xx response could never arrive here. One
-    that returned a 500 handed an HTML error page straight to ``parse_csv``,
-    which parsed it happily into rows with no recognised columns -- surfacing
-    several layers later as a confusing schema error rather than as "the vendor
-    said 500".
-    """
-
-
 class IntegerParseIssue(str, Enum):
     """Why an integer field could not be read.
 
@@ -256,6 +284,101 @@ def parse_float_field(
     if maximum is not None and parsed > maximum:
         return None, FloatParseIssue.OUT_OF_RANGE
     return parsed, None
+
+
+class CsvBodyStatus(str, Enum):
+    """What a 200 response body actually is.
+
+    v2.1.1 handed any 200 body to ``parse_csv``. An HTML error page produces
+    zero rows, and zero rows is a legitimate outcome for a filtered request, so
+    a vendor error page became an empty chain and everything downstream treated
+    it as a quiet day.
+    """
+
+    VALID_EMPTY_CSV = "VALID_EMPTY_CSV"
+    INVALID_BODY = "INVALID_BODY"
+    MISSING_HEADER = "MISSING_HEADER"
+    MALFORMED_HEADER = "MALFORMED_HEADER"
+    VENDOR_ERROR_BODY = "VENDOR_ERROR_BODY"
+
+
+#: A header cell has to look like a column name. Anything with markup or spaces
+#: in it is a body that is not CSV.
+_HEADER_CELL = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def validate_csv_body(
+    text: str, *, required: tuple[str, ...] = ()
+) -> tuple[CsvBodyStatus, str]:
+    """Confirm a body is CSV before concluding it merely has no rows.
+
+    Returns ``(VALID_EMPTY_CSV, "")`` for a well-formed body -- with or without
+    data rows. Everything else names what is wrong.
+    """
+    stripped = text.lstrip("\ufeff").strip()
+    if not stripped:
+        return CsvBodyStatus.INVALID_BODY, "empty body"
+    if stripped[0] in "<{[":
+        return CsvBodyStatus.INVALID_BODY, (
+            f"body starts with {stripped[0]!r}; this is markup or JSON, not CSV"
+        )
+
+    header_line = stripped.splitlines()[0]
+    cells = [cell.strip() for cell in header_line.split(",")]
+    if len(cells) == 1:
+        return CsvBodyStatus.INVALID_BODY, (
+            "header row has a single cell; a CSV response always has several"
+        )
+    if any(not cell for cell in cells):
+        return CsvBodyStatus.MALFORMED_HEADER, "header contains an empty column name"
+    if len(set(cells)) != len(cells):
+        return CsvBodyStatus.MALFORMED_HEADER, "header contains a duplicate column"
+    if any(not _HEADER_CELL.match(cell) for cell in cells):
+        offenders = [c for c in cells if not _HEADER_CELL.match(c)]
+        return CsvBodyStatus.INVALID_BODY, (
+            f"header cells are not column names: {offenders[:3]}"
+        )
+
+    missing = [name for name in required if name not in cells]
+    if missing:
+        return CsvBodyStatus.MISSING_HEADER, f"missing required column(s) {missing}"
+    return CsvBodyStatus.VALID_EMPTY_CSV, ""
+
+
+def parse_strike(value: str | float | None) -> tuple[Decimal | None, str | None]:
+    """Parse a strike exactly, for use in the canonical contract identity.
+
+    v2.1.1 built the identity from ``float(row["strike"])``. Two consequences:
+
+    * ``"NaN"`` produced an identity containing a NaN, which compares unequal to
+      itself, so a NaN-struck contract could never be deduplicated or matched;
+    * equivalence between ``"5000"``, ``"5000.0"`` and ``"5000.00"`` depended on
+      float formatting rather than on the numbers being equal.
+
+    ``Decimal`` gives exactness and a canonical form without either.
+    """
+    if value is None:
+        return None, "missing_value"
+    text = str(value).strip()
+    if not text:
+        return None, "missing_value"
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None, "malformed_value"
+    if not parsed.is_finite():
+        return None, "non_finite_input"
+    if parsed <= 0:
+        return None, "out_of_range"
+    return parsed, None
+
+
+def canonical_strike(value: Decimal) -> str:
+    """One spelling per strike, so equivalent inputs share an identity."""
+    normalised = value.normalize()
+    if normalised == normalised.to_integral_value():
+        normalised = normalised.quantize(Decimal(1))
+    return f"{normalised:f}"
 
 
 def parse_int_field(
@@ -364,7 +487,7 @@ class GreeksParameters:
     # "latest" or a pinned version. Pinning is safer for research reproducibility;
     # "latest" means the vendor can change historical answers under you.
     greeks_version: str = "latest"
-    rate_type: str = "sofr"
+    rate_type: str | None = "sofr"
     rate_value: float | None = None
     annual_dividend: float | None = None
     # Which underlying print the vendor should use.
@@ -377,10 +500,14 @@ class GreeksParameters:
         Sending an unset parameter as an empty string is not the same as omitting
         it, and some vendors treat the two differently.
         """
-        query: dict[str, str | float] = {
-            "version": self.greeks_version,
-            "rate_type": self.rate_type,
-        }
+        query: dict[str, str | float] = {"version": self.greeks_version}
+        # A null rate_type means "omit the parameter and let the vendor default
+        # apply". v2.1.1 substituted "sofr" at client-construction time, so the
+        # stored config said None, the request said sofr, and only one of them
+        # was true. Omission is the documented policy -- see
+        # ThetaDataConfig.rate_type_policy().
+        if self.rate_type is not None:
+            query["rate_type"] = self.rate_type
         if self.rate_value is not None:
             query["rate_value"] = self.rate_value
         if self.annual_dividend is not None:
@@ -565,6 +692,32 @@ def _to_float(value: str | None) -> float | None:
     return parsed
 
 
+def _parse_vendor_gamma(
+    value: str | None, *, sink: list[tuple[str, str]], record_present: bool
+) -> float | None:
+    """Read the vendor gamma, distinguishing its three failure modes.
+
+    All three produce ``None`` and therefore local fallback -- but a *corrupt*
+    vendor gamma and an *absent* one are different facts about the capture, and
+    v2.1.1 recorded neither. A snapshot could report a shadow gamma with nothing
+    to indicate that a vendor gamma had arrived and been unreadable.
+
+    ``record_present`` is what separates "no second-order response at all" --
+    the normal Standard-tier case, and not a finding -- from "a second-order
+    record arrived with an empty gamma cell", which is.
+    """
+    parsed, issue = parse_float_field(value, field="gamma", allow_negative=True)
+    if issue is None or not record_present:
+        return parsed
+    if issue is FloatParseIssue.MISSING_VALUE:
+        sink.append(("gamma", "VENDOR_GAMMA_MISSING"))
+    elif issue is FloatParseIssue.NON_FINITE_INPUT:
+        sink.append(("gamma", "VENDOR_GAMMA_NON_FINITE"))
+    else:
+        sink.append(("gamma", "VENDOR_GAMMA_MALFORMED"))
+    return parsed
+
+
 def _to_float_recorded(
     value: str | None,
     *,
@@ -716,21 +869,62 @@ def parse_root(value: str) -> OptionRoot:
         ) from exc
 
 
+class StrikeParseError(ThetaDataSchemaError):
+    """A strike could not be read exactly, so no identity can be built from it."""
+
+
 def row_key(row: dict[str, str]) -> ContractKey:
+    """The canonical join key for one vendor row.
+
+    The strike goes through ``parse_strike``/``canonical_strike`` rather than
+    ``float()``. v2.1.1 used ``float(row["strike"])``, which meant "NaN"
+    produced a key containing a NaN -- unequal to itself, so such a contract
+    could never be deduplicated or matched -- and equivalence between "5000",
+    "5000.0" and "5000.00" rested on float formatting rather than on the values
+    being equal.
+    """
     try:
-        return (
-            row["symbol"].strip().upper(),
-            parse_expiration(row["expiration"]),
-            float(row["strike"]),
-            parse_right(row["right"]).value,
-        )
+        symbol = row["symbol"].strip().upper()
+        expiration = parse_expiration(row["expiration"])
+        right = parse_right(row["right"]).value
+        raw_strike = row["strike"]
     except KeyError as exc:
         raise ThetaDataSchemaError(f"row is missing join column {exc}") from exc
 
+    strike, issue = parse_strike(raw_strike)
+    if strike is None:
+        raise StrikeParseError(
+            f"strike {raw_strike!r} is {issue}; refusing to build a contract "
+            "identity from a strike that cannot be parsed exactly"
+        )
+    return (symbol, expiration, canonical_strike(strike), right)
+
 
 def _row_identifier(row: dict[str, str]) -> str:
-    """Stable identifier for one raw row, for the duplicate report."""
-    return json.dumps({k: row[k] for k in sorted(row)}, separators=(",", ":"))
+    """Stable identifier for one raw row, for the duplicate report.
+
+    Normalises the strike first, so that two rows differing only in how the
+    strike was spelled ("4900.00" vs "4900.000") compare as identical rather
+    than as a conflict. They describe the same contract at the same price; the
+    formatting is the vendor's, not information.
+    """
+    normalised = dict(row)
+    if "strike" in normalised:
+        parsed, _ = parse_strike(normalised["strike"])
+        if parsed is not None:
+            normalised["strike"] = canonical_strike(parsed)
+    return json.dumps(
+        {k: normalised[k] for k in sorted(normalised)}, separators=(",", ":")
+    )
+
+
+def _safe_row_key(row: dict[str, str]) -> ContractKey | None:
+    """``row_key``, but a strike we cannot parse drops one row rather than the
+    whole response."""
+    try:
+        return row_key(row)
+    except StrikeParseError:
+        return None
 
 
 def index_rows(
@@ -759,7 +953,13 @@ def index_rows(
     """
     grouped: dict[ContractKey, list[dict[str, str]]] = {}
     for row in rows:
-        grouped.setdefault(row_key(row), []).append(row)
+        key = _safe_row_key(row)
+        if key is None:
+            # One unreadable strike costs one row, not the response. The
+            # contract simply never appears, and the completeness measure
+            # counts it as missing.
+            continue
+        grouped.setdefault(key, []).append(row)
 
     selected: dict[ContractKey, dict[str, str]] = {}
     reports: list[DuplicateReport] = []
@@ -837,70 +1037,162 @@ def index_rows(
 class ChainCompleteness:
     """How complete a chain is, measured against an INDEPENDENT expectation.
 
-    The v2 defect: the expected universe was inferred from the quote response
-    being evaluated, so a truncated response was, by construction, 100% complete.
-    A measure that derives its expectation from the thing it is measuring cannot
-    detect truncation.
+    Two defects shaped this class, one release apart, and they are the same
+    mistake at different depths.
 
-    ``expected_contract_count`` must come from somewhere else -- a contract-list
-    endpoint, vendor response-count metadata, pagination metadata, or the
-    requested strike/expiration universe. When no independent source is
-    available the completeness is labelled **partially observed** rather than
-    reported as complete.
+    v2 inferred the expected universe from the response being judged, so a
+    truncated response was complete by construction.
+
+    v2.1.1 fixed that and then compared *counts*::
+
+        joined_contract_count / expected_contract_count
+
+    A chain that received two contracts where two were expected therefore
+    reported ``MEASURED_COMPLETE``, whether or not they were the two expected.
+    Two missing and two unexpected cancel exactly in that arithmetic. Counting
+    cannot distinguish the thing being measured from a coincidence of the same
+    size.
+
+    Completeness is now a statement about **identity sets**::
+
+        missing_expected    = expected - received
+        unexpected_received = received - expected
+        matched             = expected & received
+
+    with ``MEASURED_COMPLETE`` requiring ``missing_expected`` to be empty.
+    Extras get their own status rather than being averaged away, because
+    "contracts arrived that nobody predicted" is a fact about the expectation
+    and needs to survive to whoever reads the report.
     """
 
     received_quote_count: int
     received_oi_count: int
     received_iv_count: int
     received_greeks_count: int
-    joined_contract_count: int
-    expected_contract_count: int | None = None
+    #: Identities an INDEPENDENT source said to expect. ``None`` means no such
+    #: source existed -- distinct from an empty tuple, which means one existed
+    #: and claimed nothing.
+    expected_contract_ids: tuple[str, ...] | None = None
+    #: Identities that actually joined into contracts.
+    received_contract_ids: tuple[str, ...] = ()
     expected_source: str = "none"
     missing_by_source: dict[str, int] = field(default_factory=dict)
-    unexpected_identities: tuple[str, ...] = ()
+
+    #: Identity lists are truncated in serialised metadata at this length. A
+    #: 5,000-contract mismatch is a real possibility on a full SPX chain, and a
+    #: 5,000-entry blob in every snapshot's metadata is not useful to anyone.
+    #: The *counts* are never truncated.
+    IDENTITY_SAMPLE_LIMIT = 100
+
+    # -- identity sets -------------------------------------------------------
+
+    @property
+    def _expected(self) -> frozenset[str]:
+        return frozenset(self.expected_contract_ids or ())
+
+    @property
+    def _received(self) -> frozenset[str]:
+        return frozenset(self.received_contract_ids)
+
+    @property
+    def expected_identity_count(self) -> int:
+        """Distinct expected identities. Duplicates in the input do not count
+        twice -- an expectation listing a contract twice still expects it once.
+        """
+        return len(self._expected)
+
+    @property
+    def received_identity_count(self) -> int:
+        return len(self._received)
+
+    @property
+    def matched_identity_count(self) -> int:
+        return len(self._expected & self._received)
+
+    @property
+    def missing_expected_identities(self) -> tuple[str, ...]:
+        """Expected but absent, sorted. Sorted so that two runs over the same
+        data produce byte-identical metadata."""
+        return tuple(sorted(self._expected - self._received))
+
+    @property
+    def unexpected_received_identities(self) -> tuple[str, ...]:
+        return tuple(sorted(self._received - self._expected))
+
+    @property
+    def missing_expected_count(self) -> int:
+        return len(self._expected - self._received)
+
+    @property
+    def unexpected_received_count(self) -> int:
+        return len(self._received - self._expected)
+
+    @property
+    def identity_completeness_ratio(self) -> float | None:
+        """Matched over expected. Extras cannot push it above 1.0, and cannot
+        compensate for a miss."""
+        if not self._expected:
+            return None
+        return self.matched_identity_count / len(self._expected)
+
+    # -- compatibility -------------------------------------------------------
+
+    @property
+    def expected_contract_count(self) -> int | None:
+        """Retained for the snapshot contract; ``None`` when nothing was
+        independently expected."""
+        if self.expected_contract_ids is None:
+            return None
+        return self.expected_identity_count
+
+    @property
+    def joined_contract_count(self) -> int:
+        return self.received_identity_count
+
+    @property
+    def completeness_ratio(self) -> float | None:
+        return self.identity_completeness_ratio
 
     @property
     def independently_observed(self) -> bool:
         """False when the expectation came from the response itself."""
-        return (
-            self.expected_contract_count is not None
-            and self.expected_source
-            not in (
-                "none",
-                "quote_response",
-            )
+        return self.expected_contract_ids is not None and self.expected_source not in (
+            "none",
+            "quote_response",
         )
 
     @property
-    def completeness_ratio(self) -> float | None:
-        if not self.expected_contract_count:
-            return None
-        return min(self.joined_contract_count / self.expected_contract_count, 1.0)
-
-    @property
     def status(self) -> CompletenessStatus:
-        """Measurement or absence. Never "complete" on the strength of itself."""
+        """Measurement or absence. Never "complete" on the strength of counts."""
         if not self.independently_observed:
             # An expectation taken from the response being judged is not an
             # expectation. Rows arrived and joined; whether more were owed is
             # unknowable from here.
             return (
                 CompletenessStatus.UNKNOWN
-                if self.joined_contract_count == 0
+                if self.received_identity_count == 0
                 else CompletenessStatus.PARTIALLY_OBSERVED
             )
-        ratio = self.completeness_ratio
-        if ratio is None:
-            # independently_observed with no usable ratio means the universe was
-            # supplied but empty -- nothing was claimed, so nothing is measured.
+        if not self._expected:
+            # A universe was supplied and claimed nothing. Nothing is measured.
             return CompletenessStatus.UNKNOWN
+        if self.missing_expected_count:
+            return CompletenessStatus.MEASURED_INCOMPLETE
         return (
-            CompletenessStatus.MEASURED_COMPLETE
-            if ratio >= 1.0
-            else CompletenessStatus.MEASURED_INCOMPLETE
+            CompletenessStatus.MEASURED_COMPLETE_WITH_EXTRAS
+            if self.unexpected_received_count
+            else CompletenessStatus.MEASURED_COMPLETE
         )
 
+    def _sample(self, identities: tuple[str, ...]) -> tuple[list[str], bool]:
+        limit = self.IDENTITY_SAMPLE_LIMIT
+        return list(identities[:limit]), len(identities) > limit
+
     def as_dict(self) -> dict[str, Any]:
+        missing, missing_truncated = self._sample(self.missing_expected_identities)
+        unexpected, unexpected_truncated = self._sample(
+            self.unexpected_received_identities
+        )
         return {
             "expected_contract_count": self.expected_contract_count,
             "expected_source": self.expected_source,
@@ -909,11 +1201,22 @@ class ChainCompleteness:
             "received_iv_count": self.received_iv_count,
             "received_greeks_count": self.received_greeks_count,
             "joined_contract_count": self.joined_contract_count,
+            "expected_identity_count": self.expected_identity_count,
+            "received_identity_count": self.received_identity_count,
+            "matched_identity_count": self.matched_identity_count,
+            "missing_expected_count": self.missing_expected_count,
+            "unexpected_received_count": self.unexpected_received_count,
+            "missing_expected_identities": missing,
+            "missing_expected_identities_truncated": missing_truncated,
+            "unexpected_received_identities": unexpected,
+            "unexpected_received_identities_truncated": unexpected_truncated,
+            "identity_completeness_ratio": self.identity_completeness_ratio,
             "completeness_ratio": self.completeness_ratio,
             "independently_observed": self.independently_observed,
             "status": self.status.value,
             "missing_by_source": dict(sorted(self.missing_by_source.items())),
-            "unexpected_identities": list(self.unexpected_identities),
+            # Retained under its v2.1 name so existing readers keep working.
+            "unexpected_identities": unexpected,
         }
 
 
@@ -994,7 +1297,32 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
         oi_row = oi_by_key.get(key, {})
 
         parse_issues: list[tuple[str, str]] = []
-        quote_ts = ledger.parse(row.get("timestamp"), source=TimestampSource.QUOTE)
+        # Per-contract provenance: which record supplied each clock, and
+        # whether a timezone was assumed for THAT record. The chain-level ledger
+        # below still counts every source inspected; this names the one used.
+        selected_sources: dict[str, dict[str, object]] = {}
+
+        def _select(
+            value: str | None,
+            *,
+            role: str,
+            source: TimestampSource,
+            into: dict[str, dict[str, object]] = selected_sources,
+        ) -> datetime | None:
+            # ``into`` is bound at definition time so the closure cannot capture
+            # a later iteration's dict.
+            parsed, assumed = parse_vendor_timestamp(value)
+            into[role] = {
+                "source": source.value,
+                "localization_applied": assumed,
+                "present": parsed is not None,
+            }
+            return parsed
+
+        quote_ts = _select(
+            row.get("timestamp"), role="quote", source=TimestampSource.QUOTE
+        )
+        ledger.parse(row.get("timestamp"), source=TimestampSource.QUOTE)
         if oi_row:
             ledger.parse(oi_row.get("timestamp"), source=TimestampSource.OPEN_INTEREST)
         if first:
@@ -1004,6 +1332,33 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
             ledger.parse(
                 first.get("underlying_timestamp"), source=TimestampSource.UNDERLYING
             )
+        # The IV clock is its own role: on a Standard-tier chain it comes from
+        # the first-order greeks record, which may be a different record -- and
+        # a different timezone assumption -- from the quote.
+        _select(
+            first.get("timestamp") if first else None,
+            role="implied_vol",
+            source=TimestampSource.IMPLIED_VOL,
+        )
+        _select(
+            (first.get("underlying_timestamp") if first else None)
+            or (second.get("underlying_timestamp") if second else None),
+            role="underlying",
+            source=TimestampSource.UNDERLYING,
+        )
+        if second:
+            _select(
+                second.get("timestamp"),
+                role="gamma",
+                source=TimestampSource.SECOND_ORDER_GREEKS,
+            )
+        selected_sources["open_interest"] = {
+            "source": TimestampSource.OPEN_INTEREST.value,
+            "localization_applied": False,
+            "present": bool(oi_row),
+            # A settlement date, not an instant, so no timezone is assumed.
+            "caller_supplied": inputs.open_interest_as_of is not None,
+        }
         if second:
             ledger.parse(
                 second.get("timestamp"), source=TimestampSource.SECOND_ORDER_GREEKS
@@ -1015,7 +1370,7 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
         contract = OptionContract(
             root=parse_root(row["symbol"]),
             expiry=key[1],
-            strike=key[2],
+            strike=float(key[2]),
             right=OptionRight(key[3]),
         )
         # Every source clock preserved separately. This is the whole point.
@@ -1027,6 +1382,7 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
                 first.get("underlying_timestamp") or second.get("underlying_timestamp")
             ),
             open_interest_as_of=inputs.open_interest_as_of,
+            selected_timestamp_sources=selected_sources,
             request_started_at=inputs.clocks.request_started_at,
             response_received_at=inputs.clocks.response_received_at,
             normalized_at=inputs.clocks.normalized_at,
@@ -1049,25 +1405,59 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
                     sink=parse_issues,
                 ),
                 iv=build_iv_quote(
-                    bid_iv=_to_float(first.get("bid_iv")),
-                    mid_iv=_to_float(first.get("mid_iv")),
-                    ask_iv=_to_float(first.get("ask_iv")),
-                    vendor_iv=_to_float(
-                        first.get("implied_vol") or second.get("implied_vol")
+                    bid_iv=_to_float_recorded(
+                        first.get("bid_iv"),
+                        field="bid_iv",
+                        sink=parse_issues,
                     ),
-                    vendor_iv_error=_to_float(
-                        first.get("iv_error") or second.get("iv_error")
+                    mid_iv=_to_float_recorded(
+                        first.get("mid_iv"),
+                        field="mid_iv",
+                        sink=parse_issues,
+                    ),
+                    ask_iv=_to_float_recorded(
+                        first.get("ask_iv"),
+                        field="ask_iv",
+                        sink=parse_issues,
+                    ),
+                    vendor_iv=_to_float_recorded(
+                        first.get("implied_vol") or second.get("implied_vol"),
+                        field="implied_vol",
+                        sink=parse_issues,
+                    ),
+                    vendor_iv_error=_to_float_recorded(
+                        first.get("iv_error") or second.get("iv_error"),
+                        field="iv_error",
+                        sink=parse_issues,
                     ),
                     preferred_source=inputs.iv_source,
                     zero_bid=bid is not None and bid <= 0.0,
                     crossed=crossed,
                 ),
-                delta=_to_float(first.get("delta")),
-                gamma=_to_float(second.get("gamma")),
-                vega=_to_float(first.get("vega")),
-                theta=_to_float(first.get("theta")),
-                underlying_price=_to_float(
-                    first.get("underlying_price") or second.get("underlying_price")
+                delta=_to_float_recorded(
+                    first.get("delta"),
+                    field="delta",
+                    sink=parse_issues,
+                ),
+                gamma=_parse_vendor_gamma(
+                    second.get("gamma"),
+                    sink=parse_issues,
+                    record_present=bool(second),
+                ),
+                vega=_to_float_recorded(
+                    first.get("vega"),
+                    field="vega",
+                    sink=parse_issues,
+                ),
+                theta=_to_float_recorded(
+                    first.get("theta"),
+                    field="theta",
+                    sink=parse_issues,
+                ),
+                underlying_price=_to_float_recorded(
+                    first.get("underlying_price") or second.get("underlying_price"),
+                    field="underlying_price",
+                    sink=parse_issues,
                 ),
                 parse_issues=tuple(parse_issues),
             )
@@ -1080,10 +1470,8 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
         received_oi_count=len(inputs.open_interest_rows),
         received_iv_count=len(inputs.first_order_rows),
         received_greeks_count=len(inputs.second_order_rows),
-        joined_contract_count=len(quotes),
-        expected_contract_count=(
-            len(expected_ids) if inputs.expected_contract_ids is not None else None
-        ),
+        expected_contract_ids=inputs.expected_contract_ids,
+        received_contract_ids=tuple(sorted(joined_ids)),
         expected_source=inputs.expected_source,
         missing_by_source={
             "quote": max(0, len(expected_ids) - len(joined_ids)) if expected_ids else 0,
@@ -1091,9 +1479,6 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
             "implied_vol": sum(1 for q in quotes if q.effective_iv is None),
             "vendor_gamma": sum(1 for q in quotes if q.gamma is None),
         },
-        unexpected_identities=tuple(sorted(joined_ids - expected_ids))
-        if expected_ids
-        else (),
     )
 
     return ChainSnapshot(
@@ -1209,7 +1594,31 @@ class ThetaDataClient:
             )
         url = build_url(endpoint, params, base_url=self.settings.base_url)
         started = self._clock()
-        response = self._transport.get(url, params, self.settings.timeout_seconds)
+        # Every transport failure becomes an adapter failure here, so a caller
+        # catching ThetaDataError catches all of them regardless of which layer
+        # produced the original. v2.1.1 let four unrelated base classes escape.
+        try:
+            response = self._transport.get(url, params, self.settings.timeout_seconds)
+        except ThetaDataError:
+            raise
+        except RetryBudgetExhaustedError as exc:
+            raise ThetaDataRetryExhaustedError(
+                f"{endpoint.value}: retry budget exhausted -- {exc}"
+            ) from exc
+        except VendorHTTPError as exc:
+            raise http_error_for(
+                endpoint=endpoint.value,
+                status_code=exc.status_code,
+                request_id=exc.request_id,
+            ) from exc
+        except ResponseTooLargeError:
+            # Deliberately not wrapped: the cap is our decision, not a vendor
+            # failure, and the caller that set it should see it unchanged.
+            raise
+        except TransportError as exc:
+            raise ThetaDataError(
+                f"{endpoint.value}: transport failure -- {exc}"
+            ) from exc
         received = self._clock()
 
         if capture is not None:
@@ -1228,10 +1637,15 @@ class ThetaDataClient:
         # error document, and an HTML error page must never reach the CSV
         # parser as though it were data.
         if not 200 <= response.status_code < 300:
-            raise ThetaDataVendorError(
-                f"{endpoint.value} returned HTTP {response.status_code}; "
-                f"refusing to parse a non-success body as CSV "
-                f"({len(response.text)} bytes)"
+            # Status first, unconditionally, before the body is looked at at
+            # all. A 500 is a 500 whether or not its body resembles a vendor
+            # error document, and an HTML error page must never reach the CSV
+            # parser as though it were data.
+            raise http_error_for(
+                endpoint=endpoint.value,
+                status_code=response.status_code,
+                request_id=response.request_id,
+                body_length=len(response.text),
             )
 
         vendor_error = detect_vendor_error(response.text)
@@ -1239,6 +1653,19 @@ class ThetaDataClient:
             raise ThetaDataVendorError(
                 f"{endpoint.value} returned a vendor error body: {vendor_error}"
             )
+        # A 200 with an HTML error page parses into zero rows, and zero rows
+        # is a legitimate outcome for a filtered request. Confirm the body is
+        # actually CSV before drawing that conclusion.
+        body_status, body_detail = validate_csv_body(
+            response.text,
+            required=tuple(sorted(REQUIRED_COLUMNS.get(endpoint, set()))),
+        )
+        if body_status is not CsvBodyStatus.VALID_EMPTY_CSV:
+            raise ThetaDataSchemaError(
+                f"{endpoint.value} returned HTTP {response.status_code} with a "
+                f"body that is not usable CSV ({body_status.value}): {body_detail}"
+            )
+
         rows = parse_csv(response.text)
         check_schema(rows, endpoint)
         return rows

@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from src.domain.contracts import (
     ChainSnapshot,
@@ -84,6 +85,187 @@ def notional_gex(
 class GammaSource(str, Enum):
     VENDOR = "vendor"
     SHADOW_PRICER = "shadow_pricer"
+
+
+class MixedModelError(ValueError):
+    """A chain contains more than one effective model and strict mode is on.
+
+    Per-contract IV fallback means one chain can end up priced under several
+    models. In research mode that is allowed and reported; in strict mode it is
+    refused, because a single aggregate over several models is a number without
+    a stated meaning.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ModelDistribution:
+    """What models actually priced this chain, and in what proportion.
+
+    v2.1.1 reported ``model_fingerprint`` from the *configured* spec, so a chain
+    where half the contracts fell back to a different IV source still claimed a
+    single model -- and any per-contract read took whichever contract came
+    first. Iteration order decided what the snapshot said about itself.
+
+    Every count here is sorted, so two runs over the same data serialise
+    identically.
+    """
+
+    iv_source_counts: dict[str, int]
+    gamma_source_counts: dict[str, int]
+    effective_model_fingerprint_counts: dict[str, int]
+    fallback_reason_counts: dict[str, int]
+
+    @property
+    def mixed_iv_sources(self) -> bool:
+        return len(self.iv_source_counts) > 1
+
+    @property
+    def mixed_gamma_sources(self) -> bool:
+        return len(self.gamma_source_counts) > 1
+
+    @property
+    def mixed_effective_models(self) -> bool:
+        return len(self.effective_model_fingerprint_counts) > 1
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "iv_source_counts": dict(sorted(self.iv_source_counts.items())),
+            "gamma_source_counts": dict(sorted(self.gamma_source_counts.items())),
+            "effective_model_fingerprint_counts": dict(
+                sorted(self.effective_model_fingerprint_counts.items())
+            ),
+            "fallback_reason_counts": dict(sorted(self.fallback_reason_counts.items())),
+            "mixed_iv_sources": self.mixed_iv_sources,
+            "mixed_gamma_sources": self.mixed_gamma_sources,
+            "mixed_effective_models": self.mixed_effective_models,
+            # Named per the spec; same numbers, stated as "contracts by X".
+            "contracts_by_iv_source": dict(sorted(self.iv_source_counts.items())),
+            "contracts_by_effective_model": dict(
+                sorted(self.effective_model_fingerprint_counts.items())
+            ),
+        }
+
+
+def build_model_distribution(
+    contracts: tuple[ContractGex, ...],
+) -> ModelDistribution:
+    """Count the models that actually priced the included contracts."""
+    iv_counts: Counter[str] = Counter()
+    gamma_counts: Counter[str] = Counter()
+    model_counts: Counter[str] = Counter()
+    fallbacks: Counter[str] = Counter()
+
+    for contract in contracts:
+        effective = contract.effective
+        iv_counts[effective.implied_volatility_source.value] += 1
+        gamma_counts[contract.gamma_source.value] += 1
+        model_counts[effective.fingerprint()] += 1
+        for issue in effective.issues:
+            fallbacks[issue.value] += 1
+
+    return ModelDistribution(
+        iv_source_counts=dict(iv_counts),
+        gamma_source_counts=dict(gamma_counts),
+        effective_model_fingerprint_counts=dict(model_counts),
+        fallback_reason_counts=dict(fallbacks),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCompletenessReport:
+    """Whether the model *could* resolve, separately from whether it *did*.
+
+    Two layers, because v2.1.1 collapsed them into one and lost the first.
+    ``model_parameter_completeness`` read the surviving contracts, so an empty
+    result set had no missing inputs and a chain where every contract was
+    excluded reported a fully specified model. The question "why did nothing
+    survive?" went quiet exactly when it was being asked.
+
+    Static completeness is a property of the configuration alone. It holds for
+    an empty chain, a full chain, and a chain that has not been fetched yet.
+    """
+
+    static_model_complete: bool
+    static_missing_inputs: tuple[str, ...]
+    resolved_contract_count: int
+    unresolved_contract_count: int
+    per_input_failure_counts: dict[str, int]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "static_model_complete": self.static_model_complete,
+            "static_missing_inputs": list(self.static_missing_inputs),
+            "resolved_contract_count": self.resolved_contract_count,
+            "unresolved_contract_count": self.unresolved_contract_count,
+            "per_input_failure_counts": dict(
+                sorted(self.per_input_failure_counts.items())
+            ),
+        }
+
+
+def static_model_missing_inputs(spec: ModelSpec) -> tuple[str, ...]:
+    """Inputs the configuration cannot supply, whatever data arrives.
+
+    Looks only at the spec. No chain, no contracts, no vendor response.
+    """
+    from src.domain.model_spec import (
+        DividendSource,
+        RateSource,
+        UnderlyingPriceSource,
+    )
+
+    missing: list[str] = []
+    if (
+        spec.risk_free_rate_source is RateSource.CONFIGURED_CONSTANT
+        and spec.risk_free_rate is None
+    ):
+        missing.append(
+            "risk_free_rate: source is configured_constant but no constant is set"
+        )
+    if (
+        spec.dividend_yield_source is DividendSource.CONFIGURED_CONSTANT
+        and spec.dividend_yield is None
+    ):
+        missing.append(
+            "dividend_yield: source is configured_constant but no constant is set"
+        )
+    if (
+        spec.underlying_price_source is UnderlyingPriceSource.CONFIGURED_CONSTANT
+        and spec.configured_underlying_price is None
+    ):
+        missing.append(
+            "underlying_price: source is configured_constant but no constant is set"
+        )
+    if not spec.expiration_timestamp_rule.is_supported:
+        missing.append(
+            f"expiration_rule: {spec.expiration_timestamp_rule.value} is not "
+            f"supported ({spec.expiration_timestamp_rule.unsupported_reason})"
+        )
+    if spec.minimum_time_to_expiry_minutes < 0.0:
+        missing.append("minimum_time_to_expiry_minutes: negative")
+    return tuple(missing)
+
+
+def build_model_completeness(
+    spec: ModelSpec, result: ContractGexResult
+) -> ModelCompletenessReport:
+    """Static configuration completeness plus per-contract resolution."""
+    failures: Counter[str] = Counter()
+    resolved = 0
+    for contract in result.contracts:
+        if contract.effective.is_fully_specified:
+            resolved += 1
+        for entry in contract.effective.missing_inputs:
+            failures[entry] += 1
+
+    static_missing = static_model_missing_inputs(spec)
+    return ModelCompletenessReport(
+        static_model_complete=not static_missing,
+        static_missing_inputs=static_missing,
+        resolved_contract_count=resolved,
+        unresolved_contract_count=len(result.contracts) - resolved,
+        per_input_failure_counts=dict(failures),
+    )
 
 
 class ExclusionReason(str, Enum):

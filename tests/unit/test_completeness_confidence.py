@@ -219,24 +219,35 @@ def test_unknown_completeness_makes_the_snapshot_uncalibrated():
 # =============================================================================
 
 
+IDS = tuple(cid(k) for k in range(4900, 4950, 10))  # five identities
+
+
 @pytest.mark.parametrize(
-    ("expected", "source", "joined", "status"),
+    ("expected", "source", "received", "status"),
     [
-        (None, "none", 5, CompletenessStatus.PARTIALLY_OBSERVED),
-        (5, "quote_response", 5, CompletenessStatus.PARTIALLY_OBSERVED),
-        (5, "contract_list", 5, CompletenessStatus.MEASURED_COMPLETE),
-        (5, "contract_list", 3, CompletenessStatus.MEASURED_INCOMPLETE),
-        (0, "contract_list", 0, CompletenessStatus.UNKNOWN),
+        (None, "none", IDS, CompletenessStatus.PARTIALLY_OBSERVED),
+        (IDS, "quote_response", IDS, CompletenessStatus.PARTIALLY_OBSERVED),
+        (IDS, "contract_list", IDS, CompletenessStatus.MEASURED_COMPLETE),
+        (IDS, "contract_list", IDS[:3], CompletenessStatus.MEASURED_INCOMPLETE),
+        ((), "contract_list", (), CompletenessStatus.UNKNOWN),
+        # Same *count* as expected, entirely different identities. v2.1.1
+        # reported MEASURED_COMPLETE here.
+        (
+            IDS,
+            "contract_list",
+            tuple(cid(k) for k in range(5100, 5150, 10)),
+            CompletenessStatus.MEASURED_INCOMPLETE,
+        ),
     ],
 )
-def test_status_matrix(expected, source, joined, status):
+def test_status_matrix(expected, source, received, status):
     measure = ChainCompleteness(
-        received_quote_count=joined,
-        received_oi_count=joined,
-        received_iv_count=joined,
+        received_quote_count=len(received),
+        received_oi_count=len(received),
+        received_iv_count=len(received),
         received_greeks_count=0,
-        joined_contract_count=joined,
-        expected_contract_count=expected,
+        expected_contract_ids=expected,
+        received_contract_ids=received,
         expected_source=source,
     )
     assert measure.status is status
@@ -248,7 +259,7 @@ def test_the_status_is_serialised_as_its_name():
         received_oi_count=1,
         received_iv_count=1,
         received_greeks_count=0,
-        joined_contract_count=1,
+        received_contract_ids=(cid(4900),),
     ).as_dict()
     assert payload["status"] == "PARTIALLY_OBSERVED"
 

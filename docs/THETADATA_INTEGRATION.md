@@ -258,3 +258,24 @@ Install the HTTP extra first: `pip install -e ".[http]"`.
 5. **Zero-gamma stability.** Distribution of `zero_gamma_spread_pct` across live
    sessions. If the level is unstable on most days, that is worth knowing before
    anything is built on top of it.
+
+
+---
+
+## Before a paid session
+
+Read [ADAPTER_CERTIFICATION.md](ADAPTER_CERTIFICATION.md). It lists what must
+hold before a capture produces evidence rather than a directory of bytes, and
+names the two vendor-dependent unknowns -- the open-interest settlement date and
+the spot synchronisation -- that only a live session can resolve.
+
+Construct the session through one path:
+
+```python
+from src.config.pipeline import ThetaDataResearchPipeline
+
+pipeline = ThetaDataResearchPipeline.from_config(config.thetadata)
+```
+
+Nothing else builds a runtime and a `ModelSpec` separately, because that is how
+they came to disagree.

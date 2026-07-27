@@ -1,5 +1,89 @@
 # Changelog
 
+## 2.1.2 - adapter-certification readiness
+
+Twenty defects cleared before any paid ThetaData capture. Every one shares a
+shape: **something that looked wired up, was not**, and the gap was invisible
+because each half was individually valid.
+
+Counts stood in for identities. Two objects configured separately were never
+compared. A cap was enforced at the layer above the one that reads bytes. A
+session id derived its uniqueness from a timestamp that repeats. A scanner
+resolved a path from the metadata it existed to validate.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_ADAPTER_CERTIFICATION` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.1 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Completeness compared `joined_count / expected_count` | Two received where two were expected scored `MEASURED_COMPLETE` regardless of *which* two -- two missing and two unexpected cancel exactly | Identity set differences; `MEASURED_COMPLETE_WITH_EXTRAS`; missing/unexpected identity lists, sorted and bounded |
+| 2 | `ThetaDataRuntime.iv_source` and `ModelSpec.iv_price_source` were never compared | A session could fetch NBBO-mid IV and price with the vendor default, both objects looking correct | `ThetaDataResearchPipeline.from_config` builds both and refuses a mismatch |
+| 3 | Vendor IV fed straight into local gamma | Possessing the number is not evidence it was produced our way | `PricingCompatibilityReport`; `DividendConvention`; `VendorRateUnits`; five undocumented dimensions reported `UNKNOWN` |
+| 4 | `model_fingerprint` reported one model per chain | Per-contract IV fallback yields several; which one was reported depended on iteration order | `ModelDistribution` with per-source counts; `effective_model_uniformity` component; optional strict mode |
+| 5 | Only `bid`/`ask` used the structured float parser | A malformed vendor gamma became `None`, indistinguishable from absent, and silently triggered fallback | Every vendor float structured; `VENDOR_GAMMA_MALFORMED`/`NON_FINITE`/`MISSING` told apart |
+| 6 | `max_response_bytes` reached only `RetryingTransport` | The cap governed a check *after* the body was in memory, not the streaming read | `httpx_transport_kwargs()` -- one authoritative limit reaching `HttpxTransport` |
+| 7 | Capture session ids derived from market `as_of` | Two fetches at one market instant collided in an append-only store | `new_capture_session_id()` -- nonce for uniqueness, market time as audit metadata |
+| 8 | `model_parameter_completeness` read only surviving contracts | An empty result set reported a fully specified model, going quiet exactly when asked "why did nothing survive?" | Static configuration completeness, evaluated without reference to any contract |
+| 9 | `MODEL_VERSION` still `gex-engine/2.1.0` | Two releases of numerics changes that a replay could not detect | `gex-engine/2.1.2`, one constant, in the model fingerprint |
+| 10 | `TRADE_IV` / `LOCALLY_SOLVED_MID_IV` accepted, unimplemented | Fell through to the vendor default, so the operator got an IV they had not chosen | Refused at configuration load with the supported set named |
+| 11 | Integrity scanner resolved a path before validating metadata | Malformed metadata crashed the scanner that exists to report malformed metadata | `validate_metadata()` first; `UNSAFE_RECORD_ID`, `INVALID_BYTE_LENGTH`, `INVALID_HASH`, `INVALID_TIMESTAMP` |
+| 12 | `base_url` checked for scheme and netloc only | `http://user:secret@host` put a credential in every logged URL; `raw_capture_path` was `str()`-converted, so `42` became a directory | Userinfo, query and fragment refused; path must be a string or `Path` |
+| 13 | `rate_type: null` replaced with `"sofr"` when building the client | Stored config and outgoing request disagreed, and only the request was true | Null means omit; `rate_type_policy()` states it |
+| 14 | Replay hashing excluded warnings entirely | A snapshot that began reporting a new condition hashed identically to one that did not | Deterministic codes hashed; prose still excluded |
+| 15 | Any 200 body went to `parse_csv` | An HTML error page parses to zero rows, and zero rows is legitimate -- so an error page became an empty chain | `validate_csv_body()` with five outcomes |
+| 16 | `float(row["strike"])` built the contract identity | `"NaN"` produced an identity unequal to itself; `"5000"` vs `"5000.00"` agreed by luck of formatting | `Decimal` parsing and one canonical spelling |
+| 17 | Provenance recorded sources *inspected*, not *selected* | A chain with aware quotes and naive greeks reported both, and never said which supplied a given contract's IV clock | Per-contract `selected_timestamp_sources` |
+| 18 | Four unrelated exception bases across four layers | `except ThetaDataError` caught roughly half the ways an adapter can fail | `src/adapters/errors.py`; every failure wrapped; secrets redacted |
+| 19 | OI date and spot skew unrecorded | A number whose date we chose is not evidence about the date | `OpenInterestProvenance`, `SpotProvenance` with tolerance |
+| 20 | No machine-readable capture readiness | -- | `AdapterCertificationReadiness`; see [ADAPTER_CERTIFICATION.md](ADAPTER_CERTIFICATION.md) |
+
+### Frozen values
+
+The output hash moved three times in this release; each step was verified
+independently and is documented in place in
+`tests/regression/test_frozen_reference_case.py`.
+
+| Step | Change | Classification |
+|---|---|---|
+| `181db88a` -> `890bf073` | New confidence component, engine version, distribution metadata | `BEHAVIORAL` |
+| `890bf073` -> `9f40dfa9` | Warning codes entered the hash payload | `REPRESENTATIONAL` |
+| `9f40dfa9` -> `35def8d5` | Per-contract selected-source provenance added | `REPRESENTATIONAL` |
+
+Also: `EXPECTED_CONFIDENCE_SCORE` 93.6831 -> 93.857 (`BEHAVIORAL`, one component
+added at weight 0.03) and `EXPECTED_MODEL_FINGERPRINT` `db8d44db4b51d7c4` ->
+`d367d4d4aabbbb69` (`VERSION_METADATA_ONLY`).
+
+**No GEX number changed.** Totals, buckets, per-strike values, walls, voids and
+every zero-gamma root are asserted individually and were confirmed unchanged
+after each step: after the first, exactly three assertions in the file had
+moved; after the second and third, exactly one each.
+
+### Behavioural changes worth knowing
+
+* `ChainCompleteness` takes identity sets, not counts. The count-based
+  constructor is gone.
+* `ContractKey` carries the canonical *string* strike, not a float.
+* A 200 response with a non-CSV body now raises rather than yielding an empty
+  chain. `tests/fixtures/vendor/thetadata/empty.csv` became header-only, because
+  a zero-byte body is not an empty chain.
+* 401/403 raise `ThetaDataAuthenticationError` and 429 raises
+  `ThetaDataRateLimitError`; both subclass `ThetaDataHTTPError`.
+* An absent vendor gamma is *not* a finding -- that is the whole Standard-tier
+  design. Only a second-order record that arrived with an unreadable gamma is.
+
+### Not added, deliberately
+
+Databento, MES/ES futures data, feature-store work, trading strategies, regime
+thresholds, a risk engine, position sizing, IBKR, broker execution, paper
+trading, live trading, order types, and arbitrary calibrated values.
+
+---
+
 ## 2.1.1 — correctness at the layer below
 
 v2.1 fixed a class of defect at the layer where it was first noticed. This

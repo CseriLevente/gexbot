@@ -99,6 +99,11 @@ class ConfidenceInputs:
     #: Defaults to UNKNOWN so that a caller who forgets to pass it gets the
     #: conservative answer rather than a free perfect score.
     completeness_status: CompletenessStatus = CompletenessStatus.UNKNOWN
+    #: What actually priced the chain. ``None`` when the caller did not
+    #: supply it, in which case uniformity cannot be assessed.
+    model_distribution: Any = None
+    #: Static + resolved model completeness. See build_model_completeness.
+    model_completeness: Any = None
     options_feed_timestamp: datetime | None = None
     spot_feed_timestamp: datetime | None = None
     open_interest_as_of: date | None = None
@@ -462,6 +467,64 @@ def score_option_universe_coverage(
     )
 
 
+def score_effective_model_uniformity(
+    inputs: ConfidenceInputs, config: ConfidenceConfig
+) -> ConfidenceComponent:
+    """Whether one model describes the whole chain.
+
+    Per-contract IV fallback can leave a chain priced under several models. The
+    aggregate is still computable, but it is a sum across models, and saying so
+    is the difference between a number and a number with a meaning.
+
+    Uncalibrated on purpose: how much mixing makes an aggregate untrustworthy is
+    a market question with no researched answer here. The penalty is
+    proportional to the share of contracts outside the dominant model, which is
+    deterministic and defensible without being calibrated.
+    """
+    distribution = inputs.model_distribution
+    if distribution is None:
+        return ConfidenceComponent(
+            name="effective_model_uniformity",
+            score=None,
+            weight=config.weights.effective_model_uniformity,
+            uncalibrated=True,
+            warning_code="EFFECTIVE_MODEL_DISTRIBUTION_UNAVAILABLE",
+            detail="no model distribution supplied; uniformity not assessed",
+        )
+    counts = distribution.effective_model_fingerprint_counts
+    total = sum(counts.values())
+    if total == 0:
+        return ConfidenceComponent(
+            name="effective_model_uniformity",
+            score=None,
+            weight=config.weights.effective_model_uniformity,
+            uncalibrated=True,
+            warning_code="EFFECTIVE_MODEL_NO_CONTRACTS",
+            detail="no included contracts; uniformity undefined",
+        )
+    if not distribution.mixed_effective_models:
+        return ConfidenceComponent(
+            name="effective_model_uniformity",
+            score=1.0,
+            weight=config.weights.effective_model_uniformity,
+            detail=f"all {total} contracts share one effective model",
+        )
+    dominant = max(counts.values())
+    return ConfidenceComponent(
+        name="effective_model_uniformity",
+        score=dominant / total,
+        weight=config.weights.effective_model_uniformity,
+        uncalibrated=True,
+        warning_code="MIXED_EFFECTIVE_MODELS",
+        detail=(
+            f"{len(counts)} effective models across {total} contracts "
+            f"(dominant {dominant}); IV sources {distribution.iv_source_counts}. "
+            "The aggregate is a sum across models, so no single model describes "
+            "this snapshot."
+        ),
+    )
+
+
 def score_model_parameter_completeness(
     inputs: ConfidenceInputs, config: ConfidenceConfig
 ) -> ConfidenceComponent:
@@ -488,6 +551,16 @@ def score_model_parameter_completeness(
     missing: list[str] = sorted(
         {entry for effective in resolved for entry in effective.missing_inputs}
     )
+    # Static completeness is a property of the configuration, so it survives an
+    # empty result set. v2.1.1 read only the surviving contracts, so a chain
+    # where everything was excluded reported a fully specified model -- silent
+    # at precisely the moment somebody is asking why nothing survived.
+    if inputs.model_completeness is not None:
+        missing = sorted({*missing, *inputs.model_completeness.static_missing_inputs})
+    else:
+        from src.gex.formulas import static_model_missing_inputs
+
+        missing = sorted({*missing, *static_model_missing_inputs(spec)})
     realism: list[str] = sorted(
         {
             f"{w.field}: {w.detail}"
@@ -953,6 +1026,7 @@ _SCORERS = (
     score_option_universe_coverage,
     score_iv_spread_quality,
     score_model_parameter_completeness,
+    score_effective_model_uniformity,
 )
 
 COMPONENT_NAMES: tuple[str, ...] = (
@@ -973,6 +1047,7 @@ COMPONENT_NAMES: tuple[str, ...] = (
     "option_universe_coverage_score",
     "iv_spread_quality",
     "model_parameter_completeness",
+    "effective_model_uniformity",
 )
 
 

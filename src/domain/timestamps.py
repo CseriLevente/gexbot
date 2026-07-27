@@ -12,7 +12,7 @@ them, and nothing is ever back-stamped to ``as_of``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -39,6 +39,29 @@ class ContractTimestamps:
     request_started_at: datetime | None = None
     response_received_at: datetime | None = None
     normalized_at: datetime | None = None
+
+    #: Which vendor response each selected clock actually came from, and whether
+    #: a timezone was assumed for *that* record.
+    #:
+    #: The chain-level ledger records every source inspected. That is a fact
+    #: about the response set, not about this contract: a chain whose quotes are
+    #: timezone-aware and whose greeks are naive reports both, and nothing said
+    #: which one supplied *this* contract's IV clock. Provenance that does not
+    #: name the record actually used is not provenance.
+    #:
+    #: Keyed by role (``quote``, ``implied_vol``, ``underlying``,
+    #: ``open_interest``, ``gamma``); each value is
+    #: ``{"source": <endpoint role>, "localization_applied": bool}``.
+    selected_timestamp_sources: dict[str, dict[str, object]] = field(
+        default_factory=dict
+    )
+
+    def selected_sources(self) -> dict[str, dict[str, object]]:
+        """The recorded provenance, sorted for deterministic serialisation."""
+        return {
+            role: dict(sorted(detail.items()))
+            for role, detail in sorted(self.selected_timestamp_sources.items())
+        }
 
     @property
     def source_clocks(self) -> dict[str, datetime | None]:

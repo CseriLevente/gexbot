@@ -27,8 +27,8 @@ from src.adapters.thetadata.client import (
     FloatParseIssue,
     IntegerParseIssue,
     ThetaDataClient,
+    ThetaDataHTTPError,
     ThetaDataSettings,
-    ThetaDataVendorError,
     parse_float_field,
     parse_int_field,
 )
@@ -269,14 +269,14 @@ def client_for(response: HttpResponse) -> ThetaDataClient:
 def test_a_non_2xx_response_is_rejected_by_the_client(status):
     """Even from a transport that hands it over without raising."""
     client = client_for(HttpResponse(status_code=status, text=ERROR_BODY))
-    with pytest.raises(ThetaDataVendorError) as excinfo:
+    with pytest.raises(ThetaDataHTTPError) as excinfo:
         client.option_quotes(ChainRequest(symbol="SPXW"))
     assert str(status) in str(excinfo.value)
 
 
 def test_an_html_error_page_is_never_parsed_as_csv():
     client = client_for(HttpResponse(status_code=500, text=ERROR_BODY))
-    with pytest.raises(ThetaDataVendorError):
+    with pytest.raises(ThetaDataHTTPError):
         client.option_quotes(ChainRequest(symbol="SPXW"))
 
 
@@ -300,13 +300,13 @@ def test_the_status_check_runs_before_vendor_error_parsing():
     """A 500 is a 500 whether or not the body happens to look like a vendor
     error document."""
     client = client_for(HttpResponse(status_code=500, text="error,code\n1,2\n"))
-    with pytest.raises(ThetaDataVendorError, match="500"):
+    with pytest.raises(ThetaDataHTTPError, match="500"):
         client.option_quotes(ChainRequest(symbol="SPXW"))
 
 
 def test_the_error_does_not_leak_the_query_string():
     client = client_for(HttpResponse(status_code=403, text=ERROR_BODY))
-    with pytest.raises(ThetaDataVendorError) as excinfo:
+    with pytest.raises(ThetaDataHTTPError) as excinfo:
         client.option_quotes(ChainRequest(symbol="SPXW"))
     assert "password" not in str(excinfo.value).lower()
 

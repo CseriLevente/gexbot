@@ -187,11 +187,27 @@ def test_a_partial_chain_is_processed_and_the_shortfall_is_visible():
 
 
 def test_an_empty_chain_produces_a_warned_empty_snapshot():
+    """A header with no data rows -- the honest shape of "no contracts".
+
+    ``empty.csv`` was a zero-byte file until v2.1.2. A zero-byte 200 is not an
+    empty chain, it is a body that is not CSV, and §15 now refuses it -- see
+    test_a_zero_byte_body_is_refused_rather_than_read_as_an_empty_chain below.
+    """
     transport = make_transport()
     transport.register_text("/snapshot/quote", fixture("empty.csv"))
     snapshot = compute_gex_snapshot(fetch(make_client(transport=transport)))
     assert snapshot.contract_count == 0
     assert "no usable contracts in snapshot" in snapshot.warnings
+
+
+def test_a_zero_byte_body_is_refused_rather_than_read_as_an_empty_chain():
+    """A 200 with no body at all is a broken response, not a quiet market."""
+    from src.adapters.thetadata.client import ThetaDataSchemaError
+
+    transport = make_transport()
+    transport.register_text("/snapshot/quote", "")
+    with pytest.raises(ThetaDataSchemaError, match=r"(?i)csv"):
+        fetch(make_client(transport=transport))
 
 
 def test_a_vendor_error_body_stops_the_pipeline_rather_than_producing_zeros():

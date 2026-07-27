@@ -215,16 +215,19 @@ def test_a_matching_universe_scores_complete():
 def test_the_ratio_never_exceeds_one():
     """More contracts than expected is an expectation problem; it must not read
     as 120% complete."""
+    # Twelve received where ten were expected, all ten of them present.
+    expected = tuple(cid(k) for k in range(4900, 5000, 10))
     measure = ChainCompleteness(
         received_quote_count=12,
         received_oi_count=12,
         received_iv_count=12,
         received_greeks_count=0,
-        joined_contract_count=12,
-        expected_contract_count=10,
+        expected_contract_ids=expected,
+        received_contract_ids=(*expected, cid(5100), cid(5110)),
         expected_source="contract_list",
     )
     assert measure.completeness_ratio == pytest.approx(1.0)
+    assert measure.unexpected_received_count == 2
 
 
 def test_an_empty_expectation_does_not_divide_by_zero():
@@ -234,8 +237,8 @@ def test_an_empty_expectation_does_not_divide_by_zero():
         received_oi_count=0,
         received_iv_count=0,
         received_greeks_count=0,
-        joined_contract_count=0,
-        expected_contract_count=0,
+        expected_contract_ids=(),
+        received_contract_ids=(),
         expected_source="contract_list",
     )
     assert measure.completeness_ratio is None

@@ -587,8 +587,14 @@ class GexSnapshot:
         and the full confidence component structure (name, score, weight,
         hard_failure, uncalibrated).
 
+        **Included from v2.1.2** -- deterministic warning *codes*, both the
+        per-component ``warning_code`` and the canonicalised set of
+        machine-readable codes from the snapshot warnings. A snapshot that
+        begins reporting a new condition is a different snapshot.
+
         **Excluded** -- free-form human prose only: component ``detail`` strings,
-        snapshot ``warnings``, and the bounded ``validation.examples`` sample.
+        the prose bodies of snapshot ``warnings``, and the bounded
+        ``validation.examples`` sample.
         Their wording may legitimately improve without a single number changing,
         and a hash that trips on a reworded message is a hash nobody trusts. Every
         machine-readable *code* those messages describe is present elsewhere in
@@ -604,7 +610,17 @@ class GexSnapshot:
             for key, value in payload["validation"].items()
             if key != "examples"
         }
-        payload.pop("warnings", None)
+        # Snapshot-level warnings are prose, and prose is excluded. The
+        # machine-readable codes inside them are not: they are canonicalised to
+        # a sorted, deduplicated set so that reordering or repeating a warning
+        # does not move the hash while *gaining* one does.
+        payload["warning_codes"] = sorted(
+            {
+                warning.split(":", 1)[0].strip()
+                for warning in payload.pop("warnings", []) or []
+                if warning.split(":", 1)[0].strip().isupper()
+            }
+        )
 
         confidence = payload["confidence"]
         payload["confidence"] = {
@@ -621,6 +637,13 @@ class GexSnapshot:
                         "weight": component["weight"],
                         "hard_failure": component["hard_failure"],
                         "uncalibrated": component["uncalibrated"],
+                        # Machine-readable, deterministic, and a genuine change
+                        # in what the snapshot reports. v2.1.1 excluded warnings
+                        # wholesale, so a snapshot that started emitting a new
+                        # code hashed identically to one that did not. The
+                        # free-form ``detail`` stays excluded: rewording prose
+                        # is not a change in the finding.
+                        "warning_code": component.get("warning_code", ""),
                     }
                     for component in confidence["components"]
                 ),

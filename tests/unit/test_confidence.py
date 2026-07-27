@@ -58,7 +58,11 @@ from src.gex.config import (
     calibrated_value,
     is_calibrated,
 )
-from src.gex.formulas import compute_contract_gex
+from src.gex.formulas import (
+    build_model_completeness,
+    build_model_distribution,
+    compute_contract_gex,
+)
 from src.gex.sessions import eastern
 from src.synthetic.chains import SyntheticChainSpec, build_synthetic_chain, with_quote
 
@@ -140,6 +144,12 @@ def make_inputs(**overrides: object) -> ConfidenceInputs:
         # for one we generated ourselves.
         "expected_contract_count": len(chain.quotes),
         "completeness_status": CompletenessStatus.MEASURED_COMPLETE,
+        # The distribution is a fact about the chain we just built, so the
+        # helper supplies it. Leaving it None would make every fixture chain
+        # report "uniformity not assessed", which is correct for a caller that
+        # genuinely has no distribution and wrong for one that does.
+        "model_distribution": build_model_distribution(result.contracts),
+        "model_completeness": build_model_completeness(ModelSpec(), result),
         "options_feed_timestamp": AS_OF,
         "spot_feed_timestamp": AS_OF,
         "open_interest_as_of": date(2026, 3, 16),
@@ -689,7 +699,11 @@ def test_a_broken_snapshot_scores_near_zero():
     # of ~0.0 even on a snapshot that is broken in every other way. Everything
     # this test is actually about -- stale feeds, ancient open interest, an
     # unreachable expected count -- still collapses the score.
-    assert compute_confidence(broken, CFG).value < 12.0
+    # Was < 12.0 in v2.1.1. effective_model_uniformity (weight 0.03) scores
+    # 1.0 even here -- a snapshot can be broken in every other way and still
+    # be priced under one model -- which lifts the mean slightly. Everything
+    # this test is about still collapses the score.
+    assert compute_confidence(broken, CFG).value < 14.0
 
 
 def test_weights_are_normalised_so_the_scale_survives_reweighting():

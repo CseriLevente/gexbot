@@ -267,3 +267,77 @@ Classifies each artefact as `VALID`, `ORPHAN_PAYLOAD`, `MISSING_PAYLOAD`,
 `INVALID_METADATA`. `recovery_plan()` returns proposed actions as strings and
 executes nothing — deleting an artefact destroys the evidence of how the store
 came apart.
+
+
+---
+
+## v2.1.2 fields
+
+Status: `IMPLEMENTED` | `TESTED_SYNTHETICALLY` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+### `chain_completeness` (identity-based)
+
+| Field | Means | Does **not** mean |
+|---|---|---|
+| `expected_identity_count` | distinct identities an independent source predicted | that the prediction was right |
+| `matched_identity_count` | predicted identities that arrived | anything about the ones that did not |
+| `missing_expected_identities` | sorted, bounded to 100 entries | the full list -- see `missing_expected_count` |
+| `unexpected_received_identities` | arrived but unpredicted | that they are wrong; the expectation may be |
+| `identity_completeness_ratio` | matched / expected, capped at 1.0 | received / expected -- extras cannot compensate for a miss |
+
+`MEASURED_COMPLETE_WITH_EXTRAS` is a distinct status: the chain is whole and the
+*expectation* was incomplete. Counting alone cannot distinguish that from a
+chain that is short by the same number.
+
+### `model_distribution`
+
+`iv_source_counts`, `gamma_source_counts`,
+`effective_model_fingerprint_counts`, `fallback_reason_counts`, plus
+`mixed_iv_sources` / `mixed_gamma_sources` / `mixed_effective_models`.
+
+Counts are of *included* contracts and are sorted. `model_fingerprint` in the
+snapshot metadata is the **configured** spec; when `mixed_effective_models` is
+true, no single fingerprint describes the chain.
+
+### `model_completeness`
+
+`static_model_complete` and `static_missing_inputs` are properties of the
+configuration and hold for an empty chain. `resolved_contract_count`,
+`unresolved_contract_count` and `per_input_failure_counts` describe the data.
+
+The two are separate because v2.1.1 conflated them and lost the first: an empty
+result set reported a fully specified model.
+
+### `pricing_compatibility`
+
+`compatible_fields` / `incompatible_fields` / `unknown_fields` are three
+distinct findings. "We checked and they differ" and "we cannot tell" have
+different remedies -- a config change and vendor documentation respectively.
+Both block compatibility; neither is silence.
+
+### `selected_timestamp_sources`
+
+Per role (`quote`, `implied_vol`, `underlying`, `open_interest`, `gamma`): which
+vendor record supplied the clock, and whether a timezone was assumed **for that
+record**. Aggregated into counts on the snapshot.
+
+Distinct from `timestamp_localization`, which counts every source *inspected*.
+
+### `warning_codes` (in the replay hash)
+
+Deterministic, sorted, deduplicated. Per-component `warning_code` is hashed too.
+Free-form `detail` prose is not: rewording a message is not a change in the
+finding, but reporting a new condition is.
+
+### Parse issue codes
+
+`VENDOR_GAMMA_MALFORMED`, `VENDOR_GAMMA_NON_FINITE` and
+`VENDOR_GAMMA_MISSING` are recorded only when a second-order record actually
+arrived. No second-order response at all is the normal Standard-tier case and is
+not a finding.
+
+### `AdapterCertificationReadiness`
+
+`ready`, `blockers`, `warnings`, `verified_fields`, `unverified_fields`, `scope`,
+`trading_enabled` (always `False`). See
+[ADAPTER_CERTIFICATION.md](ADAPTER_CERTIFICATION.md).

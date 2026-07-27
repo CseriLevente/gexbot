@@ -227,3 +227,44 @@ The sentinel is an object, not a magic number. It is falsy, raises `TypeError` o
 any ordering comparison, and raises on `float()` / `int()` / arithmetic. The most
 likely accident is a caller coercing it "just to make the types line up", which
 would convert a loud "not researched" into a quiet, arbitrary threshold.
+
+
+---
+
+## v2.1.2: which assumptions are ours and which are the vendor's
+
+The engine version is `gex-engine/2.1.2` (`src/domain/model_spec.py`), distinct
+from the parser version `thetadata-v3-parser/2.1.1`
+(`src/adapters/raw_store.py`). Both enter the replay hash; they move for
+different reasons.
+
+### Pricing modes
+
+| Mode | Vendor quantities inside the calculation | Agreement required |
+|---|---|---|
+| `LOCAL_IV_LOCAL_GAMMA` | none | no |
+| `VENDOR_GAMMA_VALIDATION` | compared, not aggregated | no |
+| `VENDOR_IV_LOCAL_GAMMA` | vendor IV feeds local gamma | **yes** |
+
+### What we cannot infer about the vendor
+
+`rate_units` and `dividend_convention` default to `UNKNOWN` and block
+`VENDOR_IV_LOCAL_GAMMA`. They are not guesses waiting for a better guess -- a
+vendor `rate_value: 4.2` is either 4.2% or 420%, and `annual_dividend` is either
+cash or a yield. Neither pair is interchangeable, and both would silently change
+every gamma.
+
+Five further conventions are undocumented and reported as `UNKNOWN`: the
+vendor's settlement instant, day count, short-dated floor, solved-against price,
+and solver version.
+
+**Explicitly not claimed:** that our gamma matches ThetaData's. See
+OPEN_DECISIONS OD-3, OD-22, OD-23, OD-24.
+
+### Mixed models
+
+Per-contract IV fallback can leave one chain priced under several effective
+models. Research mode (the default) reports the distribution and marks the
+snapshot uncalibrated; strict mode
+(`require_uniform_effective_model=True`) refuses the chain. Neither silently
+reports one model for a chain that had several.

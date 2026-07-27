@@ -80,7 +80,18 @@ EXPECTED_ROOTS = {
 }
 EXPECTED_ZERO_GAMMA_SPREAD_PCT = 0.015815788782219897
 
-EXPECTED_CONFIDENCE_SCORE = 93.6831
+# v2.1.2: 93.6831 -> 93.857. Classification: BEHAVIORAL.
+#
+# A new confidence component, ``effective_model_uniformity`` (weight 0.03),
+# joined the weighted mean. On this fixture it scores 1.0 -- the chain is priced
+# under a single effective model -- and the previous mean was below 1.0, so
+# adding it raises the total.
+#
+# Every pre-existing component keeps its exact v2.1.1 score, which the
+# per-component assertions below still pin. No GEX total, bucket, per-strike
+# value, wall, void or zero-gamma root moved; those assertions were unchanged
+# and passing before this constant was updated.
+EXPECTED_CONFIDENCE_SCORE = 93.857
 EXPECTED_COMPONENT_SCORES = {
     "chain_completeness": 1.0,
     "quote_freshness": 1.0,
@@ -129,11 +140,46 @@ EXPECTED_COMPONENT_SCORES = {
 # explicitly, so the falsy-fallback fix does not move its numbers. Only the two
 # values that the topology change genuinely affects were re-derived, and the hash
 # followed them.
+# v2.1.2: 181db88a... -> 9f40dfa9...
+#
+# Two separate changes landed on this digest in one release, and they are
+# classified separately because they are different kinds of change:
+#
+#   1. BEHAVIORAL (181db88a -> 890bf073). A new confidence component,
+#      effective_model_uniformity, joined the weighted mean, the engine
+#      version moved to gex-engine/2.1.2, and model_distribution /
+#      model_completeness metadata was added.
+#
+#   2. REPRESENTATIONAL (890bf073 -> 9f40dfa9). Deterministic warning
+#      *codes* entered the hash payload (per-component ``warning_code`` and
+#      the canonicalised snapshot ``warning_codes`` set). No value the
+#      engine computes changed; the payload now carries a field it always
+#      could have. Free-form prose remains excluded.
+#
+#   3. REPRESENTATIONAL (9f40dfa9 -> 35def8d5). Per-contract
+#      ``selected_timestamp_sources`` metadata was added, recording which
+#      vendor record supplied each clock. Again no computed value moved.
+#
+# Neither reflects a change to a computed GEX number. The unsigned and
+# signed totals, per-bucket and per-strike values, walls, voids and every
+# zero-gamma root are asserted individually in this module and were verified
+# unchanged at each step: after change (1) exactly three assertions in this
+# file had moved (score, model fingerprint, hash), and after change (2)
+# exactly one had (hash); the same was true after change (3).
 EXPECTED_OUTPUT_HASH = (
-    "181db88a7a343eda4d874322161e8b236b57faf93db4282f6e383983260d0b16"
+    "35def8d544ed8724576e66d3d2082ddcbbd88d17ddd04c7dfa74ec685251e749"
 )
 EXPECTED_CONFIG_FINGERPRINT = "8b5b7454ba7c5500"
-EXPECTED_MODEL_FINGERPRINT = "db8d44db4b51d7c4"
+# v2.1.2: db8d44db4b51d7c4 -> d367d4d4aabbbb69.
+# Classification: VERSION_METADATA_ONLY.
+#
+# The only input that changed is ``model_version``, bumped from gex-engine/2.1.0
+# to gex-engine/2.1.2 so that the numerical engine version stops lagging two
+# releases behind the code. No rate, dividend, IV source, expiration rule, time
+# floor, day count or pricing model changed. The fingerprint is *supposed* to
+# move when the engine version does -- an engine change that left it fixed would
+# be undetectable in replay, which is the whole point of including it.
+EXPECTED_MODEL_FINGERPRINT = "d367d4d4aabbbb69"
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

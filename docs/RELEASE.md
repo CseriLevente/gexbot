@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.1.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.2.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.1.zip
+sha256sum gex-bot-v2.1.2.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.1.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.2.zip -Algorithm SHA256
 ```
 
 ---
@@ -145,6 +145,7 @@ Get-FileHash gex-bot-v2.1.1.zip -Algorithm SHA256
 - [ ] `docs/OPEN_DECISIONS.md` lists every unresolved ambiguity
 - [ ] no documentation claims live-vendor validation that has not happened
 - [ ] the archive digest is recorded
+- [ ] `docs/ADAPTER_CERTIFICATION.md` reflects what is actually blocking
 - [ ] the archive was extracted to a temporary directory and the smoke tests below passed
 
 ### Post-extraction smoke test
@@ -163,6 +164,12 @@ python -m src.app
 
 # Release integrity
 python -m pytest tests/unit/test_release_integrity.py -q
+
+# Integration fixtures
+python -m pytest -m integration -q
+
+# Adapter-certification readiness
+python -m pytest tests/unit/test_adapter_certification.py -q
 ```
 
 ---

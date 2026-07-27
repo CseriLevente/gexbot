@@ -24,8 +24,16 @@ COMPLETENESS_WARNING_CODE = "CHAIN_COMPLETENESS_NOT_INDEPENDENTLY_OBSERVED"
 class CompletenessStatus(Enum):
     """Whether the chain's completeness is a measurement or a guess."""
 
-    #: An independent universe was supplied and every member of it arrived.
+    #: An independent universe was supplied and every member of it arrived,
+    #: with nothing else alongside.
     MEASURED_COMPLETE = "MEASURED_COMPLETE"
+
+    #: Every expected identity arrived, and so did contracts nobody predicted.
+    #: A distinct state because it says something different: the chain is whole
+    #: and the *expectation* was incomplete. Reporting it as plain
+    #: MEASURED_COMPLETE would discard that; reporting it as INCOMPLETE would
+    #: claim contracts are missing when none are.
+    MEASURED_COMPLETE_WITH_EXTRAS = "MEASURED_COMPLETE_WITH_EXTRAS"
 
     #: An independent universe was supplied and some of it did not arrive.
     MEASURED_INCOMPLETE = "MEASURED_INCOMPLETE"
@@ -44,6 +52,7 @@ class CompletenessStatus(Enum):
         """True only when an independent universe backed the number."""
         return self in (
             CompletenessStatus.MEASURED_COMPLETE,
+            CompletenessStatus.MEASURED_COMPLETE_WITH_EXTRAS,
             CompletenessStatus.MEASURED_INCOMPLETE,
         )
 
@@ -54,4 +63,7 @@ class CompletenessStatus(Enum):
         Deliberately *not* true for ``PARTIALLY_OBSERVED``: "we received
         everything we were sent" is not "we were sent everything".
         """
-        return self is CompletenessStatus.MEASURED_COMPLETE
+        return self in (
+            CompletenessStatus.MEASURED_COMPLETE,
+            CompletenessStatus.MEASURED_COMPLETE_WITH_EXTRAS,
+        )

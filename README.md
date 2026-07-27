@@ -39,6 +39,7 @@ say and nothing more:
 | `TESTED_SYNTHETICALLY` | Verified against generated inputs and closed-form identities. |
 | `TESTED_WITH_OFFLINE_FIXTURES` | Verified against recorded vendor-shaped payloads. No network. |
 | `NOT_VALIDATED_WITH_LIVE_THETADATA` | Never run against a real subscription. |
+| `READY_FOR_ADAPTER_CERTIFICATION` | Offline checks pass; a single paid vendor session is the next evidence. |
 | `PLANNED` | Designed, not built. |
 | `NOT_IMPLEMENTED` | Absent. Some of these are absent on purpose. |
 
@@ -77,6 +78,19 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Per-source timezone localisation summaries | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
 | Raw-store integrity scanning (`verify_integrity`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Host-independent minimal-core check | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Identity-based chain completeness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Unified research pipeline (`ThetaDataResearchPipeline`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Vendor-IV / local-gamma compatibility report | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; vendor conventions `UNKNOWN` |
+| Mixed effective-model reporting and policy | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Structured parsing of every vendor float | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| CSV body validation for zero-row responses | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Exact decimal strike identity | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Per-contract selected-source timestamp provenance | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| One adapter exception hierarchy | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Schema-safe raw-store integrity scanning | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Collision-safe capture sessions | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `READY_FOR_ADAPTER_CERTIFICATION` |
+| `TRADE_IV`, `LOCALLY_SOLVED_MID_IV` | `NOT_IMPLEMENTED` — refused at config load, not silently substituted |
 | Local gamma vs vendor gamma | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | Whether ThetaData Standard tier suffices | `NOT_VALIDATED_WITH_LIVE_THETADATA` — it *appears* to expose the required inputs; that is not the same claim |
 | Zero-gamma stability across real intraday sequences | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
@@ -114,8 +128,9 @@ because no strategy exists to make a claim about.
 | [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) | Every output field and what it does *not* mean. |
 | [`docs/VALIDATION.md`](docs/VALIDATION.md) | Record validation rules and test strategy. |
 | [`docs/THETADATA_INTEGRATION.md`](docs/THETADATA_INTEGRATION.md) | Wiring up a real subscription, and what to check first. |
-| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | What changed in v2.1, including corrected claims. |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | What changed in v2.1.2, including corrected claims. |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Bootstrap, verification, and how the release archive is produced. |
+| [`docs/ADAPTER_CERTIFICATION.md`](docs/ADAPTER_CERTIFICATION.md) | What must hold before spending one session on real vendor data. |
 | [`docs/handoff/data-requirements.md`](docs/handoff/data-requirements.md) | Vendor endpoints, tiers, prices. |
 
 ---

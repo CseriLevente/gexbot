@@ -19,12 +19,16 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import tempfile
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+from src.adapters.errors import ThetaDataRawStoreError
 
 # Bumped when the parser's interpretation of a payload changes, so a stored
 # record says which code read it.
@@ -40,8 +44,11 @@ from typing import Any, Protocol, runtime_checkable
 PARSER_VERSION = "thetadata-v3-parser/2.1.1"
 
 
-class RawStoreError(RuntimeError):
-    pass
+#: Aliased onto the adapter hierarchy so that a caller catching
+#: ThetaDataError catches store failures too. Defined in adapters.errors rather
+#: than here because the store is used by more than one adapter, so it must not
+#: depend on the ThetaData client.
+RawStoreError = ThetaDataRawStoreError
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +137,120 @@ def build_record_id(
     )
 
 
+#: Every field an index entry must carry to be interpretable at all.
+REQUIRED_METADATA_FIELDS = (
+    "record_id",
+    "endpoint",
+    "payload_hash",
+    "byte_length",
+    "payload_location",
+    "parser_version",
+    "request_started_at",
+    "response_received_at",
+    "capture_complete",
+)
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def new_capture_session_id(*, as_of: datetime | None = None) -> str:
+    """A session id that cannot collide, with market time as audit metadata.
+
+    v2.1.1 built this from the market ``as_of`` alone::
+
+        f"{as_of.date().isoformat()}-{as_of.strftime('%H%M%S')}"
+
+    Two captures at the same market timestamp -- a retry, a second symbol, a
+    re-run of the same historical instant -- produced the same id. The store is
+    append-only, so the second one raised, and the failure looked like a storage
+    bug rather than an identity bug.
+
+    Market time stays in the id because it is genuinely useful when reading a
+    directory listing. It is not what makes the id unique; the nonce is. A
+    restarted process cannot reuse an id because the nonce is drawn fresh.
+    """
+    stamp = (as_of or datetime.now(UTC)).strftime("%Y%m%dT%H%M%S")
+    return f"{stamp}__{uuid.uuid4().hex[:12]}"
+
+
+def validate_metadata(payload: Any) -> tuple[IntegrityStatus | None, str]:
+    """Check an index entry BEFORE anything is derived from it.
+
+    v2.1.1 read ``data["record_id"]`` and immediately resolved a filesystem path
+    from it. Malformed metadata therefore crashed the scanner whose entire
+    purpose is to report malformed metadata -- and a hostile or corrupt
+    ``record_id`` got as far as path resolution.
+
+    Returns ``(None, "")`` when the entry is well-formed.
+    """
+    if not isinstance(payload, dict):
+        return IntegrityStatus.INVALID_METADATA, (
+            f"expected a JSON object, got {type(payload).__name__}"
+        )
+
+    missing = [f for f in REQUIRED_METADATA_FIELDS if f not in payload]
+    if missing:
+        return IntegrityStatus.INVALID_METADATA, f"missing field(s) {sorted(missing)}"
+
+    record_id = payload["record_id"]
+    if not isinstance(record_id, str) or not record_id.strip():
+        return IntegrityStatus.UNSAFE_RECORD_ID, (
+            f"record_id must be a non-empty string, got {type(record_id).__name__}"
+        )
+    if not is_safe_record_id(record_id):
+        return IntegrityStatus.UNSAFE_RECORD_ID, (
+            "record_id contains path separators or traversal segments"
+        )
+
+    if not isinstance(payload["endpoint"], str):
+        return IntegrityStatus.INVALID_METADATA, "endpoint must be a string"
+    if not isinstance(payload["parser_version"], str):
+        return IntegrityStatus.INVALID_METADATA, "parser_version must be a string"
+    if not isinstance(payload["capture_complete"], bool):
+        return IntegrityStatus.INVALID_METADATA, "capture_complete must be a boolean"
+
+    byte_length = payload["byte_length"]
+    if isinstance(byte_length, bool) or not isinstance(byte_length, int):
+        return IntegrityStatus.INVALID_BYTE_LENGTH, (
+            f"byte_length must be an integer, got {type(byte_length).__name__}"
+        )
+    if byte_length < 0:
+        return (
+            IntegrityStatus.INVALID_BYTE_LENGTH,
+            f"negative byte_length {byte_length}",
+        )
+
+    digest = payload["payload_hash"]
+    if not isinstance(digest, str) or not _HEX64.match(digest):
+        return IntegrityStatus.INVALID_HASH, "payload_hash is not a sha256 hex digest"
+
+    for field_name in ("request_started_at", "response_received_at"):
+        value = payload[field_name]
+        if not isinstance(value, str):
+            return IntegrityStatus.INVALID_TIMESTAMP, f"{field_name} must be a string"
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            return IntegrityStatus.INVALID_TIMESTAMP, (
+                f"{field_name} is not an ISO-8601 timestamp: {value!r}"
+            )
+
+    return None, ""
+
+
+def is_safe_record_id(record_id: str) -> bool:
+    """True when a record id cannot escape the store root.
+
+    Checked as a *string property*, so no path is ever constructed from an
+    untrusted id in order to find out whether constructing it was safe.
+    """
+    if not record_id or record_id != record_id.strip():
+        return False
+    if any(sep in record_id for sep in ("/", "\\", "\x00")):
+        return False
+    return ".." not in pathlib.PurePosixPath(record_id).parts and ".." not in record_id
+
+
 def _safe_component(value: str) -> str:
     """Filesystem-safe fragment. Rejects rather than silently mangling."""
     cleaned = "".join(ch if (ch.isalnum() or ch in "-_") else "-" for ch in value)
@@ -158,6 +279,12 @@ class IntegrityStatus(str, Enum):
     INCOMPLETE_WRITE = "INCOMPLETE_WRITE"
     DUPLICATE_ID = "DUPLICATE_ID"
     INVALID_METADATA = "INVALID_METADATA"
+    #: The record id would escape the store root, or is not a string.
+    #: Reported *before* any path is resolved from it.
+    UNSAFE_RECORD_ID = "UNSAFE_RECORD_ID"
+    INVALID_BYTE_LENGTH = "INVALID_BYTE_LENGTH"
+    INVALID_HASH = "INVALID_HASH"
+    INVALID_TIMESTAMP = "INVALID_TIMESTAMP"
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,9 +527,7 @@ class FileRawStore:
                     continue
                 try:
                     data = json.loads(line)
-                    record_id = str(data["record_id"])
-                    expected_hash = str(data["payload_hash"])
-                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                except json.JSONDecodeError as exc:
                     findings.append(
                         IntegrityFinding(
                             status=IntegrityStatus.INVALID_METADATA,
@@ -411,6 +536,22 @@ class FileRawStore:
                         )
                     )
                     continue
+
+                # Validate the schema BEFORE deriving anything -- above all
+                # before resolving a filesystem path from record_id.
+                status, detail = validate_metadata(data)
+                if status is not None:
+                    findings.append(
+                        IntegrityFinding(
+                            status=status,
+                            artifact=f"{self._index.name}:{number}",
+                            detail=detail,
+                        )
+                    )
+                    continue
+
+                record_id = str(data["record_id"])
+                expected_hash = str(data["payload_hash"])
 
                 if record_id in seen_ids:
                     findings.append(

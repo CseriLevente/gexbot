@@ -10,6 +10,8 @@ Anything added here that breaks purity breaks the replay test along with it.
 
 from __future__ import annotations
 
+from collections import Counter
+
 from src.domain.completeness import CompletenessStatus
 from src.domain.contracts import ChainSnapshot
 from src.domain.gex import ExpiryBucket, GexSnapshot, IVConvention
@@ -26,9 +28,12 @@ from src.gex.confidence import (
 from src.gex.config import GexEngineConfig
 from src.gex.formulas import (
     ContractGex,
+    MixedModelError,
     aggregate_by_bucket,
     aggregate_by_strike,
     bucket_gex_ratio_0dte_vs_rest,
+    build_model_completeness,
+    build_model_distribution,
     build_universe,
     compute_contract_gex,
     total_signed_gex,
@@ -37,6 +42,18 @@ from src.gex.formulas import (
 )
 from src.gex.walls import StrikeLadder, extract_walls
 from src.gex.zero_gamma import compute_zero_gamma
+
+
+def _selected_source_counts(snapshot: ChainSnapshot) -> dict[str, dict[str, int]]:
+    """How many contracts took each clock from each source."""
+    counts: dict[str, Counter[str]] = {}
+    for quote in snapshot.quotes:
+        for role, detail in quote.timestamps.selected_sources().items():
+            label = f"{detail.get('source')}"
+            if detail.get("localization_applied"):
+                label += "+assumed_tz"
+            counts.setdefault(role, Counter())[label] += 1
+    return {role: dict(sorted(c.items())) for role, c in sorted(counts.items())}
 
 
 def compute_gex_snapshot(
@@ -92,6 +109,18 @@ def compute_gex_snapshot(
     # Two universes, reported separately: the chain totals cover everything that
     # survived validation, while the zero-gamma grid runs on a DTE-capped subset.
     # Comparing the two numbers without knowing that is comparing populations.
+    distribution = build_model_distribution(result.contracts)
+    if cfg.require_uniform_effective_model and distribution.mixed_effective_models:
+        raise MixedModelError(
+            "chain is not priced under a uniform effective model: "
+            f"{distribution.effective_model_fingerprint_counts}. A single "
+            "aggregate over several models is a number with no stated meaning. "
+            "Set require_uniform_effective_model=False to allow mixed-model "
+            "research, which reports the distribution and marks the snapshot "
+            "uncalibrated."
+        )
+    model_completeness = build_model_completeness(cfg.model_spec, result)
+
     chain_universe = build_universe(
         included=contracts,
         all_contracts=contracts,
@@ -178,6 +207,8 @@ def compute_gex_snapshot(
             # A caller who overrides the count is asserting an independent
             # universe; without one, the snapshot's own status governs, and
             # UNKNOWN must reach the scorer rather than being smoothed away.
+            model_distribution=distribution,
+            model_completeness=model_completeness,
             completeness_status=(
                 CompletenessStatus.MEASURED_COMPLETE
                 if expected_contract_count is not None
@@ -224,6 +255,16 @@ def compute_gex_snapshot(
             else cfg.fingerprint()
         ),
         meta={
+            # What models ACTUALLY priced this chain, rather than what was
+            # configured. A chain with per-contract IV fallback has more than
+            # one, and v2.1.1 reported whichever came first.
+            "model_distribution": distribution.as_dict(),
+            "model_completeness": model_completeness.as_dict(),
+            "engine_version": cfg.model_spec.model_version,
+            # Per-contract provenance, aggregated by role. Counts rather than a
+            # per-contract transcript: an SPX chain has tens of thousands of
+            # contracts and what a reader needs is "which source, how often".
+            "selected_timestamp_sources": _selected_source_counts(snapshot),
             # Provenance the adapter established travels with the snapshot: a
             # replay that cannot see which parser read the bytes, or which
             # source needed a timezone assumed, cannot detect a change in

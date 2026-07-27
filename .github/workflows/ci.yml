@@ -130,7 +130,22 @@ jobs:
         run: python -m pytest tests/unit/test_exact_parsing.py -v
 
       - name: Completeness cannot be overstated
-        run: python -m pytest tests/unit/test_completeness_confidence.py tests/unit/test_chain_completeness.py -v
+        run: python -m pytest tests/unit/test_completeness_confidence.py tests/unit/test_chain_completeness.py tests/unit/test_identity_completeness.py -v
+
+      - name: Research pipeline and pricing compatibility
+        run: python -m pytest tests/unit/test_research_pipeline.py -v
+
+      - name: Adapter hardening (transport, store, URLs, exceptions)
+        run: python -m pytest tests/unit/test_adapter_hardening.py -v
+
+      - name: Vendor parsing completeness
+        run: python -m pytest tests/unit/test_parsing_completeness.py -v
+
+      - name: Model distribution and engine versioning
+        run: python -m pytest tests/unit/test_model_distribution.py -v
+
+      - name: Adapter-certification readiness
+        run: python -m pytest tests/unit/test_adapter_certification.py -v
 
       - name: Current-GEX eligibility
         run: python -m pytest tests/unit/test_gex_eligibility.py -v

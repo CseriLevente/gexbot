@@ -33,7 +33,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from datetime import date, datetime
 
     from src.adapters.thetadata.client import ChainRequest, ThetaDataClient
+    from src.config.pipeline import (
+        DividendConvention,
+        PricingMode,
+        VendorRateUnits,
+    )
     from src.domain.contracts import ChainSnapshot
+    from src.domain.model_spec import ModelSpec
 
 
 class AuthenticationMode(str, Enum):
@@ -118,6 +124,101 @@ class ThetaDataConfig:
     iv_source: IVSource = IVSource.VENDOR_DEFAULT_IV
     duplicate_policy: str = "reject"
 
+    # -- pricing coherence (v2.1.2) ------------------------------------------
+    #: Which numbers come from where. Only VENDOR_IV_LOCAL_GAMMA mixes vendor
+    #: and local quantities inside one calculation, so only it needs agreement.
+    pricing_mode: PricingMode = None  # type: ignore[assignment]
+    #: How to read ``rate_value``. Undocumented by the vendor, so UNKNOWN is the
+    #: honest default and it blocks pricing compatibility.
+    rate_units: VendorRateUnits = None  # type: ignore[assignment]
+    #: What ``annual_dividend`` means. Cash and yield are different quantities.
+    dividend_convention: DividendConvention = None  # type: ignore[assignment]
+    #: Local model settings that MUST match the ModelSpec, checked by
+    #: ThetaDataResearchPipeline rather than left to drift.
+    min_time_to_expiry_minutes: float = 60.0
+    underlying_price_source: str = "vendor_index_snapshot"
+    expiration_rule: str = "root_specific_settlement"
+    #: When true, an incompatible pricing configuration raises instead of
+    #: proceeding with a warning.
+    fail_on_incompatible_pricing: bool = False
+
+    def to_model_spec(self) -> ModelSpec:
+        """The ModelSpec this configuration implies.
+
+        The single place a ModelSpec is derived from ThetaData settings, so the
+        two cannot drift apart the way they did in v2.1.1.
+        """
+        from src.domain.model_spec import (
+            DividendSource,
+            ExpirationTimestampRule,
+            ModelSpec,
+            RateSource,
+            UnderlyingPriceSource,
+        )
+
+        rate_source = RateSource.CONFIGURED_CONSTANT
+        rate = self.local_risk_free_rate
+        if rate is None:
+            rate_source, rate = RateSource.ZERO, 0.0
+
+        dividend_source = DividendSource.CONFIGURED_CONSTANT
+        dividend = self.local_dividend_yield
+        if dividend is None:
+            dividend_source, dividend = DividendSource.ZERO, 0.0
+
+        return ModelSpec(
+            iv_price_source=self.iv_source,
+            risk_free_rate_source=rate_source,
+            risk_free_rate=rate,
+            dividend_yield_source=dividend_source,
+            dividend_yield=dividend,
+            minimum_time_to_expiry_minutes=self.min_time_to_expiry_minutes,
+            underlying_price_source=UnderlyingPriceSource(self.underlying_price_source),
+            expiration_timestamp_rule=ExpirationTimestampRule(self.expiration_rule),
+        )
+
+    @property
+    def local_risk_free_rate(self) -> float | None:
+        """The vendor rate expressed as a decimal, when that is knowable.
+
+        ``None`` when the units are undocumented -- guessing here is a factor of
+        one hundred in every gamma.
+        """
+        from src.config.pipeline import VendorRateUnits
+
+        if self.rate_value is None:
+            return None
+        if self.rate_units is VendorRateUnits.PERCENT:
+            return self.rate_value / 100.0
+        if self.rate_units is VendorRateUnits.DECIMAL:
+            return self.rate_value
+        return None
+
+    @property
+    def local_dividend_yield(self) -> float | None:
+        """The vendor dividend as a continuous yield, when that is knowable."""
+        from src.config.pipeline import DividendConvention
+
+        if self.dividend_convention is DividendConvention.ZERO_DIVIDEND:
+            return 0.0
+        if (
+            self.dividend_convention is DividendConvention.CONTINUOUS_DIVIDEND_YIELD
+            and self.annual_dividend is not None
+        ):
+            return self.annual_dividend
+        # ANNUAL_CASH_DIVIDEND cannot be converted without the spot and the
+        # payment schedule; UNKNOWN cannot be converted at all.
+        return None
+
+    def rate_type_policy(self) -> str:
+        """What happens to ``rate_type`` on the wire, stated in one place."""
+        if self.rate_type is None:
+            return (
+                "rate_type is null: the parameter is OMITTED from the request "
+                "and the vendor default applies. Nothing is substituted locally."
+            )
+        return f"rate_type={self.rate_type} is sent explicitly."
+
     def credentials(self) -> tuple[str | None, str | None]:
         """Read credentials from the environment. Never from a file.
 
@@ -185,6 +286,13 @@ class ThetaDataConfig:
             "min_time": self.min_time,
             "iv_source": self.iv_source.value,
             "duplicate_policy": self.duplicate_policy,
+            "pricing_mode": self.pricing_mode.value,
+            "rate_units": self.rate_units.value,
+            "dividend_convention": self.dividend_convention.value,
+            "min_time_to_expiry_minutes": self.min_time_to_expiry_minutes,
+            "underlying_price_source": self.underlying_price_source,
+            "expiration_rule": self.expiration_rule,
+            "fail_on_incompatible_pricing": self.fail_on_incompatible_pricing,
         }
 
 
@@ -279,6 +387,13 @@ ALLOWED_KEYS = frozenset(
         "min_time",
         "iv_source",
         "duplicate_policy",
+        "pricing_mode",
+        "rate_units",
+        "dividend_convention",
+        "min_time_to_expiry_minutes",
+        "underlying_price_source",
+        "expiration_rule",
+        "fail_on_incompatible_pricing",
         "stock_price_source",
     }
 )
@@ -391,10 +506,24 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
 
     parsed_url = urlparse(base_url)
     if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        fail(f"{base_url!r} is not a valid absolute http(s) URL", "base_url")
+    # Userinfo in a base URL means a credential in every logged URL, every
+    # exception message and every raw-capture index entry. The error deliberately
+    # does not echo the URL back.
+    if parsed_url.username or parsed_url.password or "@" in parsed_url.netloc:
         fail(
-            f"{base_url!r} is not a valid absolute http(s) URL",
+            "base_url must not contain userinfo (user:password@host); "
+            "credentials come from the environment via username_env/password_env",
             "base_url",
         )
+    if parsed_url.query:
+        fail(
+            "base_url must not carry query parameters; per-request parameters "
+            "are built by the client so they can be audited",
+            "base_url",
+        )
+    if parsed_url.fragment:
+        fail("base_url must not carry a fragment", "base_url")
 
     mode_raw = raw.get("authentication_mode", raw.get("auth_mode", "local_terminal"))
     try:
@@ -427,7 +556,15 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
             "duplicate_policy",
         )
 
-    rate_type = text("rate_type", "sofr", optional=True)
+    # An explicit null means "do not send the parameter", which is different
+    # from "send sofr". v2.1.1 stored None and then substituted "sofr" when
+    # building the client, so the stored config and the outgoing request
+    # disagreed and only the request was true.
+    rate_type = (
+        text("rate_type", "sofr", optional=True)
+        if "rate_type" not in raw or raw["rate_type"] is not None
+        else None
+    )
     if rate_type is not None and rate_type not in SUPPORTED_RATE_TYPES:
         fail(
             f"{rate_type!r} is not a documented ThetaData rate type; supported "
@@ -449,6 +586,17 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
     if not isinstance(capture_enabled, bool):
         fail("expected a boolean", "raw_capture_enabled")
     capture_path_raw = raw.get("raw_capture_path")
+    if capture_path_raw is not None and not isinstance(
+        capture_path_raw, str | pathlib.Path
+    ):
+        fail(
+            f"raw_capture_path must be a string or a path, got "
+            f"{type(capture_path_raw).__name__}. v2.1.1 ran str() over whatever "
+            "was supplied, so 42 became the directory '42'.",
+            "raw_capture_path",
+        )
+    if isinstance(capture_path_raw, str) and not capture_path_raw.strip():
+        fail("raw_capture_path must not be empty", "raw_capture_path")
     if capture_enabled and not capture_path_raw:
         fail(
             "raw_capture_enabled is true but raw_capture_path is not set; there "
@@ -477,6 +625,47 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
             "HH:MM:SS.mmm in 24-hour wall-clock form",
             "min_time",
         )
+
+    from src.config.pipeline import (
+        DividendConvention,
+        PricingMode,
+        VendorRateUnits,
+        require_supported_iv_source,
+    )
+
+    # Refuse an IV source with no implementation *here*, at load time. v2.1.1
+    # accepted TRADE_IV and LOCALLY_SOLVED_MID_IV and then resolved them via the
+    # vendor-default fallback, so the operator silently got a different number.
+    require_supported_iv_source(iv_source, where=f"{path}.iv_source")
+
+    def enumerated(key: str, enum_type: Any, default: Any) -> Any:
+        raw_value = raw.get(key, default)
+        try:
+            return enum_type(raw_value)
+        except ValueError:
+            fail(
+                f"{raw_value!r} is not a valid {key}; valid values are "
+                f"{[m.value for m in enum_type]}",
+                key,
+            )
+
+    pricing_mode = enumerated(
+        "pricing_mode", PricingMode, PricingMode.LOCAL_IV_LOCAL_GAMMA.value
+    )
+    rate_units = enumerated(
+        "rate_units", VendorRateUnits, VendorRateUnits.UNKNOWN.value
+    )
+    dividend_convention = enumerated(
+        "dividend_convention",
+        DividendConvention,
+        DividendConvention.UNKNOWN_VENDOR_DIVIDEND_CONVENTION.value,
+    )
+
+    underlying_price_source = text("underlying_price_source", "vendor_index_snapshot")
+    expiration_rule = text("expiration_rule", "root_specific_settlement")
+    fail_on_incompatible = raw.get("fail_on_incompatible_pricing", False)
+    if not isinstance(fail_on_incompatible, bool):
+        fail("expected a boolean", "fail_on_incompatible_pricing")
 
     return ThetaDataConfig(
         base_url=base_url,
@@ -514,7 +703,35 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
         min_time=min_time,
         iv_source=iv_source,
         duplicate_policy=duplicate_policy,
+        pricing_mode=pricing_mode,
+        rate_units=rate_units,
+        dividend_convention=dividend_convention,
+        min_time_to_expiry_minutes=_required(
+            number("min_time_to_expiry_minutes", 60.0, low=0.0, high=1440.0)
+        ),
+        underlying_price_source=underlying_price_source or "vendor_index_snapshot",
+        expiration_rule=expiration_rule or "root_specific_settlement",
+        fail_on_incompatible_pricing=fail_on_incompatible,
     )
+
+
+def httpx_transport_kwargs(config: ThetaDataConfig) -> dict[str, Any]:
+    """Everything the real transport needs, including the response cap.
+
+    v2.1.1 passed ``max_response_bytes`` to ``RetryingTransport`` only.
+    ``HttpxTransport`` is the layer that reads chunks off the socket, so the
+    configured cap did not govern the streaming read at all -- it governed a
+    check performed after the body was already in memory.
+
+    One function, so the inner and outer limits cannot drift apart.
+    """
+    username, password = config.resolved_credentials()
+    return {
+        "connect_timeout_seconds": config.connect_timeout_seconds,
+        "read_timeout_seconds": config.timeout_seconds,
+        "basic_auth": (username, password) if username and password else None,
+        "max_response_bytes": config.max_response_bytes,
+    }
 
 
 def build_thetadata_client(
@@ -544,17 +761,14 @@ def build_thetadata_client(
     from src.adapters.transport import RetryingTransport, RetryPolicy
 
     # Resolve credentials BEFORE anything is constructed, so that a missing
-    # secret cannot yield a usable unauthenticated client.
-    username, password = config.resolved_credentials()
+    # secret cannot yield a usable unauthenticated client. The values themselves
+    # are read again by httpx_transport_kwargs; this call is the gate.
+    config.resolved_credentials()
 
     if transport is None:  # pragma: no cover - needs the http extra and a network
         from src.adapters.transport import HttpxTransport
 
-        transport = HttpxTransport(
-            connect_timeout_seconds=config.connect_timeout_seconds,
-            read_timeout_seconds=config.timeout_seconds,
-            basic_auth=(username, password) if username and password else None,
-        )
+        transport = HttpxTransport(**httpx_transport_kwargs(config))
 
     retrying = RetryingTransport(
         transport,
@@ -585,7 +799,9 @@ def build_thetadata_client(
         ),
         greeks=GreeksParameters(
             greeks_version=config.greeks_version or "latest",
-            rate_type=config.rate_type or "sofr",
+            # No substitution. A null rate_type means the parameter is
+            # omitted and the vendor default applies -- see rate_type_policy().
+            rate_type=config.rate_type,
             rate_value=config.rate_value,
             annual_dividend=config.annual_dividend,
             use_market_value=config.use_market_value,
@@ -648,6 +864,15 @@ class ThetaDataRuntime:
             config=config,
         )
 
+    def effective_limits(self) -> dict[str, Any]:
+        """The limits actually in force, for metadata and for assertions."""
+        return {
+            "max_response_bytes": self.config.max_response_bytes,
+            "timeout_seconds": self.config.timeout_seconds,
+            "connect_timeout_seconds": self.config.connect_timeout_seconds,
+            "max_retries": self.config.max_retries,
+        }
+
     def fetch_chain(
         self,
         *,
@@ -673,11 +898,15 @@ class ThetaDataRuntime:
             # Configuring a capture path and then getting no audit trail because
             # nobody threaded a session through is the same class of defect as
             # a setting that never reaches a request.
-            from src.adapters.raw_store import CaptureSession
+            from src.adapters.raw_store import CaptureSession, new_capture_session_id
 
             capture = CaptureSession(
                 store=self.client.raw_store,
-                session_id=f"{as_of.date().isoformat()}-{as_of.strftime('%H%M%S')}",
+                # Market time is audit metadata inside the id; the nonce is what
+                # makes it unique. Deriving uniqueness from as_of meant two
+                # fetches at the same market instant collided in an append-only
+                # store.
+                session_id=new_capture_session_id(as_of=as_of),
             )
 
         return self.client.fetch_chain(

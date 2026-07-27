@@ -146,7 +146,17 @@ def test_the_hash_payload_lists_every_component_by_name():
     names = {entry["name"] for entry in payload["confidence"]["components"]}
     assert names == {c.name for c in base.confidence.components}
     for entry in payload["confidence"]["components"]:
-        assert set(entry) == {"name", "score", "weight", "hard_failure", "uncalibrated"}
+        # warning_code joined in v2.1.2: a deterministic machine-readable
+        # finding is part of what the snapshot reports, unlike the prose
+        # ``detail`` which stays out.
+        assert set(entry) == {
+            "name",
+            "score",
+            "weight",
+            "hard_failure",
+            "uncalibrated",
+            "warning_code",
+        }
 
 
 def test_hard_failures_and_calibration_state_are_in_the_payload():

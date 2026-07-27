@@ -45,6 +45,18 @@ from src.gex.sessions import eastern
 CONFIG_DIR = pathlib.Path(__file__).resolve().parents[2] / "config"
 AS_OF = eastern(2026, 3, 17, 11, 0)
 
+#: A valid CSV response with a header and no data rows -- the honest shape
+#: of "no contracts". A superset of every endpoint's required columns, so
+#: one constant serves quotes, open interest and greeks. A zero-byte body is
+#: not an empty chain, it is a body that is not CSV, and the client refuses
+#: it (see §15).
+EMPTY_CSV_BODY = (
+    "ask,ask_condition,ask_exchange,ask_size,bid,bid_condition,bid_exchange,"
+    "bid_size,delta,epsilon,expiration,implied_vol,iv_error,lambda,"
+    "open_interest,rho,right,strike,symbol,theta,timestamp,underlying_price,"
+    "underlying_timestamp,vega\n"
+)
+
 
 def parse(**overrides):
     return parse_thetadata_config(overrides)
@@ -238,7 +250,9 @@ def test_the_factory_builds_a_client_from_config():
 
 
 def test_config_values_reach_the_outgoing_request():
-    transport = FakeTransport(default=HttpResponse(status_code=200, text=""))
+    transport = FakeTransport(
+        default=HttpResponse(status_code=200, text=EMPTY_CSV_BODY)
+    )
     client = build_thetadata_client(
         parse(rate_value=4.2, annual_dividend=1.3, greeks_version="1"),
         transport=transport,
@@ -258,7 +272,7 @@ def test_the_factory_applies_the_retry_policy():
         "/quote",
         [
             HttpResponse(status_code=503, text="down"),
-            HttpResponse(status_code=200, text=""),
+            HttpResponse(status_code=200, text=EMPTY_CSV_BODY),
         ],
     )
     client = build_thetadata_client(

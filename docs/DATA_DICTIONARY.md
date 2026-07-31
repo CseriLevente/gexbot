@@ -341,3 +341,45 @@ not a finding.
 `ready`, `blockers`, `warnings`, `verified_fields`, `unverified_fields`, `scope`,
 `trading_enabled` (always `False`). See
 [ADAPTER_CERTIFICATION.md](ADAPTER_CERTIFICATION.md).
+
+
+---
+
+## v2.1.3 fields
+
+### `pipeline` (in `ChainSnapshot.meta` and `GexSnapshot.meta`)
+
+`pipeline_fingerprint`, `pricing_mode`, `pricing_compatibility`,
+`subscription_capability`, `load_bearing_unknowns`, `model_fingerprint`,
+`iv_source`. A GEX number can show which compatibility decision permitted it.
+
+### `raw_capture_manifest`
+
+`session_id`, `record_ids`, `request_ids`, `payload_hashes`, `record_count`,
+`manifest_hash`, `capture_enabled`. Links a normalized snapshot to the exact raw
+records it was built from. `capture_enabled: false` is stated explicitly:
+absent metadata reads the same as forgotten metadata.
+
+### `RateAssumption` / `DividendAssumption`
+
+Rate: `source`, `raw_value`, `unit` (`DECIMAL_ANNUAL_RATE`,
+`PERCENT_ANNUAL_RATE`, `UNKNOWN`), `normalized`, `vendor_default`.
+Dividend: `convention` (`ANNUAL_CASH_DIVIDEND`, `CONTINUOUS_DIVIDEND_YIELD`,
+`ZERO_DIVIDEND`, `UNKNOWN_VENDOR_CONVENTION`), `value`.
+
+### `CertificationState`
+
+`NOT_READY`, `READY_FOR_CAPTURE_ONLY`, `CAPTURE_COMPLETED_NOT_VALIDATED`,
+`ADAPTER_CERTIFIED`. The last requires both a live capture and a validation
+report, so it is unreachable offline by construction.
+
+### `zero_gamma_root_count_stable`
+
+Renamed from `zero_gamma_root_identity_stable`. It compares root *counts*. Two
+runs with the same number of roots at different levels are count-stable and not
+identity-stable; `match_roots` answers the identity question.
+
+### `effective_model`
+
+`None` when the chain was priced under more than one effective model. Read
+`model_distribution` instead, which can answer honestly.

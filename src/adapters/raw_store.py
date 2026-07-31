@@ -41,7 +41,13 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: 2.1.1 changed: exact Decimal integer parsing (was float round-trip),
 #: structured float parse issues, per-source timestamp localisation, and
 #: assembly from deduplicated rows.
-PARSER_VERSION = "thetadata-v3-parser/2.1.1"
+#:
+#: 2.1.3 changed: structured parsing on every vendor float, CSV body
+#: validation before concluding "no rows", Decimal strike identity, and
+#: per-contract selected-source timestamp provenance. v2.1.2 made those
+#: changes and left the version at 2.1.1, so a replay could not tell that
+#: the parser had changed underneath it.
+PARSER_VERSION = "thetadata-v3-parser/2.1.3"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -772,4 +778,66 @@ class CaptureSession:
             "session_id": self.session_id,
             "parser_version": PARSER_VERSION,
             "records": [record.as_dict() for record in self.captured],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RawCaptureManifest:
+    """Which raw records a normalized snapshot was actually built from.
+
+    Without this, a stored chain and a directory of captured payloads are two
+    unrelated artefacts that happen to share a timestamp. Reconstructing which
+    bytes produced which number -- the entire reason for capturing raw payloads
+    -- meant guessing from filenames.
+
+    ``manifest_hash`` covers the record ids and payload hashes, so a snapshot
+    whose sources changed cannot present the same manifest.
+    """
+
+    session_id: str
+    record_ids: tuple[str, ...] = ()
+    request_ids: tuple[str, ...] = ()
+    payload_hashes: tuple[str, ...] = ()
+    #: False when capture was disabled. Recorded explicitly rather than left to
+    #: an absent key, which reads the same as "we forgot".
+    capture_enabled: bool = True
+
+    @property
+    def manifest_hash(self) -> str:
+        payload = json.dumps(
+            {
+                "session_id": self.session_id,
+                "record_ids": sorted(self.record_ids),
+                "payload_hashes": sorted(self.payload_hashes),
+                "capture_enabled": self.capture_enabled,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    @classmethod
+    def disabled(cls) -> RawCaptureManifest:
+        """Raw capture was off. Stated, not implied."""
+        return cls(session_id="", capture_enabled=False)
+
+    @classmethod
+    def from_session(cls, session: CaptureSession) -> RawCaptureManifest:
+        records = tuple(session.captured)
+        return cls(
+            session_id=session.session_id,
+            record_ids=tuple(sorted(r.record_id for r in records)),
+            request_ids=tuple(sorted(r.request_id for r in records if r.request_id)),
+            payload_hashes=tuple(sorted(r.payload_hash for r in records)),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "capture_enabled": self.capture_enabled,
+            "record_ids": list(self.record_ids),
+            "request_ids": list(self.request_ids),
+            "payload_hashes": list(self.payload_hashes),
+            "record_count": len(self.record_ids),
+            "manifest_hash": self.manifest_hash,
         }

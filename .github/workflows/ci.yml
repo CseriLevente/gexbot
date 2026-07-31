@@ -113,11 +113,18 @@ jobs:
   invariants:
     name: configuration, storage and parsing invariants
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both supported versions. Python 3.13 added ``__replace__`` to frozen
+        # dataclasses, which is exactly the kind of runtime change a safety
+        # check must not mistake for an application capability.
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
 
       - name: Configuration schema validation
@@ -144,8 +151,20 @@ jobs:
       - name: Model distribution and engine versioning
         run: python -m pytest tests/unit/test_model_distribution.py -v
 
-      - name: Adapter-certification readiness
-        run: python -m pytest tests/unit/test_adapter_certification.py -v
+      - name: Adapter-certification readiness and state machine
+        run: python -m pytest tests/unit/test_adapter_certification.py tests/unit/test_certification_states.py -v
+
+      - name: Pricing provenance
+        run: python -m pytest tests/unit/test_pricing_provenance.py -v
+
+      - name: Configuration coherence
+        run: python -m pytest tests/unit/test_loaded_config_pipeline.py -v
+
+      - name: Identity completeness end to end
+        run: python -m pytest tests/unit/test_identity_through_confidence.py -v
+
+      - name: Provenance linkage and versions
+        run: python -m pytest tests/unit/test_provenance_linkage.py -v
 
       - name: Current-GEX eligibility
         run: python -m pytest tests/unit/test_gex_eligibility.py -v
@@ -159,11 +178,15 @@ jobs:
   no-trading-guarantee:
     name: repository cannot trade
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - name: Architecture invariants
         # Separated into its own job so the guarantee is visible as a distinct

@@ -31,7 +31,7 @@ from src.domain.gex import OptionUniverse
 from src.domain.model_spec import ModelSpec
 from src.gex.confidence import ConfidenceInputs, score_chain_completeness
 from src.gex.config import ConfidenceConfig, DataQualityLimits
-from src.gex.engine import compute_gex_snapshot
+from src.gex.engine import compute_gex_snapshot, resolve_chain_completeness
 from src.gex.formulas import compute_contract_gex
 from src.gex.sessions import eastern
 from src.synthetic.chains import build_synthetic_chain
@@ -62,6 +62,7 @@ def confidence_inputs(snapshot, **overrides) -> ConfidenceInputs:
         "quotes": snapshot.quotes,
         "expected_contract_count": snapshot.expected_contract_count,
         "completeness_status": snapshot.completeness_status,
+        "chain_completeness": resolve_chain_completeness(snapshot),
     }
     base.update(overrides)
     return ConfidenceInputs(**base)  # type: ignore[arg-type]

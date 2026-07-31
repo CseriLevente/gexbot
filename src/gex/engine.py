@@ -11,8 +11,9 @@ Anything added here that breaks purity breaks the replay test along with it.
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
-from src.domain.completeness import CompletenessStatus
+from src.domain.completeness import ChainCompleteness
 from src.domain.contracts import ChainSnapshot
 from src.domain.gex import ExpiryBucket, GexSnapshot, IVConvention
 from src.domain.model_spec import (
@@ -44,6 +45,58 @@ from src.gex.walls import StrikeLadder, extract_walls
 from src.gex.zero_gamma import compute_zero_gamma
 
 
+def resolve_chain_completeness(
+    snapshot: ChainSnapshot, expected_universe: Any = None
+) -> ChainCompleteness:
+    """The identity measure this snapshot will be scored against.
+
+    A caller-supplied ``ExpectedContractUniverse`` takes precedence: it is an
+    independent statement of which contracts should have arrived, which is
+    exactly what the adapter usually lacks. Otherwise the adapter's own measure
+    is reused, and failing that an unmeasured one is built so the scorer sees
+    ``PARTIALLY_OBSERVED`` rather than nothing.
+
+    v2.1.2 accepted ``expected_contract_count: int`` here. A count cannot say
+    *which* contracts were expected, so no integer -- however large -- could
+    establish that the right ones arrived.
+    """
+    received = tuple(sorted(q.contract.canonical_id for q in snapshot.quotes))
+
+    if expected_universe is not None:
+        return ChainCompleteness(
+            received_quote_count=len(snapshot.quotes),
+            received_oi_count=sum(1 for q in snapshot.quotes if q.open_interest),
+            received_iv_count=sum(1 for q in snapshot.quotes if q.iv.value),
+            received_greeks_count=sum(
+                1 for q in snapshot.quotes if q.gamma is not None
+            ),
+            expected_contract_ids=tuple(sorted(expected_universe.identities)),
+            received_contract_ids=received,
+            expected_source=expected_universe.source,
+        )
+
+    existing = snapshot.meta.get("chain_completeness_object")
+    if isinstance(existing, ChainCompleteness):
+        return existing
+
+    # No independent universe. Reconstruct from what the snapshot declares, so
+    # a synthetic chain that knows its own universe still measures, and a vendor
+    # chain that does not still reports PARTIALLY_OBSERVED.
+    declares_universe = (
+        snapshot.completeness_status.is_measured
+        and snapshot.expected_contract_count is not None
+    )
+    return ChainCompleteness(
+        received_quote_count=len(snapshot.quotes),
+        received_oi_count=len(snapshot.quotes),
+        received_iv_count=len(snapshot.quotes),
+        received_greeks_count=0,
+        expected_contract_ids=received if declares_universe else None,
+        received_contract_ids=received,
+        expected_source="snapshot_declared" if declares_universe else "none",
+    )
+
+
 def _selected_source_counts(snapshot: ChainSnapshot) -> dict[str, dict[str, int]]:
     """How many contracts took each clock from each source."""
     counts: dict[str, Counter[str]] = {}
@@ -60,7 +113,7 @@ def compute_gex_snapshot(
     snapshot: ChainSnapshot,
     config: GexEngineConfig | None = None,
     *,
-    expected_contract_count: int | None = None,
+    expected_universe: Any = None,
     flow_adjusted_signed_gex: float | None = None,
 ) -> GexSnapshot:
     """Run all five GEX views, the universe accounting and the confidence score.
@@ -77,17 +130,25 @@ def compute_gex_snapshot(
     if not contracts:
         warnings.append("no usable contracts in snapshot")
 
-    # The one effective model, taken from a resolved contract. Every contract in
-    # a snapshot shares the same model-level assumptions (only spot, strike, IV
-    # and expiry vary), so any of them serialises the same canonical record --
-    # which is exactly why the fingerprint drops the per-contract fields.
+    # The chain-wide effective model, but ONLY when there is one.
+    #
+    # v2.1.2 took ``contracts[0]`` and presented it as the model that priced the
+    # snapshot, under a comment asserting that every contract shares the same
+    # model-level assumptions. Its own ``ModelDistribution`` work disproved
+    # that in the same release: per-contract IV fallback leaves a chain with
+    # several effective models, and which one appeared here depended on
+    # iteration order.
+    #
+    # ``None`` when mixed. A reader wanting to know what priced the chain is
+    # then pushed to ``model_distribution``, which can answer honestly.
+    _model_fingerprints = {c.effective.fingerprint() for c in contracts}
     effective_model = (
         {
             **contracts[0].effective.as_dict(),
             "effective_model_fingerprint": contracts[0].effective.fingerprint(),
             "description": contracts[0].effective.describe(),
         }
-        if contracts
+        if len(_model_fingerprints) == 1
         else None
     )
     if contracts and not contracts[0].effective.is_fully_specified:
@@ -109,6 +170,8 @@ def compute_gex_snapshot(
     # Two universes, reported separately: the chain totals cover everything that
     # survived validation, while the zero-gamma grid runs on a DTE-capped subset.
     # Comparing the two numbers without knowing that is comparing populations.
+    completeness = resolve_chain_completeness(snapshot, expected_universe)
+
     distribution = build_model_distribution(result.contracts)
     if cfg.require_uniform_effective_model and distribution.mixed_effective_models:
         raise MixedModelError(
@@ -199,24 +262,11 @@ def compute_gex_snapshot(
             chain_universe=chain_universe,
             zero_gamma_universe=zero_gamma_universe,
             quotes=snapshot.quotes,
-            expected_contract_count=(
-                expected_contract_count
-                if expected_contract_count is not None
-                else snapshot.expected_contract_count
-            ),
-            # A caller who overrides the count is asserting an independent
-            # universe; without one, the snapshot's own status governs, and
-            # UNKNOWN must reach the scorer rather than being smoothed away.
+            expected_contract_count=completeness.expected_contract_count,
+            chain_completeness=completeness,
             model_distribution=distribution,
             model_completeness=model_completeness,
-            completeness_status=(
-                CompletenessStatus.MEASURED_COMPLETE
-                if expected_contract_count is not None
-                and expected_contract_count <= len(result.contracts)
-                else CompletenessStatus.MEASURED_INCOMPLETE
-                if expected_contract_count is not None
-                else snapshot.completeness_status
-            ),
+            completeness_status=completeness.status,
             options_feed_timestamp=snapshot.options_feed_timestamp,
             spot_feed_timestamp=snapshot.spot_timestamp,
             open_interest_as_of=snapshot.open_interest_as_of,
@@ -274,6 +324,12 @@ def compute_gex_snapshot(
                 for key in (
                     "parser_version",
                     "timestamp_localization",
+                    # Which raw payloads produced this chain, and which
+                    # compatibility decision allowed it to be computed. Both
+                    # belong in the replay hash: a GEX number should be able to
+                    # show what permitted it.
+                    "raw_capture_manifest",
+                    "pipeline",
                     "chain_completeness",
                 )
                 if key in snapshot.meta
@@ -284,6 +340,10 @@ def compute_gex_snapshot(
             "shadow_gamma_count": result.shadow_gamma_count,
             "dte0_dominance_ratio": dominance,
             "exclusions": result.exclusion_counts(),
+            # After the adapter spread, deliberately: a caller-supplied
+            # ExpectedContractUniverse is an independent statement and must
+            # override the adapter measure taken without one.
+            "chain_completeness": completeness.as_dict(),
             "strike_ladder_modal_spacing": ladder.modal_spacing,
             "model_fingerprint": cfg.model_spec.fingerprint(),
         },

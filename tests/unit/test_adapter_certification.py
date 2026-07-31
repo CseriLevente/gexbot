@@ -37,8 +37,35 @@ AS_OF = eastern(2026, 3, 17, 11, 0)
 
 
 def pipeline(**overrides):
-    return ThetaDataResearchPipeline.from_config(
-        parse_thetadata_config(overrides), transport=FakeTransport()
+    """A pipeline whose *pricing* questions are settled.
+
+    These tests are about open-interest and spot provenance. Since v2.1.3 an
+    unresolved vendor pricing assumption is itself a blocker (§2), so without
+    this the fixture would be NOT_READY for reasons unrelated to what is being
+    tested. ``resolved`` stands in for vendor documentation having been read.
+    """
+    from dataclasses import replace
+
+    from src.config.pipeline import PricingCompatibilityReport
+
+    settings = {
+        "rate_value": 4.2,
+        "rate_units": "PERCENT_ANNUAL_RATE",
+        "annual_dividend": 0.0,
+        "dividend_convention": "ZERO_DIVIDEND",
+    }
+    settings.update(overrides)
+    built = ThetaDataResearchPipeline.from_config(
+        parse_thetadata_config(settings), transport=FakeTransport()
+    )
+    if overrides.get("_unresolved_pricing"):
+        return built
+    return replace(
+        built,
+        pricing_compatibility=PricingCompatibilityReport(
+            compatible=True,
+            compatible_fields=("every load-bearing assumption documented",),
+        ),
     )
 
 
@@ -178,18 +205,27 @@ def test_the_report_exposes_every_required_field():
 
 def test_a_pricing_mismatch_blocks_readiness():
     """VENDOR_IV_LOCAL_GAMMA with undocumented vendor conventions."""
-    mismatched = pipeline(
-        pricing_mode="VENDOR_IV_LOCAL_GAMMA",
-        annual_dividend=1.3,
-        dividend_convention="UNKNOWN_VENDOR_DIVIDEND_CONVENTION",
+    from src.config.pipeline import ThetaDataResearchPipeline as Pipeline
+    from src.config.thetadata import parse_thetadata_config as parse
+
+    mismatched = Pipeline.from_config(
+        parse(
+            {
+                "annual_dividend": 1.3,
+                "dividend_convention": "UNKNOWN_VENDOR_CONVENTION",
+            }
+        ),
+        transport=FakeTransport(),
     )
     result = readiness(pipeline=mismatched)
     assert not result.ready
-    assert any("pricing" in blocker for blocker in result.blockers)
+    assert any("pricing" in blocker.lower() for blocker in result.blockers)
 
 
-def test_a_compatible_pricing_mode_does_not_block():
-    assert readiness(pipeline=pipeline(pricing_mode="LOCAL_IV_LOCAL_GAMMA")).ready
+def test_a_resolved_pricing_configuration_does_not_block():
+    """v2.1.2 used LOCAL_IV_LOCAL_GAMMA here, which is now unreachable: every
+    supported IV source is vendor-computed."""
+    assert readiness().ready
 
 
 def test_unknown_chain_completeness_is_a_warning_not_a_blocker():
@@ -243,9 +279,30 @@ def test_readiness_never_implies_trading_readiness():
 
 
 def test_the_report_cannot_enable_trading():
+    """Inspect the project's own API, not everything the runtime attaches.
+
+    v2.1.2 substring-matched every name in ``dir(result)``. On Python 3.13
+    frozen dataclasses gained ``__replace__``, whose name contains "place", so
+    the test failed on a supported interpreter for a reason that had nothing to
+    do with order placement. A safety check that fires on an unrelated language
+    feature teaches people to ignore it.
+    """
     result = readiness()
-    for banned in ("place", "order", "execute", "broker", "position", "submit"):
-        assert not any(banned in name.lower() for name in dir(result)), banned
+    declared = {name for name in vars(type(result)) if not name.startswith("_")} | set(
+        type(result).__dataclass_fields__
+    )
+    banned = ("place_order", "submit_order", "execute", "broker", "position_size")
+    for name in declared:
+        assert not any(word in name.lower() for word in banned), name
+
+
+def test_a_python_runtime_dunder_does_not_look_like_order_placement():
+    """The specific 3.13 regression, pinned so it cannot recur."""
+    result = readiness()
+    # __replace__ exists on 3.13+ frozen dataclasses and contains "place".
+    assert "place" in "__replace__"
+    declared = {name for name in vars(type(result)) if not name.startswith("_")}
+    assert "__replace__" not in declared
 
 
 def test_readiness_is_recomputed_not_cached():

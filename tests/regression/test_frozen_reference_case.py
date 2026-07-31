@@ -160,6 +160,30 @@ EXPECTED_COMPONENT_SCORES = {
 #      ``selected_timestamp_sources`` metadata was added, recording which
 #      vendor record supplied each clock. Again no computed value moved.
 #
+# v2.1.3 moved it again:
+#
+#   4. REPRESENTATIONAL (35def8d5 -> 5b43d604). config/research.yaml was
+#      made internally coherent, so the config fingerprint this snapshot
+#      carries changed. No engine setting and no GEX number moved -- the
+#      reference fixture overrides the model spec with the synthetic one,
+#      and only the two frozen digests in this file reacted.
+#
+#   5. 5b43d604 -> 4444055b, from three v2.1.3 changes that landed together:
+#      - VERSION_METADATA_ONLY: gex-engine/2.1.2 -> 2.1.3 and
+#        thetadata-v3-parser/2.1.1 -> 2.1.3, both of which the hash covers
+#        deliberately so a change in the maths or the parser cannot be
+#        invisible to a replay.
+#      - REPRESENTATIONAL: identity-based ``chain_completeness`` and the
+#        ``raw_capture_manifest`` joined the snapshot metadata.
+#      - REPRESENTATIONAL: ``zero_gamma_root_identity_stable`` was renamed
+#        to ``zero_gamma_root_count_stable``. Same value, honest name.
+#
+#      No GEX number changed at any step. The totals, buckets, per-strike
+#      values, walls, voids, roots and all confidence component scores are
+#      asserted individually in this module and held throughout -- across
+#      the whole of v2.1.3 exactly three assertions in this file moved, and
+#      all three are the digests documented here.
+#
 # Neither reflects a change to a computed GEX number. The unsigned and
 # signed totals, per-bucket and per-strike values, walls, voids and every
 # zero-gamma root are asserted individually in this module and were verified
@@ -167,9 +191,27 @@ EXPECTED_COMPONENT_SCORES = {
 # file had moved (score, model fingerprint, hash), and after change (2)
 # exactly one had (hash); the same was true after change (3).
 EXPECTED_OUTPUT_HASH = (
-    "35def8d544ed8724576e66d3d2082ddcbbd88d17ddd04c7dfa74ec685251e749"
+    "4444055b1a3532eb829580d8aab28184dc3a7d09b24592d559acab0afaf2631f"
 )
-EXPECTED_CONFIG_FINGERPRINT = "8b5b7454ba7c5500"
+# v2.1.3: 8b5b7454ba7c5500 -> ded3172bfee2682f. Classification: BEHAVIORAL.
+#
+# config/research.yaml changed. It shipped `model.iv_price_source:
+# NBBO_MID_IV` beside a thetadata section that defaulted to
+# VENDOR_DEFAULT_IV -- two different implied volatilities in one file. The
+# thetadata section now states iv_source, underlying_price_source, the time
+# floor, the expiration rule and the pricing mode explicitly, so
+# from_loaded_config can verify the two halves agree.
+#
+# The fingerprint is *supposed* to move when the configuration does; a
+# config change that left it fixed would be the defect.
+EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
+# v2.1.3: d367d4d4aabbbb69 -> e05c611b9b953372.
+# Classification: VERSION_METADATA_ONLY.
+#
+# The only input that changed is ``model_version``, gex-engine/2.1.2 ->
+# 2.1.3. No rate, dividend, IV source, expiration rule, time floor, day
+# count or pricing model moved.
+#
 # v2.1.2: db8d44db4b51d7c4 -> d367d4d4aabbbb69.
 # Classification: VERSION_METADATA_ONLY.
 #
@@ -179,7 +221,7 @@ EXPECTED_CONFIG_FINGERPRINT = "8b5b7454ba7c5500"
 # floor, day count or pricing model changed. The fingerprint is *supposed* to
 # move when the engine version does -- an engine change that left it fixed would
 # be undetectable in replay, which is the whole point of including it.
-EXPECTED_MODEL_FINGERPRINT = "d367d4d4aabbbb69"
+EXPECTED_MODEL_FINGERPRINT = "e05c611b9b953372"
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

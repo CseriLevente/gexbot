@@ -58,6 +58,7 @@ from src.gex.config import (
     calibrated_value,
     is_calibrated,
 )
+from src.gex.engine import resolve_chain_completeness
 from src.gex.formulas import (
     build_model_completeness,
     build_model_distribution,
@@ -150,6 +151,9 @@ def make_inputs(**overrides: object) -> ConfidenceInputs:
         # genuinely has no distribution and wrong for one that does.
         "model_distribution": build_model_distribution(result.contracts),
         "model_completeness": build_model_completeness(ModelSpec(), result),
+        # The identity measure the scorer reads since v2.1.3. The synthetic
+        # generator knows its own universe, so this chain genuinely measures.
+        "chain_completeness": resolve_chain_completeness(chain),
         "options_feed_timestamp": AS_OF,
         "spot_feed_timestamp": AS_OF,
         "open_interest_as_of": date(2026, 3, 16),
@@ -228,9 +232,33 @@ def test_complete_chain_scores_full_marks():
     assert not component.uncalibrated
 
 
-def test_completeness_uses_the_expected_count_when_the_adapter_states_it():
+def sparse_completeness(expected: int = 100_000):
+    """A measure whose expected universe is far larger than what arrived.
+
+    Since v2.1.3 the scorer reads the identity measure, not an integer -- a
+    count cannot say *which* contracts were expected. Overriding
+    ``expected_contract_count`` no longer moves the score, which is the point.
+    """
+    from src.domain.completeness import ChainCompleteness
+
+    return ChainCompleteness(
+        received_quote_count=250,
+        received_oi_count=250,
+        received_iv_count=250,
+        received_greeks_count=0,
+        expected_contract_ids=tuple(
+            f"SPXW:2026-03-20:{k}.0000:call" for k in range(expected)
+        ),
+        received_contract_ids=tuple(
+            f"SPXW:2026-03-20:{k}.0000:call" for k in range(250)
+        ),
+        expected_source="contract_list",
+    )
+
+
+def test_completeness_uses_the_expected_universe_when_the_adapter_states_it():
     """Usable/received says nothing about strikes the vendor never sent."""
-    inputs = make_inputs(expected_contract_count=100_000)
+    inputs = make_inputs(chain_completeness=sparse_completeness())
     assert score_chain_completeness(inputs, CFG).score == 0.0
 
 
@@ -683,7 +711,7 @@ def test_a_broken_snapshot_scores_near_zero():
         dte0_dominance_ratio=1.0,
         flow_adjusted_signed_gex=None,
         zero_gamma_results=(),
-        expected_contract_count=100_000,
+        chain_completeness=sparse_completeness(),
         model_spec=ModelSpec(),
         quotes=(),
         zero_gamma_universe=OptionUniverse(

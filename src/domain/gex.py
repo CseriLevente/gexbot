@@ -516,7 +516,7 @@ class GexSnapshot:
         return (max(levels) - min(levels)) / self.spot * 100.0
 
     @property
-    def zero_gamma_root_identity_stable(self) -> bool | None:
+    def zero_gamma_root_count_stable(self) -> bool | None:
         """Whether every convention found the same *number* of roots.
 
         A convention change that alters the root count is a stronger warning than
@@ -565,7 +565,11 @@ class GexSnapshot:
             "walls": self.walls.as_dict(),
             "zero_gamma": [z.as_dict() for z in self.zero_gamma],
             "zero_gamma_spread_pct": self.zero_gamma_spread_pct,
-            "zero_gamma_root_identity_stable": (self.zero_gamma_root_identity_stable),
+            # Renamed in v2.1.3: it compares root *counts*. Two runs with the
+            # same number of roots at different levels were reported as
+            # "identity stable", which is the opposite of what happened.
+            # Genuine identity stability comes from compare_root_topology.
+            "zero_gamma_root_count_stable": self.zero_gamma_root_count_stable,
             "root_topology": self.root_topology,
             "chain_universe": self.chain_universe.as_dict(),
             "zero_gamma_universe": self.zero_gamma_universe.as_dict(),

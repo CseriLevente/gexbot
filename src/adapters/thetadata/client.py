@@ -56,6 +56,7 @@ __all__ = [
     "ChainCompleteness",
     "ChainRequest",
     "ChainSnapshot",
+    "CompletenessStatus",
     "CsvBodyStatus",
     "DuplicateRowError",
     "FloatParseIssue",
@@ -72,6 +73,7 @@ __all__ = [
     "ThetaDataVendorError",
     "TimestampSource",
     "assemble_chain",
+    "normalize_response_body",
     "parse_float_field",
     "parse_int_field",
     "parse_strike",
@@ -100,7 +102,7 @@ from src.adapters.transport import (
     TransportError,
     VendorHTTPError,
 )
-from src.domain.completeness import CompletenessStatus
+from src.domain.completeness import ChainCompleteness, CompletenessStatus
 from src.domain.contracts import (
     ChainSnapshot,
     OptionContract,
@@ -110,6 +112,7 @@ from src.domain.contracts import (
     SnapshotClocks,
 )
 from src.domain.iv import IVSource, build_iv_quote
+from src.domain.strikes import canonical_strike, parse_strike
 from src.domain.timestamps import ContractTimestamps
 from src.gex.sessions import EASTERN, to_eastern
 
@@ -307,6 +310,20 @@ class CsvBodyStatus(str, Enum):
 _HEADER_CELL = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
+def normalize_response_body(text: str) -> str:
+    """Strip a UTF-8 BOM once, before anything reads the body.
+
+    v2.1.2 stripped it in ``validate_csv_body`` only. The header therefore
+    *validated* -- the BOM was gone by the time the columns were compared -- and
+    then ``parse_csv`` read the original text, so the first column name came
+    back as ``"\ufeffsymbol"`` and every row silently lost its symbol.
+
+    One function, called by both paths, so they cannot disagree about what the
+    body is.
+    """
+    return text.lstrip("\ufeff")
+
+
 def validate_csv_body(
     text: str, *, required: tuple[str, ...] = ()
 ) -> tuple[CsvBodyStatus, str]:
@@ -315,7 +332,7 @@ def validate_csv_body(
     Returns ``(VALID_EMPTY_CSV, "")`` for a well-formed body -- with or without
     data rows. Everything else names what is wrong.
     """
-    stripped = text.lstrip("\ufeff").strip()
+    stripped = normalize_response_body(text).strip()
     if not stripped:
         return CsvBodyStatus.INVALID_BODY, "empty body"
     if stripped[0] in "<{[":
@@ -343,42 +360,6 @@ def validate_csv_body(
     if missing:
         return CsvBodyStatus.MISSING_HEADER, f"missing required column(s) {missing}"
     return CsvBodyStatus.VALID_EMPTY_CSV, ""
-
-
-def parse_strike(value: str | float | None) -> tuple[Decimal | None, str | None]:
-    """Parse a strike exactly, for use in the canonical contract identity.
-
-    v2.1.1 built the identity from ``float(row["strike"])``. Two consequences:
-
-    * ``"NaN"`` produced an identity containing a NaN, which compares unequal to
-      itself, so a NaN-struck contract could never be deduplicated or matched;
-    * equivalence between ``"5000"``, ``"5000.0"`` and ``"5000.00"`` depended on
-      float formatting rather than on the numbers being equal.
-
-    ``Decimal`` gives exactness and a canonical form without either.
-    """
-    if value is None:
-        return None, "missing_value"
-    text = str(value).strip()
-    if not text:
-        return None, "missing_value"
-    try:
-        parsed = Decimal(text)
-    except InvalidOperation:
-        return None, "malformed_value"
-    if not parsed.is_finite():
-        return None, "non_finite_input"
-    if parsed <= 0:
-        return None, "out_of_range"
-    return parsed, None
-
-
-def canonical_strike(value: Decimal) -> str:
-    """One spelling per strike, so equivalent inputs share an identity."""
-    normalised = value.normalize()
-    if normalised == normalised.to_integral_value():
-        normalised = normalised.quantize(Decimal(1))
-    return f"{normalised:f}"
 
 
 def parse_int_field(
@@ -1034,193 +1015,6 @@ def index_rows(
 
 
 @dataclass(frozen=True, slots=True)
-class ChainCompleteness:
-    """How complete a chain is, measured against an INDEPENDENT expectation.
-
-    Two defects shaped this class, one release apart, and they are the same
-    mistake at different depths.
-
-    v2 inferred the expected universe from the response being judged, so a
-    truncated response was complete by construction.
-
-    v2.1.1 fixed that and then compared *counts*::
-
-        joined_contract_count / expected_contract_count
-
-    A chain that received two contracts where two were expected therefore
-    reported ``MEASURED_COMPLETE``, whether or not they were the two expected.
-    Two missing and two unexpected cancel exactly in that arithmetic. Counting
-    cannot distinguish the thing being measured from a coincidence of the same
-    size.
-
-    Completeness is now a statement about **identity sets**::
-
-        missing_expected    = expected - received
-        unexpected_received = received - expected
-        matched             = expected & received
-
-    with ``MEASURED_COMPLETE`` requiring ``missing_expected`` to be empty.
-    Extras get their own status rather than being averaged away, because
-    "contracts arrived that nobody predicted" is a fact about the expectation
-    and needs to survive to whoever reads the report.
-    """
-
-    received_quote_count: int
-    received_oi_count: int
-    received_iv_count: int
-    received_greeks_count: int
-    #: Identities an INDEPENDENT source said to expect. ``None`` means no such
-    #: source existed -- distinct from an empty tuple, which means one existed
-    #: and claimed nothing.
-    expected_contract_ids: tuple[str, ...] | None = None
-    #: Identities that actually joined into contracts.
-    received_contract_ids: tuple[str, ...] = ()
-    expected_source: str = "none"
-    missing_by_source: dict[str, int] = field(default_factory=dict)
-
-    #: Identity lists are truncated in serialised metadata at this length. A
-    #: 5,000-contract mismatch is a real possibility on a full SPX chain, and a
-    #: 5,000-entry blob in every snapshot's metadata is not useful to anyone.
-    #: The *counts* are never truncated.
-    IDENTITY_SAMPLE_LIMIT = 100
-
-    # -- identity sets -------------------------------------------------------
-
-    @property
-    def _expected(self) -> frozenset[str]:
-        return frozenset(self.expected_contract_ids or ())
-
-    @property
-    def _received(self) -> frozenset[str]:
-        return frozenset(self.received_contract_ids)
-
-    @property
-    def expected_identity_count(self) -> int:
-        """Distinct expected identities. Duplicates in the input do not count
-        twice -- an expectation listing a contract twice still expects it once.
-        """
-        return len(self._expected)
-
-    @property
-    def received_identity_count(self) -> int:
-        return len(self._received)
-
-    @property
-    def matched_identity_count(self) -> int:
-        return len(self._expected & self._received)
-
-    @property
-    def missing_expected_identities(self) -> tuple[str, ...]:
-        """Expected but absent, sorted. Sorted so that two runs over the same
-        data produce byte-identical metadata."""
-        return tuple(sorted(self._expected - self._received))
-
-    @property
-    def unexpected_received_identities(self) -> tuple[str, ...]:
-        return tuple(sorted(self._received - self._expected))
-
-    @property
-    def missing_expected_count(self) -> int:
-        return len(self._expected - self._received)
-
-    @property
-    def unexpected_received_count(self) -> int:
-        return len(self._received - self._expected)
-
-    @property
-    def identity_completeness_ratio(self) -> float | None:
-        """Matched over expected. Extras cannot push it above 1.0, and cannot
-        compensate for a miss."""
-        if not self._expected:
-            return None
-        return self.matched_identity_count / len(self._expected)
-
-    # -- compatibility -------------------------------------------------------
-
-    @property
-    def expected_contract_count(self) -> int | None:
-        """Retained for the snapshot contract; ``None`` when nothing was
-        independently expected."""
-        if self.expected_contract_ids is None:
-            return None
-        return self.expected_identity_count
-
-    @property
-    def joined_contract_count(self) -> int:
-        return self.received_identity_count
-
-    @property
-    def completeness_ratio(self) -> float | None:
-        return self.identity_completeness_ratio
-
-    @property
-    def independently_observed(self) -> bool:
-        """False when the expectation came from the response itself."""
-        return self.expected_contract_ids is not None and self.expected_source not in (
-            "none",
-            "quote_response",
-        )
-
-    @property
-    def status(self) -> CompletenessStatus:
-        """Measurement or absence. Never "complete" on the strength of counts."""
-        if not self.independently_observed:
-            # An expectation taken from the response being judged is not an
-            # expectation. Rows arrived and joined; whether more were owed is
-            # unknowable from here.
-            return (
-                CompletenessStatus.UNKNOWN
-                if self.received_identity_count == 0
-                else CompletenessStatus.PARTIALLY_OBSERVED
-            )
-        if not self._expected:
-            # A universe was supplied and claimed nothing. Nothing is measured.
-            return CompletenessStatus.UNKNOWN
-        if self.missing_expected_count:
-            return CompletenessStatus.MEASURED_INCOMPLETE
-        return (
-            CompletenessStatus.MEASURED_COMPLETE_WITH_EXTRAS
-            if self.unexpected_received_count
-            else CompletenessStatus.MEASURED_COMPLETE
-        )
-
-    def _sample(self, identities: tuple[str, ...]) -> tuple[list[str], bool]:
-        limit = self.IDENTITY_SAMPLE_LIMIT
-        return list(identities[:limit]), len(identities) > limit
-
-    def as_dict(self) -> dict[str, Any]:
-        missing, missing_truncated = self._sample(self.missing_expected_identities)
-        unexpected, unexpected_truncated = self._sample(
-            self.unexpected_received_identities
-        )
-        return {
-            "expected_contract_count": self.expected_contract_count,
-            "expected_source": self.expected_source,
-            "received_quote_count": self.received_quote_count,
-            "received_oi_count": self.received_oi_count,
-            "received_iv_count": self.received_iv_count,
-            "received_greeks_count": self.received_greeks_count,
-            "joined_contract_count": self.joined_contract_count,
-            "expected_identity_count": self.expected_identity_count,
-            "received_identity_count": self.received_identity_count,
-            "matched_identity_count": self.matched_identity_count,
-            "missing_expected_count": self.missing_expected_count,
-            "unexpected_received_count": self.unexpected_received_count,
-            "missing_expected_identities": missing,
-            "missing_expected_identities_truncated": missing_truncated,
-            "unexpected_received_identities": unexpected,
-            "unexpected_received_identities_truncated": unexpected_truncated,
-            "identity_completeness_ratio": self.identity_completeness_ratio,
-            "completeness_ratio": self.completeness_ratio,
-            "independently_observed": self.independently_observed,
-            "status": self.status.value,
-            "missing_by_source": dict(sorted(self.missing_by_source.items())),
-            # Retained under its v2.1 name so existing readers keep working.
-            "unexpected_identities": unexpected,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class ChainAssemblyInputs:
     as_of: datetime
     spot: float
@@ -1504,6 +1298,10 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
             **dict(inputs.meta),
             "duplicate_reports": [r.as_dict() for r in duplicate_reports],
             "chain_completeness": completeness.as_dict(),
+            # The object itself, so the engine can score against the identity
+            # measure rather than rebuilding one from counts. Not serialised:
+            # as_dict() above is the wire form.
+            "chain_completeness_object": completeness,
             "parser_version": PARSER_VERSION,
             # Per source, not one chain-wide flag. See TimestampSource.
             "timestamp_localization": ledger.as_dict(),
@@ -1657,7 +1455,7 @@ class ThetaDataClient:
         # is a legitimate outcome for a filtered request. Confirm the body is
         # actually CSV before drawing that conclusion.
         body_status, body_detail = validate_csv_body(
-            response.text,
+            normalize_response_body(response.text),
             required=tuple(sorted(REQUIRED_COLUMNS.get(endpoint, set()))),
         )
         if body_status is not CsvBodyStatus.VALID_EMPTY_CSV:
@@ -1666,7 +1464,7 @@ class ThetaDataClient:
                 f"body that is not usable CSV ({body_status.value}): {body_detail}"
             )
 
-        rows = parse_csv(response.text)
+        rows = parse_csv(normalize_response_body(response.text))
         check_schema(rows, endpoint)
         return rows
 

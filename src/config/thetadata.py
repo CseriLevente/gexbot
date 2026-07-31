@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.config.pipeline import (
         DividendConvention,
         PricingMode,
-        VendorRateUnits,
+        RateUnit,
     )
     from src.domain.contracts import ChainSnapshot
     from src.domain.model_spec import ModelSpec
@@ -130,7 +130,7 @@ class ThetaDataConfig:
     pricing_mode: PricingMode = None  # type: ignore[assignment]
     #: How to read ``rate_value``. Undocumented by the vendor, so UNKNOWN is the
     #: honest default and it blocks pricing compatibility.
-    rate_units: VendorRateUnits = None  # type: ignore[assignment]
+    rate_units: RateUnit = None  # type: ignore[assignment]
     #: What ``annual_dividend`` means. Cash and yield are different quantities.
     dividend_convention: DividendConvention = None  # type: ignore[assignment]
     #: Local model settings that MUST match the ModelSpec, checked by
@@ -184,14 +184,16 @@ class ThetaDataConfig:
         ``None`` when the units are undocumented -- guessing here is a factor of
         one hundred in every gamma.
         """
-        from src.config.pipeline import VendorRateUnits
+        from src.config.pipeline import RateUnit
 
         if self.rate_value is None:
             return None
-        if self.rate_units is VendorRateUnits.PERCENT:
+        if self.rate_units is RateUnit.PERCENT_ANNUAL_RATE:
             return self.rate_value / 100.0
-        if self.rate_units is VendorRateUnits.DECIMAL:
+        if self.rate_units is RateUnit.DECIMAL_ANNUAL_RATE:
             return self.rate_value
+        # UNKNOWN units cannot be normalised; guessing is a factor of a hundred
+        # in every gamma.
         return None
 
     @property
@@ -629,7 +631,7 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
     from src.config.pipeline import (
         DividendConvention,
         PricingMode,
-        VendorRateUnits,
+        RateUnit,
         require_supported_iv_source,
     )
 
@@ -649,16 +651,39 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
                 key,
             )
 
+    # Derived from IV provenance unless the operator states one. v2.1.2
+    # defaulted to LOCAL_IV_LOCAL_GAMMA regardless of iv_source, which paired
+    # vendor-computed IV with the one mode that requires no vendor/local
+    # agreement -- so every compatibility check was skipped by default.
+    from src.config.pipeline import derive_pricing_mode, require_coherent_pricing_mode
+
     pricing_mode = enumerated(
-        "pricing_mode", PricingMode, PricingMode.LOCAL_IV_LOCAL_GAMMA.value
+        "pricing_mode",
+        PricingMode,
+        derive_pricing_mode(iv_source=iv_source).value,
     )
-    rate_units = enumerated(
-        "rate_units", VendorRateUnits, VendorRateUnits.UNKNOWN.value
+    require_coherent_pricing_mode(
+        iv_source=iv_source, pricing_mode=pricing_mode, where=f"{path}.pricing_mode"
     )
+
+    # The tier has to expose what the mode needs, or the mode is a wish.
+    from src.adapters.thetadata.capabilities import assess_tier
+    from src.adapters.thetadata.endpoints import Tier
+    from src.config.pipeline import required_capabilities
+
+    capability = assess_tier(Tier(tier), required_capabilities(pricing_mode))
+    if not capability.satisfied:
+        fail(
+            f"the {tier!r} tier does not expose what {pricing_mode.value} needs: "
+            f"missing={list(capability.missing)} "
+            f"uncertain={list(capability.uncertain)}",
+            "tier",
+        )
+    rate_units = enumerated("rate_units", RateUnit, RateUnit.UNKNOWN.value)
     dividend_convention = enumerated(
         "dividend_convention",
         DividendConvention,
-        DividendConvention.UNKNOWN_VENDOR_DIVIDEND_CONVENTION.value,
+        DividendConvention.UNKNOWN_VENDOR_CONVENTION.value,
     )
 
     underlying_price_source = text("underlying_price_source", "vendor_index_snapshot")
@@ -886,6 +911,7 @@ class ThetaDataRuntime:
         capture: Any = None,
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
+        pipeline: Any = None,
     ) -> ChainSnapshot:
         """Fetch and assemble using the configured settings.
 
@@ -909,7 +935,7 @@ class ThetaDataRuntime:
                 session_id=new_capture_session_id(as_of=as_of),
             )
 
-        return self.client.fetch_chain(
+        chain = self.client.fetch_chain(
             request if request is not None else self.default_chain_request,
             as_of=as_of,
             spot=spot,
@@ -923,3 +949,22 @@ class ThetaDataRuntime:
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
         )
+
+        # Link the normalized chain to the exact raw records it came from.
+        # Without this a stored chain and a directory of payloads are two
+        # artefacts that merely share a timestamp.
+        from dataclasses import replace as _replace
+
+        from src.adapters.raw_store import RawCaptureManifest
+
+        manifest = (
+            RawCaptureManifest.from_session(capture)
+            if capture is not None
+            else RawCaptureManifest.disabled()
+        )
+        extra: dict[str, Any] = {"raw_capture_manifest": manifest.as_dict()}
+        if pipeline is not None:
+            # Which compatibility decision permitted this calculation. A GEX
+            # number should be able to show what allowed it to be computed.
+            extra["pipeline"] = pipeline.as_dict()
+        return _replace(chain, meta={**chain.meta, **extra})

@@ -20,7 +20,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 1294 tests, 94% coverage
+.venv/Scripts/python.exe -m pytest         # 1685 tests, 94% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) imports **nothing**
@@ -39,7 +39,7 @@ say and nothing more:
 | `TESTED_SYNTHETICALLY` | Verified against generated inputs and closed-form identities. |
 | `TESTED_WITH_OFFLINE_FIXTURES` | Verified against recorded vendor-shaped payloads. No network. |
 | `NOT_VALIDATED_WITH_LIVE_THETADATA` | Never run against a real subscription. |
-| `READY_FOR_ADAPTER_CERTIFICATION` | Offline checks pass; a single paid vendor session is the next evidence. |
+| `READY_FOR_CAPTURE_ONLY` | Offline checks pass; one paid vendor session is the next evidence. Not certified. |
 | `PLANNED` | Designed, not built. |
 | `NOT_IMPLEMENTED` | Absent. Some of these are absent on purpose. |
 
@@ -89,7 +89,14 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | One adapter exception hierarchy | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Schema-safe raw-store integrity scanning | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Collision-safe capture sessions | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
-| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `READY_FOR_ADAPTER_CERTIFICATION` |
+| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the shipped default is `NOT_READY` on six load-bearing vendor unknowns |
+| Pricing mode derived from IV provenance | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Vendor/local rate and dividend value comparison | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Tier capability matrix | `IMPLEMENTED` · `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| One pipeline from `LoadedConfig` | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Raw-capture manifest linking payloads to snapshots | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| ThetaData NBBO bid/mid/ask IV | vendor-computed; an NBBO *price* basis does not make the IV local |
+| `LOCAL_IV_LOCAL_GAMMA` | `NOT_IMPLEMENTED` — needs a local IV solver; refused at config load |
 | `TRADE_IV`, `LOCALLY_SOLVED_MID_IV` | `NOT_IMPLEMENTED` — refused at config load, not silently substituted |
 | Local gamma vs vendor gamma | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | Whether ThetaData Standard tier suffices | `NOT_VALIDATED_WITH_LIVE_THETADATA` — it *appears* to expose the required inputs; that is not the same claim |

@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.2.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.3.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.2.zip
+sha256sum gex-bot-v2.1.3.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.2.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.3.zip -Algorithm SHA256
 ```
 
 ---
@@ -169,7 +169,7 @@ python -m pytest tests/unit/test_release_integrity.py -q
 python -m pytest -m integration -q
 
 # Adapter-certification readiness
-python -m pytest tests/unit/test_adapter_certification.py -q
+python -m pytest tests/unit/test_adapter_certification.py tests/unit/test_certification_states.py -q
 ```
 
 ---

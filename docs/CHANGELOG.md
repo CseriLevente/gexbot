@@ -1,5 +1,101 @@
 # Changelog
 
+## 2.1.3 - pricing provenance
+
+One misconception ran through v2.1.2 and produced most of what this release
+fixes: **ThetaData's NBBO bid/mid/ask IV values are vendor-computed IV.**
+
+ThetaData solves the implied volatility. That the option *price* it solved
+against was an NBBO bid, midpoint or ask says nothing about who did the solving,
+or under what rate, dividend, expiration instant and day count. v2.1.2 read
+"NBBO_MID_IV" as though the NBBO part made it ours, and shipped a default
+configuration that paired vendor-computed IV with `LOCAL_IV_LOCAL_GAMMA` -- the
+one pricing mode that requires *no* vendor/local agreement.
+
+Everything downstream followed. The compatibility assessment short-circuited on
+the mode, so every vendor convention went unchecked. Adapter certification read
+the same short-circuit and reported ready. A session could fetch under one set
+of assumptions and price under another, and every object involved looked
+correctly configured in isolation.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.2 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | `iv_source: VENDOR_DEFAULT_IV` with `pricing_mode: LOCAL_IV_LOCAL_GAMMA` | The mode that skips every compatibility check was the default, on a configuration that needed them all | Mode derived from IV provenance; `LOCAL_IV_LOCAL_GAMMA` unreachable until a local solver exists |
+| 2 | Certification read the mode enum, not the effective assumptions | A mislabelled session was reported ready with six vendor conventions unknown | Load-bearing `UNKNOWN` fields block; `compatible=True` cannot bypass an unresolved field list |
+| 3 | `from_config` took only `thetadata:` and derived its own `ModelSpec` | The repo's own `research.yaml` set `model.iv_price_source: NBBO_MID_IV` beside a section defaulting to `VENDOR_DEFAULT_IV` | `from_loaded_config` builds one session from the whole file and refuses a mismatch |
+| 4 | Rate compatibility ignored units and treated a null vendor value as agreement | A vendor 4.2 matching a local 4.2 is the *bug* if the vendor's is a percentage | Typed `RateAssumption` with source, raw value, unit and normalised decimal; a vendor default is `UNKNOWN_VENDOR_DEFAULT` |
+| 5 | Dividend compatibility compared conventions and stopped | Two continuous yields of 0.02 and 0.01 are the same kind and different numbers | `DividendAssumption` compares convention *and* value |
+| 6 | `prefer_vendor_gamma` was independent of the pricing mode | A session could claim comparison-only and aggregate the vendor's gamma | Mode capability table; no supported mode aggregates vendor gamma |
+| 7 | No tier capability check | Selecting vendor-gamma validation on Standard fails at the first paid request | Capability matrix; `UNCERTAIN` counts against, not for |
+| 8 | Confidence recomputed `len(result.contracts) / expected_contract_count` | Two received where two were expected scored 1.0 whichever two they were | The scorer reads the identity measure |
+| 9 | `compute_gex_snapshot(expected_contract_count=int)` | A count cannot say *which* contracts were expected | Typed `ExpectedContractUniverse` of `ContractIdentity` |
+| 10 | Per-source shortfalls used count arithmetic | Two missing and two unexpected net to zero | Identity set differences |
+| 11 | `GexSnapshot.effective_model` took `contracts[0]` | Iteration order decided what the snapshot claimed about itself | `None` unless the distribution proves uniformity |
+| 12 | Pipeline compatibility never reached the output | A GEX number could not show what permitted it | Pipeline metadata into `ChainSnapshot`, `GexSnapshot` and the replay hash |
+| 13 | Raw payloads and normalized chains were unlinked | Reconstructing which bytes produced which number meant guessing from filenames | `RawCaptureManifest` with a deterministic hash |
+| 14 | Parser stuck at 2.1.1, engine at 2.1.2 | A replay could not detect that the parser had changed underneath it | Both at 2.1.3, from one constant each |
+| 15 | `ResponseTooLargeError(RuntimeError)` | The failure most likely to follow a deliberate setting escaped `except ThetaDataError` | `ThetaDataResponseTooLargeError` |
+| 16 | BOM stripped for validation but not for parsing | A BOM'd response validated and then lost its first column | One `normalize_response_body`, used by both |
+| 17 | Static completeness never read `source.is_available` | Selecting `VENDOR_SOFR` reported a fully specified model | Unimplemented sources are statically missing |
+| 18 | `zero_gamma_root_identity_stable` compared counts | Same count at different levels read as identity-stable | Renamed `zero_gamma_root_count_stable`; `match_roots` is the identity measure |
+| 19 | Safety test substring-matched `dir()` | Python 3.13's `__replace__` contains "place", so the check failed on a supported interpreter | Inspects the declared API, not runtime attributes |
+| 20 | Expected universes were raw strings | Formatting alone could manufacture a missing identity | `contract_identity` shares the chain's exact strike normalisation |
+| 23 | One `ready` boolean | "Ready to capture" and "certified" are different claims | Four-state machine; `ADAPTER_CERTIFIED` unreachable without a capture *and* a validation report |
+
+### Additional defects found
+
+* **`config/research.yaml` was internally inconsistent** -- the shipped file set
+  two different implied volatilities. Found by writing §3's factory, not by
+  reading the file.
+* **`ChainCompleteness` lived in the ThetaData adapter**, so the engine core
+  could not read it without violating dependency isolation -- which is *why*
+  v2.1.2's scorer rebuilt a ratio from counts. Moved to `src/domain/`.
+* **Strike parsing lived in the adapter** for the same reason. Moved to
+  `src/domain/strikes.py`; identity is not a vendor's idea.
+* **A second `dir()` substring scan** in `test_research_pipeline.py` shared the
+  §19 defect and would have failed on 3.13 too.
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `8b5b7454ba7c5500` | `ded3172bfee2682f` | `BEHAVIORAL` -- research.yaml changed |
+| `EXPECTED_MODEL_FINGERPRINT` | `d367d4d4aabbbb69` | `e05c611b9b953372` | `VERSION_METADATA_ONLY` -- engine 2.1.2 -> 2.1.3 |
+| `EXPECTED_OUTPUT_HASH` | `35def8d5...` | `4444055b...` | mixed; see the note in the test file |
+
+**No GEX number changed.** Totals, buckets, per-strike values, walls, voids,
+roots and every confidence component score are asserted individually and held
+throughout: across the whole release exactly three assertions in the regression
+file moved, and all three are the digests above.
+
+### Behavioural changes worth knowing
+
+* `LOCAL_IV_LOCAL_GAMMA` now fails configuration. It is documented, unreachable,
+  and will stay so until a local IV solver exists.
+* The default configuration is `NOT_READY` for certification, on six
+  load-bearing unknowns. That is the correct answer to what we currently know.
+* `compute_gex_snapshot` no longer accepts `expected_contract_count`.
+* `zero_gamma_root_identity_stable` is now `zero_gamma_root_count_stable`.
+* Standard tier cannot select `VENDOR_GAMMA_VALIDATION`; Value tier cannot use
+  vendor IV.
+
+### Not added, deliberately
+
+Live ThetaData collection, Databento, MES/ES futures feeds, feature-store work,
+trading strategies, regime thresholds, a risk engine, position sizing, IBKR,
+broker execution, order classes, paper trading, live trading, and arbitrary
+calibrated trading values.
+
+---
+
 ## 2.1.2 - adapter-certification readiness
 
 Twenty defects cleared before any paid ThetaData capture. Every one shares a

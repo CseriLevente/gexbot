@@ -215,6 +215,20 @@ def static_model_missing_inputs(spec: ModelSpec) -> tuple[str, ...]:
     )
 
     missing: list[str] = []
+    # A source that is declared but unimplemented can never resolve, whatever
+    # data arrives. ``is_available`` already recorded this; v2.1.2 never asked,
+    # so selecting VENDOR_SOFR reported a fully specified model right up until
+    # the first contract failed to price.
+    if not spec.risk_free_rate_source.is_available:
+        missing.append(
+            f"risk_free_rate: source {spec.risk_free_rate_source.value} is "
+            "declared but not implemented, so it cannot resolve for any contract"
+        )
+    if not spec.dividend_yield_source.is_available:
+        missing.append(
+            f"dividend_yield: source {spec.dividend_yield_source.value} is "
+            "declared but not implemented, so it cannot resolve for any contract"
+        )
     if (
         spec.risk_free_rate_source is RateSource.CONFIGURED_CONSTANT
         and spec.risk_free_rate is None

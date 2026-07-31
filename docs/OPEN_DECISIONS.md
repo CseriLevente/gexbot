@@ -507,6 +507,65 @@ rare, strict becomes a reasonable default.
 
 ---
 
+## 28. ThetaData NBBO IV is vendor-computed - **RESOLVED, was a misconception**
+
+**What v2.1.2 believed.** That `NBBO_MID_IV` was in some sense a local IV,
+because the price basis is an NBBO midpoint.
+
+**What is true.** ThetaData runs the solver. The price basis is an input to
+*their* calculation, not evidence about ours. All four supported IV sources are
+vendor output.
+
+**Consequence.** `LOCAL_IV_LOCAL_GAMMA` -- the mode that requires no
+vendor/local agreement -- is unreachable until a local solver exists, and every
+current session is `VENDOR_IV_LOCAL_GAMMA` with real compatibility
+requirements.
+
+**What would change it.** Implementing `LOCALLY_SOLVED_MID_IV` with documented
+convergence limits and a failure state.
+
+---
+
+## 29. Vendor IV calculation conventions - **UNKNOWN, blocks certification**
+
+Six dimensions are undocumented and reported as `UNKNOWN`: the vendor's
+settlement instant for its own solve, its day count, its short-dated floor,
+which price it solved against, which underlying print it used, and its solver
+version.
+
+Each changes gamma, so each is load-bearing and each blocks certification. They
+are not caveats printed beside a result; they are the reason the result has no
+stated meaning.
+
+**What would settle it.** Vendor documentation, or the certification capture
+plus a local/vendor comparison.
+
+---
+
+## 30. Tier capability matrix is unverified - **DOCUMENTED, uncertain**
+
+`src/adapters/thetadata/capabilities.py` derives from the endpoint tier map read
+from vendor documentation in July 2026. No entry has been checked against a live
+subscription.
+
+`contract_list_endpoint` is `UNCERTAIN` at every tier, which is why chain
+completeness stays `PARTIALLY_OBSERVED`. `UNCERTAIN` counts against a
+requirement rather than for it: the alternative is discovering the gap at the
+first paid request.
+
+**What would settle it.** One session per tier, or vendor confirmation.
+
+---
+
+## 31. Spot/OI provenance and the certification states - **UNCHANGED**
+
+OD-25 and OD-26 still stand. v2.1.3 adds the state machine around them:
+`NOT_READY`, `READY_FOR_CAPTURE_ONLY`, `CAPTURE_COMPLETED_NOT_VALIDATED`,
+`ADAPTER_CERTIFIED`. The last is unreachable without both a live capture and a
+validation report, by construction rather than by policy.
+
+---
+
 ## Deferred, with reasons
 
 | Item | Why deferred | Revisit when |

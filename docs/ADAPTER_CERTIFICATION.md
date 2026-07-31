@@ -1,7 +1,12 @@
 # Adapter certification
 
-Status: `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `READY_FOR_ADAPTER_CERTIFICATION`
-· `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+Status: `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+**The shipped default configuration is `NOT_READY`**, blocked on six
+load-bearing vendor pricing unknowns. That is the correct answer to what is
+currently known, not a defect. Resolving them, by reading vendor
+documentation and stating the answers in the configuration, moves the state
+to `READY_FOR_CAPTURE_ONLY`.
 
 > **This is not a trading readiness check.** This repository has no broker, no
 > order type and no execution path. Certification readiness confers none of
@@ -160,3 +165,38 @@ operator silently got a different number than the one they selected.
       become measurable
 - [ ] vendor gamma is compared against local gamma, and the result is written
       down whichever way it comes out
+
+
+---
+
+## The state machine (v2.1.3)
+
+| State | Means | Reachable offline |
+|---|---|---|
+| `NOT_READY` | at least one blocker | yes |
+| `READY_FOR_CAPTURE_ONLY` | offline checks pass; nothing about vendor behaviour is confirmed | yes |
+| `CAPTURE_COMPLETED_NOT_VALIDATED` | bytes exist and are linked to a snapshot; nobody has checked them | no |
+| `ADAPTER_CERTIFIED` | a live capture **and** a validation report exist | no |
+
+`ADAPTER_CERTIFIED` is unreachable without both, by construction: there is no
+argument combination to `assess_readiness` that produces it offline.
+
+## Why the default is NOT_READY
+
+`VENDOR_IV_LOCAL_GAMMA` is the only mode a vendor-computed IV can use, and it
+mixes the vendor's IV into our gamma. Six vendor conventions are undocumented,
+and each changes the gamma:
+
+- the settlement instant the vendor used for its own solve
+- its day-count convention
+- its short-dated time floor
+- which price it solved against
+- which underlying print it used, and when
+- its solver version
+
+Plus two that are *knowable* but must be stated: `rate_units` and
+`dividend_convention`. Until those are set, the rate and dividend comparisons
+report `UNKNOWN` rather than agreement.
+
+An unknown that changes gamma is not a caveat printed beside the answer. It is
+the reason the answer has no stated meaning.

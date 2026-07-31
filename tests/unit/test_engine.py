@@ -312,8 +312,29 @@ def test_convention_spread_is_reported_as_the_error_bar(snapshot):
     assert spread >= 0.0
 
 
-def test_root_identity_stability_is_exposed(snapshot):
-    assert snapshot.zero_gamma_root_identity_stable is True
+def test_root_count_stability_is_exposed(snapshot):
+    """Renamed in v2.1.3: the property compares root *counts*.
+
+    Calling it identity stability meant two runs with the same number of roots
+    at different levels reported as stable -- the opposite of what happened.
+    Genuine identity stability comes from ``compare_root_topology``.
+    """
+    assert snapshot.zero_gamma_root_count_stable is True
+
+
+def test_root_count_stability_and_identity_stability_are_distinct(snapshot):
+    """Counting roots and matching them are different questions.
+
+    ``match_roots`` is the authoritative identity measure; the snapshot property
+    only reports whether the *number* of roots agreed across conventions.
+    """
+    from src.gex.confidence import match_roots
+
+    assert snapshot.zero_gamma_root_count_stable is True
+    # Same count, entirely different levels: the count agrees and no root does.
+    matching = match_roots((5050.0,), (5250.0,), spot=5000.0, tolerance_pct=0.25)
+    assert matching.matched_root_count == 0
+    assert matching.unmatched_root_count == 2
 
 
 def test_spread_is_undefined_when_only_one_convention_runs():

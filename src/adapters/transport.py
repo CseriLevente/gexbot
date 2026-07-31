@@ -31,6 +31,8 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol, runtime_checkable
 
+from src.adapters.errors import ThetaDataResponseTooLargeError
+
 logger = logging.getLogger(__name__)
 
 # 64 MiB. A full SPX+SPXW chain CSV is a few MiB; this leaves headroom without
@@ -75,8 +77,9 @@ class VendorHTTPError(RuntimeError):
         self.retry_after = retry_after
 
 
-class ResponseTooLargeError(RuntimeError):
-    pass
+#: Aliased onto the adapter hierarchy. The cap is the caller's own setting, so
+#: the failure it produces has to be catchable with the adapter's base class.
+ResponseTooLargeError = ThetaDataResponseTooLargeError
 
 
 class RetryBudgetExhaustedError(RuntimeError):

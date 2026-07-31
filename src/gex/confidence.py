@@ -104,6 +104,9 @@ class ConfidenceInputs:
     model_distribution: Any = None
     #: Static + resolved model completeness. See build_model_completeness.
     model_completeness: Any = None
+    #: The adapter's identity-based ChainCompleteness. The scorer reads this
+    #: rather than reconstructing a ratio from contract counts.
+    chain_completeness: Any = None
     options_feed_timestamp: datetime | None = None
     spot_feed_timestamp: datetime | None = None
     open_interest_as_of: date | None = None
@@ -160,8 +163,36 @@ def score_chain_completeness(
             ),
         )
 
-    expected = inputs.expected_contract_count or 0
-    ratio = min(len(result.contracts) / expected, 1.0) if expected else 0.0
+    # Read the identity measure the adapter already computed. v2.1.2
+    # recomputed it as ``len(result.contracts) / expected_contract_count``,
+    # which is the count arithmetic the identity work replaced: two contracts
+    # received where two were expected scored 1.0 whether or not they were the
+    # two expected.
+    measure = inputs.chain_completeness
+    if measure is None:
+        return ConfidenceComponent(
+            name="chain_completeness",
+            score=None,
+            weight=config.weights.chain_completeness,
+            uncalibrated=True,
+            warning_code=COMPLETENESS_WARNING_CODE,
+            detail=(
+                f"completeness reported {status.value} but no identity measure "
+                "was supplied, so the ratio cannot be computed"
+            ),
+        )
+
+    ratio = measure.identity_completeness_ratio
+    if ratio is None:
+        return ConfidenceComponent(
+            name="chain_completeness",
+            score=None,
+            weight=config.weights.chain_completeness,
+            uncalibrated=True,
+            warning_code=COMPLETENESS_WARNING_CODE,
+            detail=f"no expected identities to measure against ({status.value})",
+        )
+
     floor = config.min_chain_completeness_ratio
     if ratio >= floor:
         score = 1.0
@@ -173,8 +204,12 @@ def score_chain_completeness(
         score=score,
         weight=config.weights.chain_completeness,
         detail=(
-            f"{len(result.contracts)} usable of {expected} expected "
-            f"({status.value}, ratio {ratio:.3f}, floor {floor:.3f}); exclusions="
+            f"{measure.matched_identity_count} of "
+            f"{measure.expected_identity_count} expected identities matched "
+            f"({status.value}, identity ratio {ratio:.3f}, floor {floor:.3f}); "
+            f"missing {measure.missing_expected_count}, unexpected "
+            f"{measure.unexpected_received_count}; "
+            f"{len(result.contracts)} usable contracts; exclusions="
             f"{result.exclusion_counts()}"
         ),
     )

@@ -28,11 +28,10 @@ from src.config.pipeline import (
     PricingCompatibilityReport,
     PricingMode,
     ThetaDataResearchPipeline,
-    VendorRateUnits,
 )
 from src.config.thetadata import ThetaDataConfigError, parse_thetadata_config
 from src.domain.iv import IVSource
-from src.domain.model_spec import DividendSource, ModelSpec, RateSource
+from src.domain.model_spec import ModelSpec
 
 
 def config(**overrides):
@@ -148,22 +147,28 @@ def test_the_fingerprint_covers_both_halves():
 # =============================================================================
 
 
-def test_a_fully_aligned_configuration_is_compatible():
+def test_a_fully_aligned_rate_and_dividend_are_compatible():
+    """The remaining unknowns are vendor conventions, not our numbers.
+
+    v2.1.2 wrote LOCAL_IV_LOCAL_GAMMA here, which short-circuited the whole
+    assessment. That mode is unreachable now -- every supported IV source is
+    vendor-computed -- so this asserts on the two dimensions we *can* settle.
+    """
     built = pipeline(
-        pricing_mode="LOCAL_IV_LOCAL_GAMMA",
         rate_value=4.2,
-        rate_units="percent",
+        rate_units="PERCENT_ANNUAL_RATE",
         dividend_convention="ZERO_DIVIDEND",
     )
-    assert built.pricing_compatibility.compatible
+    report = built.pricing_compatibility
+    assert not any("risk_free_rate" in f for f in report.incompatible_fields)
+    assert not any("dividend_yield" in f for f in report.unknown_fields)
 
 
 def test_vendor_iv_with_unknown_dividend_convention_is_not_compatible():
     """The vendor's `annual_dividend` may be cash or yield. We do not know."""
     built = pipeline(
-        pricing_mode="VENDOR_IV_LOCAL_GAMMA",
         annual_dividend=1.3,
-        dividend_convention="UNKNOWN_VENDOR_DIVIDEND_CONVENTION",
+        dividend_convention="UNKNOWN_VENDOR_CONVENTION",
     )
     report = built.pricing_compatibility
     assert not report.compatible
@@ -171,71 +176,30 @@ def test_vendor_iv_with_unknown_dividend_convention_is_not_compatible():
 
 
 def test_cash_dividend_is_not_interchangeable_with_a_yield():
-    from src.config.pipeline import check_dividend_compatibility
+    from src.config.pipeline import DividendAssumption, check_dividend_compatibility
 
     cash = check_dividend_compatibility(
-        vendor=DividendConvention.ANNUAL_CASH_DIVIDEND,
-        local_source=DividendSource.CONFIGURED_CONSTANT,
+        vendor=DividendAssumption(
+            convention=DividendConvention.ANNUAL_CASH_DIVIDEND, value=65.0
+        ),
+        local=DividendAssumption(
+            convention=DividendConvention.CONTINUOUS_DIVIDEND_YIELD, value=0.013
+        ),
     )
     assert not cash.compatible
     assert any("dividend" in f for f in cash.incompatible_fields)
 
 
 def test_a_matching_zero_dividend_is_compatible():
-    from src.config.pipeline import check_dividend_compatibility
+    from src.config.pipeline import DividendAssumption, check_dividend_compatibility
 
     assert check_dividend_compatibility(
-        vendor=DividendConvention.ZERO_DIVIDEND,
-        local_source=DividendSource.ZERO,
-    ).compatible
-
-
-def test_percent_and_decimal_rate_units_are_not_interchangeable():
-    from src.config.pipeline import check_rate_compatibility
-
-    report = check_rate_compatibility(
-        vendor_units=VendorRateUnits.PERCENT,
-        vendor_value=4.2,
-        local_rate=4.2,
-        local_source=RateSource.CONFIGURED_CONSTANT,
-    )
-    assert not report.compatible
-    assert any("rate" in f for f in report.incompatible_fields)
-
-
-def test_a_correctly_converted_rate_is_compatible():
-    from src.config.pipeline import check_rate_compatibility
-
-    assert check_rate_compatibility(
-        vendor_units=VendorRateUnits.PERCENT,
-        vendor_value=4.2,
-        local_rate=0.042,
-        local_source=RateSource.CONFIGURED_CONSTANT,
-    ).compatible
-
-
-def test_unknown_rate_units_block_compatibility():
-    from src.config.pipeline import check_rate_compatibility
-
-    report = check_rate_compatibility(
-        vendor_units=VendorRateUnits.UNKNOWN,
-        vendor_value=4.2,
-        local_rate=0.042,
-        local_source=RateSource.CONFIGURED_CONSTANT,
-    )
-    assert not report.compatible
-    assert report.unknown_fields
-
-
-def test_vendor_rate_4_2_is_never_silently_local_4_2():
-    """4.2 as a percentage and 4.2 as a decimal differ by 100x in the gamma."""
-    from src.config.pipeline import check_rate_compatibility
-
-    assert not check_rate_compatibility(
-        vendor_units=VendorRateUnits.UNKNOWN,
-        vendor_value=4.2,
-        local_rate=4.2,
-        local_source=RateSource.CONFIGURED_CONSTANT,
+        vendor=DividendAssumption(
+            convention=DividendConvention.ZERO_DIVIDEND, value=0.0
+        ),
+        local=DividendAssumption(
+            convention=DividendConvention.ZERO_DIVIDEND, value=0.0
+        ),
     ).compatible
 
 
@@ -245,7 +209,7 @@ def test_incompatible_assumptions_block_the_research_calculation():
     with pytest.raises(PipelineConsistencyError, match=r"(?i)compat"):
         pipeline(
             pricing_mode="VENDOR_IV_LOCAL_GAMMA",
-            dividend_convention="UNKNOWN_VENDOR_DIVIDEND_CONVENTION",
+            dividend_convention="UNKNOWN_VENDOR_CONVENTION",
             annual_dividend=1.3,
             fail_on_incompatible_pricing=True,
         )
@@ -258,18 +222,21 @@ def test_the_report_lands_in_audit_metadata():
     assert "compatible" in payload["pricing_compatibility"]
 
 
-def test_local_iv_local_gamma_does_not_require_vendor_agreement():
-    """Nothing of the vendor's is used in the maths, so nothing must match."""
-    built = pipeline(pricing_mode="LOCAL_IV_LOCAL_GAMMA", iv_source="NBBO_MID_IV")
-    assert built.pricing_compatibility.compatible
+def test_local_iv_local_gamma_is_unreachable_until_a_solver_exists():
+    """v2.1.2 asserted this mode "does not require vendor agreement", which was
+    true of the mode and false of the configuration: the IV was still the
+    vendor's."""
+    with pytest.raises(ThetaDataConfigError):
+        pipeline(pricing_mode="LOCAL_IV_LOCAL_GAMMA", iv_source="NBBO_MID_IV")
 
 
-@pytest.mark.parametrize(
-    "mode",
-    ["VENDOR_IV_LOCAL_GAMMA", "LOCAL_IV_LOCAL_GAMMA", "VENDOR_GAMMA_VALIDATION"],
-)
-def test_every_documented_mode_is_selectable(mode):
-    assert pipeline(pricing_mode=mode).pricing_mode is PricingMode(mode)
+def test_the_reachable_modes_are_selectable():
+    """LOCAL_IV_LOCAL_GAMMA is documented but unreachable; see §1."""
+    assert pipeline().pricing_mode is PricingMode.VENDOR_IV_LOCAL_GAMMA
+    assert (
+        pipeline(pricing_mode="VENDOR_GAMMA_VALIDATION", tier="pro").pricing_mode
+        is PricingMode.VENDOR_GAMMA_VALIDATION
+    )
 
 
 def test_an_unknown_pricing_mode_is_refused():
@@ -280,6 +247,13 @@ def test_an_unknown_pricing_mode_is_refused():
 def test_the_report_lists_what_it_checked():
     report = pipeline().pricing_compatibility
     assert report.compatible_fields or report.unknown_fields
+
+
+def test_the_report_separates_unknown_from_incompatible():
+    """Different findings with different remedies: one needs a config change,
+    the other needs vendor documentation."""
+    report = pipeline().pricing_compatibility
+    assert set(report.unknown_fields).isdisjoint(report.incompatible_fields)
 
 
 # =============================================================================
@@ -335,6 +309,16 @@ def test_the_error_says_what_is_supported():
 
 
 def test_the_pipeline_exposes_no_execution_surface():
+    """Inspect the project's own API, not everything the runtime attaches.
+
+    ``dir()`` includes interpreter-provided attributes -- Python 3.13 adds
+    ``__replace__`` to frozen dataclasses, and "place" is a substring of it. A
+    safety check that fires on an unrelated language feature is a check people
+    learn to ignore.
+    """
     built = pipeline()
-    for banned in ("place_order", "submit", "execute", "broker", "position"):
-        assert not any(banned in name for name in dir(built)), banned
+    declared = {name for name in vars(type(built)) if not name.startswith("_")} | set(
+        type(built).__dataclass_fields__
+    )
+    for banned in ("place_order", "submit_order", "execute", "broker", "position_size"):
+        assert not any(banned in name for name in declared), banned

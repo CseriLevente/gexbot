@@ -268,3 +268,39 @@ models. Research mode (the default) reports the distribution and marks the
 snapshot uncalibrated; strict mode
 (`require_uniform_effective_model=True`) refuses the chain. Neither silently
 reports one model for a chain that had several.
+
+
+---
+
+## v2.1.3: vendor IV is vendor IV
+
+The correction at the centre of this release.
+
+**ThetaData's `NBBO_BID_IV`, `NBBO_MID_IV`, `NBBO_ASK_IV` and
+`VENDOR_DEFAULT_IV` are all vendor-computed.** The vendor runs the solver. That
+the option price it solved against was an NBBO bid, midpoint or ask describes an
+input to *their* calculation; it says nothing about the rate, dividend,
+expiration instant, day count or short-dated floor they used.
+
+| Mode | Reachable today | Requires vendor/local agreement |
+|---|---|---|
+| `VENDOR_IV_LOCAL_GAMMA` | yes, and it is the only mode a vendor IV can use | **yes** |
+| `VENDOR_GAMMA_VALIDATION` | yes, on Pro | yes, plus second-order greeks |
+| `LOCAL_IV_LOCAL_GAMMA` | **no**, needs `LOCALLY_SOLVED_MID_IV` | n/a |
+
+The pricing mode is derived from the IV source and validated against it. A
+caller cannot assert a mode that contradicts where the numbers came from.
+
+### Rate and dividend are compared by value, not by kind
+
+`RateAssumption` carries source, raw value, unit and normalised decimal. A
+vendor `4.2` matching a local `4.2` is the *bug* when the vendor's is a
+percentage. A null `rate_value` means the vendor applied its own default, whose
+number is not recoverable: `UNKNOWN_VENDOR_DEFAULT`, not "nothing to disagree
+about".
+
+`DividendAssumption` carries convention *and* value. Two continuous yields of
+0.02 and 0.01 are the same kind of quantity and different assumptions.
+
+**Explicitly not claimed:** that our gamma matches ThetaData's, or that Standard
+tier is sufficient. See OPEN_DECISIONS OD-3, OD-28, OD-29, OD-30.

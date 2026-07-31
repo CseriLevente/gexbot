@@ -116,13 +116,38 @@ thetadata:
   password_env: THETADATA_PASSWORD
   greeks_version: latest
   rate_type: sofr
+  # null means the parameter is OMITTED and the vendor applies its own default.
+  # The number it uses is then unknown, which blocks vendor-IV compatibility --
+  # see docs/OPEN_DECISIONS.md OD-22.
   rate_value: null
+  rate_units: UNKNOWN
   annual_dividend: null
+  dividend_convention: UNKNOWN_VENDOR_CONVENTION
   stock_price_source: vendor_default
   max_dte: 60
   strike_range: null
   min_time: null
   use_market_value: null
+
+  # --- these MUST match the top-level `model:` block ------------------------
+  #
+  # v2.1.2 shipped `model.iv_price_source: NBBO_MID_IV` next to a ThetaData
+  # section that defaulted to VENDOR_DEFAULT_IV. Two different implied
+  # volatilities, one file, no complaint -- because the pipeline was built from
+  # the ThetaData subsection alone and derived its own ModelSpec.
+  #
+  # ThetaDataResearchPipeline.from_loaded_config now refuses a file where these
+  # disagree.
+  iv_source: NBBO_MID_IV
+  underlying_price_source: synthetic
+  min_time_to_expiry_minutes: 60.0
+  expiration_rule: root_specific_settlement
+
+  # Derived from iv_source: every supported IV value is computed by ThetaData,
+  # including the NBBO ones. An NBBO *price* basis says nothing about who solved
+  # for the volatility. LOCAL_IV_LOCAL_GAMMA would require a local solver, which
+  # is not implemented.
+  pricing_mode: VENDOR_IV_LOCAL_GAMMA
 
 execution:
   broker: none

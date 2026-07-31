@@ -20,9 +20,9 @@ executed against a real Theta Terminal or a real subscription.
 | Raw response store (append-only, atomic, collision-safe) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
 | Real HTTP transport (`HttpxTransport`) | `IMPLEMENTED`, **never executed** |
 | Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED` — no contract-list endpoint is wired (OD-11) |
-| Live vendor response validated | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
-| Local gamma compared against vendor gamma | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
-| Whether the Standard tier suffices in practice | `NOT_YET_VALIDATED_WITH_LIVE_VENDOR_DATA` |
+| Live vendor response validated | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| Local gamma compared against vendor gamma | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| Whether the Standard tier suffices in practice | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 
 Everything above marked `TESTED_WITH_OFFLINE_FIXTURES` was verified against
 recorded, vendor-*shaped* payloads that this repository wrote. They are not
@@ -279,3 +279,35 @@ pipeline = ThetaDataResearchPipeline.from_config(config.thetadata)
 
 Nothing else builds a runtime and a `ModelSpec` separately, because that is how
 they came to disagree.
+
+
+---
+
+## v2.1.3: what the IV source actually tells you
+
+`NBBO_MID_IV` names the *price basis the vendor solved against*. It is not a
+local calculation. All four supported IV sources are vendor output, so every
+current session runs `VENDOR_IV_LOCAL_GAMMA` and carries real compatibility
+requirements.
+
+Build the session from the whole configuration file:
+
+```python
+from src.config.pipeline import ThetaDataResearchPipeline
+
+pipeline = ThetaDataResearchPipeline.from_loaded_config(loaded_config)
+```
+
+This checks the top-level `model:` block against the `thetadata:` block. v2.1.2
+read only the latter, and the repository's own `research.yaml` disagreed with
+itself as a result.
+
+### Tier requirements
+
+| Mode | Minimum tier | Why |
+|---|---|---|
+| `VENDOR_IV_LOCAL_GAMMA` | Standard | `implied_vol` arrives on the first-order greeks endpoint |
+| `VENDOR_GAMMA_VALIDATION` | Pro | gamma is a second-order greek |
+
+`contract_list_endpoint` is `UNCERTAIN` at every tier, since no such endpoint
+has been verified. That is why chain completeness stays `PARTIALLY_OBSERVED`.

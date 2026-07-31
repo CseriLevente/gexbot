@@ -28,10 +28,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
 from typing import Any
+
+from src.config.pipeline import load_bearing_unknowns
 
 __all__ = [
     "AdapterCertificationReadiness",
+    "CertificationState",
     "OpenInterestProvenance",
     "SpotProvenance",
     "assess_readiness",
@@ -94,11 +98,34 @@ class SpotProvenance:
         }
 
 
+class CertificationState(str, Enum):
+    """How far certification has actually got.
+
+    v2.1.2 had one boolean, which could only say "ready" -- and readiness for a
+    *capture* is not the same claim as a *certified adapter*. The distinction
+    matters because only one of them can be reached without spending money, and
+    the boolean invited reading the cheap one as the expensive one.
+    """
+
+    NOT_READY = "NOT_READY"
+    #: Offline checks pass. A capture may proceed. Nothing about vendor
+    #: behaviour has been confirmed, because nothing has been fetched.
+    READY_FOR_CAPTURE_ONLY = "READY_FOR_CAPTURE_ONLY"
+    #: Bytes exist and are linked to a snapshot; nobody has checked them yet.
+    CAPTURE_COMPLETED_NOT_VALIDATED = "CAPTURE_COMPLETED_NOT_VALIDATED"
+    #: A live capture happened AND a validation report exists. Unreachable in
+    #: this release by construction -- see ``assess_readiness``.
+    ADAPTER_CERTIFIED = "ADAPTER_CERTIFIED"
+
+
 @dataclass(frozen=True, slots=True)
 class AdapterCertificationReadiness:
     """Machine-readable answer to "may we spend a session on this?"."""
 
-    ready: bool
+    state: CertificationState = CertificationState.NOT_READY
+    #: Convenience for "no blockers". Kept as a field rather than a property so
+    #: the serialised report reads the same as the object.
+    ready: bool = False
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     verified_fields: tuple[str, ...] = ()
@@ -110,6 +137,7 @@ class AdapterCertificationReadiness:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "state": self.state.value,
             "ready": self.ready,
             "blockers": list(self.blockers),
             "warnings": list(self.warnings),
@@ -127,6 +155,8 @@ def assess_readiness(
     open_interest: OpenInterestProvenance | None = None,
     spot: SpotProvenance | None = None,
     raw_store: Any = None,
+    capture_manifest: Any = None,
+    validation_report: Any = None,
 ) -> AdapterCertificationReadiness:
     """Evaluate every blocker. Deterministic, sorted, and never cached."""
     blockers: list[str] = []
@@ -135,25 +165,63 @@ def assess_readiness(
     unverified: list[str] = []
 
     # -- pricing coherence ---------------------------------------------------
+    #
+    # Inspects the pipeline's *effective* compatibility report rather than
+    # trusting the pricing-mode enum. v2.1.2 could be told LOCAL_IV_LOCAL_GAMMA
+    # and would then skip this entirely -- which is how a vendor-IV session
+    # reported ready with every vendor convention unknown.
     report = pipeline.pricing_compatibility
-    if not report.compatible:
-        if pipeline.pricing_mode.mixes_vendor_and_local_inside_one_calculation:
-            blockers.append(
-                "pricing assumptions are not established for "
-                f"{pipeline.pricing_mode.value}: "
-                f"{len(report.incompatible_fields)} incompatible, "
-                f"{len(report.unknown_fields)} unknown. Capturing under these "
-                "settings produces numbers whose meaning cannot be stated."
-            )
-        else:
-            warnings.append(
-                "pricing compatibility is not fully established, but the "
-                f"selected mode ({pipeline.pricing_mode.value}) mixes no "
-                "vendor-computed quantity into a local calculation."
-            )
+    blocking_unknowns = load_bearing_unknowns(report)
+
+    if report.incompatible_fields:
+        blockers.append(
+            "pricing assumptions are incompatible for "
+            f"{pipeline.pricing_mode.value}: {list(report.incompatible_fields)}. "
+            "Capturing under these settings produces numbers whose meaning "
+            "cannot be stated."
+        )
+        unverified.append("pricing_compatibility")
+    elif blocking_unknowns:
+        # An unknown that changes gamma is not a caveat to note beside the
+        # result; it is the reason the result has no stated meaning.
+        blockers.append(
+            f"{len(blocking_unknowns)} load-bearing pricing assumption(s) are "
+            f"UNKNOWN for {pipeline.pricing_mode.value}: "
+            f"{[f.split(':')[0] for f in blocking_unknowns]}. Each changes the "
+            "gamma, so none may be left unresolved while claiming the vendor "
+            "and local models agree."
+        )
+        unverified.append("pricing_compatibility")
+    elif not report.compatible:
+        warnings.append(
+            "pricing compatibility is not fully established, but every "
+            "unresolved field is non-load-bearing for "
+            f"{pipeline.pricing_mode.value}."
+        )
         unverified.append("pricing_compatibility")
     else:
         verified.append("pricing_compatibility")
+
+    # -- the subscription actually exposes what the mode needs ---------------
+    capability = getattr(pipeline, "subscription_capability", None)
+    if capability is not None and not capability.satisfied:
+        blockers.append(
+            f"subscription tier {capability.tier.value} does not expose "
+            f"missing={list(capability.missing)} "
+            f"uncertain={list(capability.uncertain)}"
+        )
+        unverified.append("subscription_capability")
+    elif capability is not None:
+        verified.append("subscription_capability")
+
+    # -- credentials ---------------------------------------------------------
+    try:
+        pipeline.config.resolved_credentials()
+    except Exception as exc:
+        blockers.append(f"credentials are not available: {exc}")
+        unverified.append("credentials")
+    else:
+        verified.append("credentials")
 
     # -- open-interest provenance -------------------------------------------
     if open_interest is None or open_interest.as_of is None:
@@ -227,7 +295,21 @@ def assess_readiness(
     )
     unverified.append("chain_completeness")
 
+    # A live capture has to have happened, AND somebody has to have checked
+    # it, before "certified" means anything. Neither is possible offline, so
+    # ADAPTER_CERTIFIED is unreachable from here by construction rather than by
+    # policy -- there is no argument combination that produces it.
+    if blockers:
+        state = CertificationState.NOT_READY
+    elif capture_manifest is not None and validation_report is not None:
+        state = CertificationState.ADAPTER_CERTIFIED
+    elif capture_manifest is not None:
+        state = CertificationState.CAPTURE_COMPLETED_NOT_VALIDATED
+    else:
+        state = CertificationState.READY_FOR_CAPTURE_ONLY
+
     return AdapterCertificationReadiness(
+        state=state,
         ready=not blockers,
         blockers=tuple(sorted(blockers)),
         warnings=tuple(sorted(warnings)),

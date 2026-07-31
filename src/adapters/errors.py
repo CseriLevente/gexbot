@@ -26,6 +26,7 @@ __all__ = [
     "ThetaDataHTTPError",
     "ThetaDataRateLimitError",
     "ThetaDataRawStoreError",
+    "ThetaDataResponseTooLargeError",
     "ThetaDataRetryExhaustedError",
     "ThetaDataSchemaError",
     "ThetaDataVendorError",
@@ -92,6 +93,17 @@ class ThetaDataSchemaError(ThetaDataError):
 
 class ThetaDataVendorError(ThetaDataHTTPError):
     """The vendor returned an error document, or a non-success status."""
+
+
+class ThetaDataResponseTooLargeError(ThetaDataError):
+    """A response exceeded the configured cap.
+
+    Public because the cap is a configuration decision the caller made, and
+    they need to catch it. v2.1.2 raised ``ResponseTooLargeError(RuntimeError)``
+    from the transport, which escaped ``except ThetaDataError`` -- so the one
+    failure most likely to be triggered by a deliberate setting was the one a
+    caller could not catch with the adapter's own base class.
+    """
 
 
 class ThetaDataRawStoreError(ThetaDataError):

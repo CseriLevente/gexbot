@@ -142,17 +142,30 @@ def test_a_diagnostic_still_runs_without_a_capture():
     assert snapshot.meta["trusted"] is False
 
 
-def test_the_capture_profile_cannot_silently_compute_a_trusted_gex():
-    """The shipped profile has no observations, so it must refuse."""
+def test_the_capture_profile_cannot_silently_compute_a_trusted_gex(tmp_path):
+    """The shipped profile has no observations, so it must refuse.
+
+    The profile's ``raw_capture_path`` is redirected at ``tmp_path``. It names
+    ``artifacts/raw``, which is where a *real* session writes; a test capturing
+    there puts fixture bytes into the production audit trail, and 573 of them
+    reached a v2.1.5 release archive that way.
+    """
+    import dataclasses
     import pathlib
 
     from src.config.pipeline import ThetaDataResearchPipeline
     from src.config.schema import load_config
     from tests.certification_fixtures import vendor_transport
 
+    loaded = load_config(pathlib.Path("config/thetadata_capture.yaml"))
+    redirected = dataclasses.replace(
+        loaded,
+        thetadata=dataclasses.replace(
+            loaded.thetadata, raw_capture_path=tmp_path / "raw"
+        ),
+    )
     pipeline = ThetaDataResearchPipeline.from_loaded_config(
-        load_config(pathlib.Path("config/thetadata_capture.yaml")),
-        transport=vendor_transport(),
+        redirected, transport=vendor_transport()
     )
     with pytest.raises(PipelineConsistencyError):
         pipeline.compute_trusted_gex(chain_for(pipeline))

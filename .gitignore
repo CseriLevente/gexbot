@@ -32,6 +32,11 @@ research_output/
 # Raw vendor responses captured at runtime. Checked-in fixtures live under
 # tests/fixtures/vendor/ and are NOT covered by this rule.
 raw_responses/
+# The configured capture destination. A real run writes vendor bytes here; a
+# test run writes fixture bytes here. Neither belongs in the repository or in a
+# release archive, and 573 of the latter reached a build before this line
+# existed -- see tests/unit/test_release_integrity.py, which now fails on them.
+artifacts/
 
 # Editors / OS
 .vscode/

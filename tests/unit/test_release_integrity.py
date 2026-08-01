@@ -258,6 +258,34 @@ def test_build_artefacts_are_not_tracked(in_git_repo):
     assert [path for path in tracked_files() if noise.search(path)] == []
 
 
+def test_no_captured_vendor_payload_is_tracked(in_git_repo):
+    """The capture destination is not part of the source.
+
+    A real session writes vendor bytes to ``artifacts/raw``. Before v2.1.5 the
+    test suite wrote fixture bytes to the same place, and 573 of them reached a
+    release archive. Captured payloads are evidence about one session: they
+    belong beside that session, not in the repository, and never in a build
+    somebody downloads.
+    """
+    captured = [
+        path
+        for path in tracked_files()
+        if path.startswith("artifacts/") or path.endswith(".raw")
+    ]
+    assert captured == []
+
+
+def test_the_archive_carries_no_captured_payloads(in_git_repo, tmp_path):
+    archive = tmp_path / "release.zip"
+    if git("archive", "--format=zip", f"--output={archive}", "HEAD").returncode != 0:
+        pytest.skip("git archive unavailable")
+    import zipfile
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+    assert not [n for n in names if n.startswith("artifacts/") or n.endswith(".raw")]
+
+
 def test_the_archive_contains_the_source_the_tests_and_the_docs(in_git_repo, tmp_path):
     archive = tmp_path / "release.zip"
     result = git("archive", "--format=zip", f"--output={archive}", "HEAD")

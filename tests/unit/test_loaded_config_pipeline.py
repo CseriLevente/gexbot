@@ -23,6 +23,7 @@ import pytest
 from src.adapters.transport import FakeTransport
 from src.config.pipeline import PipelineConsistencyError, ThetaDataResearchPipeline
 from src.config.schema import load_config, parse_config
+from tests.certification_fixtures import CAPTURE_ROOT
 
 CONFIG_DIR = pathlib.Path(__file__).resolve().parents[2] / "config"
 
@@ -51,7 +52,10 @@ def loaded_with(**thetadata_overrides):
         # has to keep what it fetches -- a paid session whose responses are
         # discarded produces numbers nobody can re-derive.
         "raw_capture_enabled": True,
-        "raw_capture_path": "artifacts/raw",
+        # A temporary directory, not the configured production destination: a
+        # test that captures where a real session captures contaminates the
+        # audit trail it is checking.
+        "raw_capture_path": str(CAPTURE_ROOT / "raw"),
     }
     thetadata.update(thetadata_overrides)
     return parse_config(

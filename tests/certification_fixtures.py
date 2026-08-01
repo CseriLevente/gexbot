@@ -12,6 +12,8 @@ which is why the missing evidence checks passed for a year.
 
 from __future__ import annotations
 
+import pathlib
+import tempfile
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -27,8 +29,20 @@ from tests.pricing_evidence import resolved_settings
 AS_OF = eastern(2026, 3, 17, 11, 0)
 CAPTURED_AT = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
 
-#: Raw capture is mandatory for capture readiness (v2.1.4 §6).
-CAPTURE_SETTINGS = {"raw_capture_enabled": True, "raw_capture_path": "artifacts/raw"}
+#: Raw capture is mandatory for capture readiness (v2.1.4 §6), and a pipeline
+#: built from these settings writes real files when it fetches.
+#:
+#: The path is a per-session temporary directory, **not** ``artifacts/raw``.
+#: Pointing it at the configured production destination is what put 573
+#: fixture payloads into a v2.1.5 release archive: the tests captured into the
+#: same namespace a real session would use, and nothing distinguished them
+#: afterwards. A test that writes where production writes is a test that
+#: contaminates the audit trail it is checking.
+CAPTURE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="gex-test-capture-"))
+CAPTURE_SETTINGS = {
+    "raw_capture_enabled": True,
+    "raw_capture_path": str(CAPTURE_ROOT / "raw"),
+}
 
 #: Vendor-shaped bodies, one per endpoint the plan requires. Column names match
 #: ``RESPONSE_FIELDS``, because the validator re-reads these to observe a field

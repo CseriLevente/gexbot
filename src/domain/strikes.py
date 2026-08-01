@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
-__all__ = ["canonical_strike", "parse_strike"]
+__all__ = ["canonical_strike", "canonical_strike_of", "parse_strike"]
 
 
 def parse_strike(value: str | float | None) -> tuple[Decimal | None, str | None]:
@@ -49,3 +49,23 @@ def canonical_strike(value: Decimal) -> str:
     if normalised == normalised.to_integral_value():
         normalised = normalised.quantize(Decimal(1))
     return f"{normalised:f}"
+
+
+def canonical_strike_of(value: float) -> str:
+    """The same spelling, starting from a float.
+
+    ``str()`` first, deliberately. Python's float repr is the shortest string
+    that round-trips, so ``str(4900.5)`` is ``'4900.5'`` -- the number a human
+    would read -- whereas ``Decimal(4900.5)`` is the exact binary value, which
+    for most strikes is a forty-digit tail nobody wrote down.
+
+    v2.1.3 formatted the two sides of the identity differently:
+    ``OptionContract.canonical_id`` used ``f"{strike:.4f}"`` while
+    ``contract_identity`` went ``Decimal -> float -> f"{:.4f}"``. They agreed for
+    every strike either side happened to be tested with, which is not the same as
+    agreeing. A strike needing more than four decimals, or one whose float
+    round-trip lands a bit low, produced a "missing" contract and an
+    "unexpected" one for the same instrument -- and the completeness measure
+    reported a shortfall that did not exist.
+    """
+    return canonical_strike(Decimal(str(value)))

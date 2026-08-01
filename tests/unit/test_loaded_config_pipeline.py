@@ -47,6 +47,11 @@ def loaded_with(**thetadata_overrides):
         "underlying_price_source": "vendor_index_snapshot",
         "min_time_to_expiry_minutes": 60.0,
         "expiration_rule": "root_specific_settlement",
+        # options_source is `thetadata` below, and since v2.1.4 such a profile
+        # has to keep what it fetches -- a paid session whose responses are
+        # discarded produces numbers nobody can re-derive.
+        "raw_capture_enabled": True,
+        "raw_capture_path": "artifacts/raw",
     }
     thetadata.update(thetadata_overrides)
     return parse_config(

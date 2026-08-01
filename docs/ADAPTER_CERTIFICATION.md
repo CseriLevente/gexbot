@@ -2,11 +2,16 @@
 
 Status: `IMPLEMENTED` · `TESTED_SYNTHETICALLY` · `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 
-**The shipped default configuration is `NOT_READY`**, blocked on six
-load-bearing vendor pricing unknowns. That is the correct answer to what is
-currently known, not a defect. Resolving them, by reading vendor
-documentation and stating the answers in the configuration, moves the state
-to `READY_FOR_CAPTURE_ONLY`.
+**The shipped default configuration is `READY_FOR_RAW_CAPTURE_ONLY`.** Six
+load-bearing vendor pricing unknowns block any *calculation* from that session,
+and none of them block the capture itself -- capturing is how several of them get
+answered. v2.1.3 refused the capture too, which made the unknowns permanent.
+
+Resolving them means recording a typed `PricingAssumptionAttestation` per
+dimension: where the answer came from, a reference to it, and when it was
+established. An attestation cannot overturn a measured mismatch, and one sourced
+from `VENDOR_DOCUMENTATION` never reaches `ADAPTER_CERTIFIED` -- documentation
+records what the vendor says it does.
 
 > **This is not a trading readiness check.** This repository has no broker, no
 > order type and no execution path. Certification readiness confers none of
@@ -33,24 +38,54 @@ readiness = assess_readiness(
     open_interest=oi_provenance,
     spot=spot_provenance,
     raw_store=store,
+    capture=None,               # CaptureVerification, from verify_capture()
+    validation=None,            # AdapterValidationReport, bound to its manifest
 )
 if not readiness.ready:
-    print(readiness.blockers)
+    print(readiness.blockers)             # cannot capture
+if not readiness.calculation_trusted:
+    print(readiness.calculation_blockers)  # can capture; cannot compute
 ```
+
+`capture` and `validation` are **typed and rejected outright if they are not**.
+In v2.1.3 both were `Any` and both were tested with `is not None`, so
+`assess_readiness(capture_manifest=object(), validation_report=object())`
+returned `ADAPTER_CERTIFIED`.
 
 ---
 
-## Blockers
+## Two kinds of blocker
 
-A blocker means the capture would produce data whose meaning cannot be stated.
+The report answers two questions, and v2.1.3 ran them through one list. *May we
+capture?* and *may we trust a number computed from the capture?* have different
+answers and different remedies.
+
+### Capture blockers -- `readiness.blockers`
+
+The capture itself would produce data whose meaning cannot be stated.
 
 | Blocker | Why it blocks |
 |---|---|
-| Pricing assumptions not established | Only under `VENDOR_IV_LOCAL_GAMMA`, which mixes a vendor-computed IV into a local gamma. Five vendor-side conventions are undocumented (see below). |
 | Missing open-interest provenance | Open interest is the weight on every GEX term. A capture with no settlement date cannot be interpreted afterwards. |
 | Missing spot source or timestamp | Every gamma is computed against this print. Without its clock there is no way to show it was contemporaneous with the chain. |
 | Spot skew beyond tolerance | The chain and the underlying describe different moments, so the pairing is not meaningful. |
+| Raw capture disabled, or no path, or no store | The bytes are the deliverable. A paid session whose responses are discarded produces numbers nobody can re-derive. |
 | Raw store not clean | Starting a paid session on top of an inconsistent audit trail makes new evidence hard to separate from old. |
+| Subscription tier cannot serve the request | The mode is a wish. Discovered at the first paid request otherwise. |
+| Credentials unavailable | An unauthenticated client turns a configuration error into an unexplained 401. |
+
+### Calculation blockers -- `readiness.calculation_blockers`
+
+The bytes are worth having; a gamma computed from them would not have a stated
+meaning.
+
+| Blocker | Why it blocks |
+|---|---|
+| A load-bearing pricing dimension is `UNKNOWN` | Each one changes the gamma. The capture is permitted, and is how several of them get answered. |
+| A load-bearing pricing dimension is `MISMATCHED` | We know the two models differ, so mixing them produces a number that is wrong rather than merely unexplained. |
+| `hard_failures` on the assessment | Not about one dimension -- an unsupported mode, an attestation aimed at a mismatch. Always honoured. |
+| The capture manifest does not match its store | A manifest listing three records against a store holding two cannot say which bytes produced which number. |
+| The validation report describes a different manifest | A report about another session is not a report about this one. |
 
 ## Warnings
 
@@ -59,7 +94,8 @@ refuse it.
 
 | Warning | Why it is not a blocker |
 |---|---|
-| Caller-supplied open-interest date | Usable, provided the report says it was ours rather than the vendor's. Listed in `unverified_fields`. |
+| `PLANNED` open-interest date or spot | Usable, provided the report says it was ours rather than the vendor's. Listed in `unverified_fields`, with the grade in `provenance_grades`. |
+| A load-bearing dimension resting on `VENDOR_DOCUMENTATION` | Enough to permit a calculation, not enough to certify. Documentation records what the vendor says it does. |
 | Chain completeness will be `PARTIALLY_OBSERVED` | No verified contract-list endpoint is wired. **The session is how that endpoint gets identified** — refusing to capture would make the problem permanent. See [OPEN_DECISIONS.md](OPEN_DECISIONS.md) OD-11. |
 | Pricing compatibility unestablished in a local-only mode | Nothing vendor-computed enters the maths, so nothing has to agree. |
 
@@ -76,9 +112,19 @@ v2.1.1 accepted a caller-supplied date and stored it in the same field as an
 observed one, so a snapshot could not distinguish *"the vendor said 16 March"*
 from *"we assumed 16 March"*.
 
-`OpenInterestProvenance` now carries `source` and `caller_supplied`, and
-`is_verified` is true only when the vendor supplied it. A caller-supplied date
-is accepted and surfaced in `unverified_fields` — never described as observed.
+`OpenInterestProvenance` carries `source` and an optional
+`ProvenanceEvidence`, and its `grade` is **derived** from what it can point at.
+v2.1.3 used a `caller_supplied` boolean, which is the caller describing its own
+confidence; a claim to have observed something is not an observation.
+
+| Grade | Means |
+|---|---|
+| `PLANNED` | what the configuration intends. No response has been seen. |
+| `OBSERVED` | read out of a stored raw record, which the evidence names by id, field and manifest hash. |
+| `VALIDATED` | observed, and checked by a validation report bound to that capture. |
+
+A `PLANNED` date is accepted and surfaced in `unverified_fields` — never
+described as observed.
 
 **What would settle it:** one live response inspected for a settlement-date
 field, or vendor documentation stating the convention.
@@ -99,16 +145,36 @@ real session.
 
 ## Pricing compatibility
 
-Only `VENDOR_IV_LOCAL_GAMMA` requires it, because it is the only mode that mixes
-vendor and local quantities inside one calculation.
+Two independent questions, and v2.1.3 answered them with one enum.
+
+**Where does the IV come from?** — `IvGammaPricingMode`.
 
 | Mode | Requires agreement | Status |
 |---|---|---|
-| `LOCAL_IV_LOCAL_GAMMA` | no | `IMPLEMENTED` |
-| `VENDOR_GAMMA_VALIDATION` | no — the vendor gamma is compared, not aggregated | `IMPLEMENTED` |
 | `VENDOR_IV_LOCAL_GAMMA` | **yes** | `IMPLEMENTED`, blocked while conventions are `UNKNOWN` |
+| `LOCAL_IV_LOCAL_GAMMA` | no | `DECLARED_BUT_UNREACHABLE` — needs a local IV solver |
 
-Five vendor-side dimensions are undocumented and are reported as `UNKNOWN`
+**What do we do with the vendor's gamma?** — `VendorGammaPolicy`.
+
+| Policy | Needs | Aggregated into GEX |
+|---|---|---|
+| `DISABLED` | nothing extra | no |
+| `COMPARE_ONLY` | Pro (second-order greeks) | **no** — compared, never aggregated |
+
+The two are orthogonal. `VENDOR_GAMMA_VALIDATION` used to be a third *mode*, so
+switching the comparison on moved a session out of `VENDOR_IV_LOCAL_GAMMA` and
+out of the checks it still needed — vendor IV was still feeding the local gamma.
+The old value is now refused at load time rather than translated, because the
+checks it skipped now run and may refuse to compute.
+
+Each dimension is a typed `PricingDimensionResult`: a `PricingDimension`, a
+`CompatibilityStatus`, a machine-readable code, the two values, and optional
+evidence. Whether a dimension is load-bearing is a property of the dimension.
+v2.1.3 stored findings as sentences and decided which mattered by searching
+those sentences for a field name, so rewording a message turned a blocker into a
+warning.
+
+Seven vendor-side dimensions are undocumented and are reported as `UNKNOWN`
 rather than assumed compatible:
 
 - the settlement instant the vendor used for its own IV solve
@@ -149,6 +215,7 @@ operator silently got a different number than the one they selected.
 ## Before the session
 
 - [ ] `assess_readiness(...).ready` is `True`
+- [ ] `calculation_blockers` is read and understood: a capture may be permitted while a calculation from it is not
 - [ ] every entry in `warnings` is recorded alongside the capture
 - [ ] `raw_capture_enabled: true` with a writable `raw_capture_path`
 - [ ] `verify_integrity()` on the store is clean **before** starting
@@ -169,19 +236,23 @@ operator silently got a different number than the one they selected.
 
 ---
 
-## The state machine (v2.1.3)
+## The state machine (v2.1.4)
 
 | State | Means | Reachable offline |
 |---|---|---|
-| `NOT_READY` | at least one blocker | yes |
-| `READY_FOR_CAPTURE_ONLY` | offline checks pass; nothing about vendor behaviour is confirmed | yes |
-| `CAPTURE_COMPLETED_NOT_VALIDATED` | bytes exist and are linked to a snapshot; nobody has checked them | no |
-| `ADAPTER_CERTIFIED` | a live capture **and** a validation report exist | no |
+| `NOT_READY` | at least one capture blocker | yes |
+| `READY_FOR_RAW_CAPTURE_ONLY` | the capture may proceed. Says nothing about whether the resulting numbers could be trusted | yes |
+| `RAW_CAPTURE_COMPLETED` | bytes exist and the manifest matches the store. Pricing may still be unknown | no |
+| `CALCULATION_NOT_VALIDATED` | verified capture **and** resolved pricing, so a calculation is permitted — but nobody has checked its output | no |
+| `CALCULATION_VALIDATED` | a validation report bound to this capture passed every check | no |
+| `ADAPTER_CERTIFIED` | all of the above, plus observed provenance and every load-bearing convention settled by a live comparison | no |
 
-`ADAPTER_CERTIFIED` is unreachable without both, by construction: there is no
-argument combination to `assess_readiness` that produces it offline.
+Each rung needs the one below it *and* its own evidence. `ADAPTER_CERTIFIED` is
+unreachable from anything this repository currently ships: every attestation it
+carries is `VENDOR_DOCUMENTATION`, and only `LIVE_COMPARISON` observes what the
+vendor actually did.
 
-## Why the default is NOT_READY
+## Why the default cannot compute
 
 `VENDOR_IV_LOCAL_GAMMA` is the only mode a vendor-computed IV can use, and it
 mixes the vendor's IV into our gamma. Six vendor conventions are undocumented,

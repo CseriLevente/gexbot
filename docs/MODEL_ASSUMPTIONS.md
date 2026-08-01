@@ -238,13 +238,28 @@ from the parser version `thetadata-v3-parser/2.1.1`
 (`src/adapters/raw_store.py`). Both enter the replay hash; they move for
 different reasons.
 
-### Pricing modes
+### Pricing modes, and the policy that is not one
+
+Two independent questions. v2.1.3 answered both with one enum, so switching the
+vendor-gamma comparison on moved a session out of `VENDOR_IV_LOCAL_GAMMA` and
+out of the checks it still needed.
+
+`IvGammaPricingMode` -- where the IV comes from:
 
 | Mode | Vendor quantities inside the calculation | Agreement required |
 |---|---|---|
-| `LOCAL_IV_LOCAL_GAMMA` | none | no |
-| `VENDOR_GAMMA_VALIDATION` | compared, not aggregated | no |
 | `VENDOR_IV_LOCAL_GAMMA` | vendor IV feeds local gamma | **yes** |
+| `LOCAL_IV_LOCAL_GAMMA` | none | no (unreachable: needs a local solver) |
+
+`VendorGammaPolicy` -- what happens to the vendor's gamma, alongside:
+
+| Policy | Fetched | Aggregated into GEX |
+|---|---|---|
+| `DISABLED` | no | no |
+| `COMPARE_ONLY` | yes, on Pro | **no** |
+
+No policy aggregates vendor gamma. That would be a third policy with its own
+compatibility requirements, and it has not been built.
 
 ### What we cannot infer about the vendor
 
@@ -254,9 +269,16 @@ vendor `rate_value: 4.2` is either 4.2% or 420%, and `annual_dividend` is either
 cash or a yield. Neither pair is interchangeable, and both would silently change
 every gamma.
 
-Five further conventions are undocumented and reported as `UNKNOWN`: the
+Seven further conventions are undocumented and reported as `UNKNOWN`: the
 vendor's settlement instant, day count, short-dated floor, solved-against price,
-and solver version.
+the underlying print it used and when it read it, and its solver version. Six of
+those are load-bearing; the solver version is a warning, because two solver
+versions agreeing on every input should agree on the answer -- and if they do
+not, one of the *other* dimensions is what actually differs.
+
+Each is a typed `PricingDimensionResult` rather than a sentence. Whether a
+dimension is load-bearing is a property of the dimension, so it cannot be
+changed by rewording the message that describes it.
 
 **Explicitly not claimed:** that our gamma matches ThetaData's. See
 OPEN_DECISIONS OD-3, OD-22, OD-23, OD-24.
@@ -285,8 +307,10 @@ expiration instant, day count or short-dated floor they used.
 | Mode | Reachable today | Requires vendor/local agreement |
 |---|---|---|
 | `VENDOR_IV_LOCAL_GAMMA` | yes, and it is the only mode a vendor IV can use | **yes** |
-| `VENDOR_GAMMA_VALIDATION` | yes, on Pro | yes, plus second-order greeks |
 | `LOCAL_IV_LOCAL_GAMMA` | **no**, needs `LOCALLY_SOLVED_MID_IV` | n/a |
+
+(v2.1.3 listed `VENDOR_GAMMA_VALIDATION` here as a third row. It is not a mode;
+see the two tables above.)
 
 The pricing mode is derived from the IV source and validated against it. A
 caller cannot assert a mode that contradicts where the numbers came from.
@@ -304,3 +328,36 @@ about".
 
 **Explicitly not claimed:** that our gamma matches ThetaData's, or that Standard
 tier is sufficient. See OPEN_DECISIONS OD-3, OD-28, OD-29, OD-30.
+
+
+---
+
+## v2.1.4: what "resolved" means
+
+A vendor convention moves from `UNKNOWN` to settled by exactly one production
+route: a `PricingAssumptionAttestation`. Constructing one requires naming where
+the answer came from, a reference to it, and when it was established. A caller
+who cannot supply those has not resolved anything, and there is no boolean form.
+
+| `EvidenceSource` | What it records | Enough to compute | Enough to certify |
+|---|---|---|---|
+| `LOCAL_CONFIGURATION` | both sides are ours; there is no vendor claim to be wrong about | yes | yes |
+| `VENDOR_DOCUMENTATION` | what the vendor says it does | yes, with the caveat recorded | **no** |
+| `LIVE_COMPARISON` | what the vendor did, measured against a stored capture | yes | yes |
+
+An attestation cannot overturn a `MISMATCHED` dimension. It says "the question
+has been answered", not "the disagreement does not matter", and a measured
+disagreement is not a question. Attempting it produces a hard failure.
+
+**Nothing in this repository carries `LIVE_COMPARISON` evidence.** No comparison
+has been run.
+
+## v2.1.4: dividends state their convention
+
+`dividend_yield_source: zero` and `dividend_yield_source: configured_constant`
+with a value of `0.0` are numerically identical and declaratively different. The
+compatibility check compares declarations, so a config saying `ZERO_DIVIDEND`
+alongside a model calling the same thing a continuous yield reads as a
+convention mismatch -- correctly, because that is what the fields say.
+`to_model_spec` now derives `DividendSource.ZERO` from a stated zero rather than
+flattening it into a constant.

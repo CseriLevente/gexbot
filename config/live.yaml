@@ -118,6 +118,12 @@ thetadata:
   # Names of environment variables, never values.
   username_env: THETADATA_USERNAME
   password_env: THETADATA_PASSWORD
+  # A profile that fetches from ThetaData must keep what it fetched. Enforced by
+  # the loader, and enforced here too even though this profile cannot run: the
+  # file is a template, and a template is copied.
+  raw_capture_enabled: true
+  raw_capture_path: artifacts/raw
+
   greeks_version: latest
   rate_type: sofr
   rate_value: null

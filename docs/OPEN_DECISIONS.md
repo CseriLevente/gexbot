@@ -478,9 +478,14 @@ real session.
 **The question.** Which settlement date does ThetaData's open interest belong
 to?
 
-**Current behaviour.** `OpenInterestProvenance` records `source` and
-`caller_supplied`. A caller-supplied date is accepted and listed in
-`unverified_fields`; it is never described as observed.
+**Current behaviour.** `OpenInterestProvenance` records `source` and an
+optional `ProvenanceEvidence`, and its grade is *derived*: `PLANNED` without
+evidence, `OBSERVED` when a stored raw record is named, `VALIDATED` when a
+validation report bound to that capture has checked it. A `PLANNED` date is
+accepted and listed in `unverified_fields`; it is never described as observed.
+
+v2.1.3 recorded a `caller_supplied` boolean, which is the caller describing its
+own confidence rather than pointing at anything.
 
 **Why it matters.** Open interest is the weight on every GEX term.
 
@@ -533,12 +538,18 @@ settlement instant for its own solve, its day count, its short-dated floor,
 which price it solved against, which underlying print it used, and its solver
 version.
 
-Each changes gamma, so each is load-bearing and each blocks certification. They
-are not caveats printed beside a result; they are the reason the result has no
-stated meaning.
+Each changes gamma, so each is load-bearing and each blocks any *calculation*.
+They are not caveats printed beside a result; they are the reason the result has
+no stated meaning.
 
-**What would settle it.** Vendor documentation, or the certification capture
-plus a local/vendor comparison.
+Since v2.1.4 they do **not** block the raw capture. v2.1.3 refused it, which
+made the unknowns permanent: the capture is how several of them get answered.
+
+**What would settle it.** Vendor documentation, recorded as a
+`PricingAssumptionAttestation` with `source: VENDOR_DOCUMENTATION` -- enough to
+permit a calculation, with the caveat recorded, and never enough to certify. Or
+the capture plus a local/vendor comparison, recorded as `LIVE_COMPARISON`, which
+is the only evidence of what the vendor actually did.
 
 ---
 
@@ -559,10 +570,57 @@ first paid request.
 
 ## 31. Spot/OI provenance and the certification states - **UNCHANGED**
 
-OD-25 and OD-26 still stand. v2.1.3 adds the state machine around them:
-`NOT_READY`, `READY_FOR_CAPTURE_ONLY`, `CAPTURE_COMPLETED_NOT_VALIDATED`,
+OD-25 and OD-26 still stand. The state machine around them:
+`NOT_READY`, `READY_FOR_RAW_CAPTURE_ONLY`, `RAW_CAPTURE_COMPLETED`,
+`CALCULATION_NOT_VALIDATED`, `CALCULATION_VALIDATED`,
 `ADAPTER_CERTIFIED`. The last is unreachable without both a live capture and a
 validation report, by construction rather than by policy.
+
+---
+
+## 32. Vendor-gamma aggregation - **NOT BUILT, deliberately**
+
+**The question.** Should the vendor's gamma ever be aggregated into the GEX
+totals, rather than only compared against ours?
+
+**Current behaviour.** No. `VendorGammaPolicy` has two values, `DISABLED` and
+`COMPARE_ONLY`, and `aggregates_vendor_gamma` is `False` for both. The pipeline
+refuses an engine configured with `prefer_vendor_gamma=True`.
+
+**Why not.** Aggregating the vendor's gamma is a different policy with its own
+compatibility requirements -- it would need the vendor's *gamma* conventions
+established, not just its IV conventions, and the same seven undocumented
+dimensions apply again one level down.
+
+v2.1.3 expressed this as a `MODE_CAPABILITIES` table restating what the enum
+already said, which could drift from it. It is now a property on the enum.
+
+**What would change it.** A live comparison showing the two gammas agree, plus a
+stated reason to prefer the vendor's.
+
+---
+
+## 33. Attestations are a resolution path, not a bypass - **BY DESIGN**
+
+**The question.** If `UNKNOWN` blocks a calculation and the vendor documents
+nothing, how does anything ever get computed?
+
+**Current behaviour.** A `PricingAssumptionAttestation` moves one dimension from
+`UNKNOWN` to `MATCHED`. Constructing one requires an `EvidenceSource`, a
+non-empty reference and a date; there is no boolean form and no shorthand.
+
+Three guards keep it from being a switch:
+
+* it cannot overturn a `MISMATCHED` dimension -- attempting it is a hard
+  failure, because a measured disagreement is not an open question;
+* the `EvidenceSource` is carried into the certification report, so a reader can
+  see that a dimension rests on documentation rather than observation;
+* only `LIVE_COMPARISON` reaches `ADAPTER_CERTIFIED`.
+
+**The residual risk.** Somebody writes an attestation for an answer nobody
+established. Nothing in code can prevent that; the reference and the date exist
+so that a reviewer can check. `config/thetadata_capture.yaml` ships with an
+empty list, and a test asserts it stays empty until a comparison has been run.
 
 ---
 

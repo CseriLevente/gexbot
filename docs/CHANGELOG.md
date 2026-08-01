@@ -1,5 +1,108 @@
 # Changelog
 
+## 2.1.4 - certification state and provenance integrity
+
+v2.1.3 built the machinery for deciding whether vendor numbers may be trusted.
+v2.1.4 is about the machinery being *checkable*. Three things ran through it:
+
+**Evidence was untyped, so it could be fabricated by accident.**
+`assess_readiness(capture_manifest=object(), validation_report=object())`
+returned `ADAPTER_CERTIFIED`. Both parameters were `Any` and both were tested
+with `is not None`, so the strongest claim in the repository was two truthy
+values away. Provenance had the same shape one level down: a `caller_supplied`
+boolean is the caller describing its own confidence.
+
+**Decisions were made out of prose.** Compatibility findings were stored as
+sentences and the load-bearing ones were identified by searching those sentences
+for a field name. Rewording a message turned a blocker into a warning, and it
+also moved the replay digest of a calculation that had not changed.
+
+**Two questions shared one enum, and one ladder.** `VENDOR_GAMMA_VALIDATION` was
+a third `PricingMode`, so asking to compare the vendor's gamma moved a session
+*out of* `VENDOR_IV_LOCAL_GAMMA` -- and out of the vendor-IV checks it still
+needed, because vendor IV still fed the local gamma. Separately, capture
+readiness and calculation trust shared a state ladder, so an unresolved vendor
+convention blocked the capture that would have resolved it.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.3 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | `VENDOR_GAMMA_VALIDATION` was a third `PricingMode` | Selecting it skipped the vendor-IV compatibility checks while vendor IV still fed the local gamma | `IvGammaPricingMode` and `VendorGammaPolicy` are separate fields; the assessment runs on the IV question regardless of the gamma policy |
+| 2 | Compatibility was prose, and load-bearing was decided by substring | Rewording a message flipped a blocker to a warning, and moved the replay hash | Typed `PricingDimension` / `CompatibilityStatus` / `PricingDimensionResult`; `compatible` is derived and `hard_failures` is honoured |
+| 3 | One ladder for capture readiness and calculation trust | An unresolved vendor convention blocked the capture that would resolve it | Six states; unknown pricing permits a raw capture and never a trusted calculation |
+| 4 | `capture_manifest: Any`, tested `is not None` | `object()` counted as a capture | `verify_capture` checks the manifest against the store; `assess_readiness` rejects anything else outright |
+| 5 | `validation_report: Any`, tested `is not None` | A report about a different session counted the same as one about this one | `AdapterValidationReport` bound to a `manifest_hash`, with checks that can fail |
+| 6 | Raw capture was optional for capture readiness | `READY_FOR_CAPTURE_ONLY` with capture disabled is the one thing it was not ready for | Capture enabled, a path, and a healthy store are all required |
+| 7 | Four optional steps to compute from a session, plus `request=` | Omitting `pipeline=pipeline` produced a plausible snapshot missing its provenance; `request=` could fetch something other than what was assessed | `pipeline.fetch_chain()`, `.compute_gex()`, `.capture_and_compute()`; no request or model-parameter overrides |
+| 8 | Nothing stopped a ThetaData profile carrying synthetic provenance | Real vendor gammas against an underlying labelled invented | `config/thetadata_capture.yaml`, and a loader rule that refuses the combination |
+| 9 | `ThetaDataConfigError` was a bare `ValueError` | `except ThetaDataError` caught the runtime failures and missed the configuration ones | Configuration errors join the hierarchy, keeping `ValueError` as a second base |
+| 10 | `ThetaDataConfig()` constructed with four fields at `None` | `as_dict()` raised `AttributeError` from inside the audit trail | Valid by construction: derived fields resolved and coherence checked in `__post_init__` |
+| 11 | `contract_identity` went `Decimal -> float -> .4f` | Two formatters that agreed on tested strikes, not by construction | Both sides call `canonical_strike`; `SPXW:2026-03-20:4900:call` |
+| 12 | Prose entered the replay hash | A documentation edit moved a digest; a changed finding with the same wording did not | Prose keys stripped from metadata before hashing; semantic payloads carry codes, statuses and values |
+| 13 | CI `push` triggered on `main` | The repository's branch is `master`, so no job had ever run on a push | Triggers on `master` and `main`, plus `workflow_dispatch` |
+| 14 | Provenance carried caller-set booleans | The caller asserting it had observed something is not an observation | `ProvenanceGrade` PLANNED / OBSERVED / VALIDATED, derived from a `ProvenanceEvidence` naming a stored record |
+
+### Additional defects found
+
+* **An explicitly zero dividend derived a spec that called itself a continuous
+  yield.** `to_model_spec` mapped `annual_dividend: 0.0` to
+  `DividendSource.CONFIGURED_CONSTANT`, so a config saying `ZERO_DIVIDEND`
+  produced a model saying something else and the compatibility check reported a
+  convention mismatch. Invisible in v2.1.3 because its tests replaced the
+  finished report with `compatible=True` instead of deriving it -- the bypass
+  was hiding a real derivation bug.
+* **`ModeCapability` / `MODE_CAPABILITIES`** was a table restating what an enum
+  already said, and could drift from it. Folded into
+  `VendorGammaPolicy.aggregates_vendor_gamma`.
+* **`config/paper.yaml` and `config/live.yaml`** both set
+  `options_source: thetadata` with raw capture off. They cannot run, but they
+  are templates, and a template is copied.
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | -- |
+| `EXPECTED_MODEL_FINGERPRINT` | `e05c611b9b953372` | `70b3afda56f505e7` | `VERSION_METADATA_ONLY` -- engine 2.1.3 -> 2.1.4 |
+| `EXPECTED_OUTPUT_HASH` | `4444055b...` | `89f38199...` | `VERSION_METADATA_ONLY` -- the same version string, twice |
+
+**No GEX number changed.** Across the whole release exactly two assertions in
+the regression file moved, and both are driven by `MODEL_VERSION`. The other
+three v2.1.4 changes that could plausibly have reached the output hash were
+checked against the serialised payload rather than reasoned about, and none of
+them touch it: the parser version is absent (the reference case is synthetic),
+identity *strings* are absent (the payload carries counts), and this snapshot's
+metadata contains no prose key to strip.
+
+### Behavioural changes worth knowing
+
+* `pricing_mode: VENDOR_GAMMA_VALIDATION` is **refused**, not translated. The
+  replacement is `pricing_mode: VENDOR_IV_LOCAL_GAMMA` plus
+  `vendor_gamma_policy: COMPARE_ONLY` -- and the compatibility checks that the
+  old value skipped now run, so the same session may be refused a calculation.
+* The default configuration is `READY_FOR_RAW_CAPTURE_ONLY`, not `NOT_READY`.
+  Six load-bearing pricing unknowns still block any calculation.
+* A profile with `data.options_source: thetadata` must name a real underlying
+  and must enable raw capture.
+* `ThetaDataRuntime.fetch_chain` no longer accepts `request=`.
+* Contract identities are spelled `4900`, not `4900.0000`.
+* `assess_readiness` takes `capture=` and `validation=` (typed) in place of
+  `capture_manifest=` and `validation_report=` (`Any`).
+
+### Not added, deliberately
+
+Live ThetaData collection, Databento, MES/ES futures feeds, feature-store work,
+trading strategies, regime thresholds, a risk engine, position sizing, IBKR,
+broker execution, order classes, paper trading, live trading, and arbitrary
+calibrated trading values.
+
 ## 2.1.3 - pricing provenance
 
 One misconception ran through v2.1.2 and produced most of what this release

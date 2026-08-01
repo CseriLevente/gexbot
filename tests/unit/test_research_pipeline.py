@@ -23,6 +23,11 @@ from __future__ import annotations
 
 import pytest
 
+from src.config.compatibility import (
+    CompatibilityStatus,
+    PricingDimension,
+    PricingDimensionResult,
+)
 from src.config.pipeline import (
     DividendConvention,
     PricingCompatibilityReport,
@@ -160,8 +165,25 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
         dividend_convention="ZERO_DIVIDEND",
     )
     report = built.pricing_compatibility
-    assert not any("risk_free_rate" in f for f in report.incompatible_fields)
-    assert not any("dividend_yield" in f for f in report.unknown_fields)
+    settled = {
+        d.dimension: d
+        for d in report.dimensions
+        if d.status is CompatibilityStatus.MATCHED
+    }
+    assert PricingDimension.RISK_FREE_RATE in settled
+    assert PricingDimension.RATE_UNITS in settled
+    assert PricingDimension.DIVIDEND_CONVENTION in settled
+    assert PricingDimension.DIVIDEND_VALUE in settled
+    # What remains is vendor conventions, which no configuration setting can
+    # answer -- see the attestation path in tests/pricing_evidence.py.
+    assert set(report.load_bearing_unknowns) == {
+        PricingDimension.DAY_COUNT,
+        PricingDimension.EXPIRATION_TIMESTAMP,
+        PricingDimension.IV_PRICE_BASIS,
+        PricingDimension.MINIMUM_TIME_FLOOR,
+        PricingDimension.UNDERLYING_SOURCE,
+        PricingDimension.UNDERLYING_TIMESTAMP,
+    }
 
 
 def test_vendor_iv_with_unknown_dividend_convention_is_not_compatible():
@@ -172,7 +194,7 @@ def test_vendor_iv_with_unknown_dividend_convention_is_not_compatible():
     )
     report = built.pricing_compatibility
     assert not report.compatible
-    assert any("dividend" in f for f in report.unknown_fields)
+    assert PricingDimension.DIVIDEND_CONVENTION in report.load_bearing_unknowns
 
 
 def test_cash_dividend_is_not_interchangeable_with_a_yield():
@@ -187,7 +209,7 @@ def test_cash_dividend_is_not_interchangeable_with_a_yield():
         ),
     )
     assert not cash.compatible
-    assert any("dividend" in f for f in cash.incompatible_fields)
+    assert PricingDimension.DIVIDEND_CONVENTION in cash.load_bearing_mismatches
 
 
 def test_a_matching_zero_dividend_is_compatible():
@@ -233,9 +255,10 @@ def test_local_iv_local_gamma_is_unreachable_until_a_solver_exists():
 def test_the_reachable_modes_are_selectable():
     """LOCAL_IV_LOCAL_GAMMA is documented but unreachable; see §1."""
     assert pipeline().pricing_mode is PricingMode.VENDOR_IV_LOCAL_GAMMA
+    # The gamma comparison is a second field, so it leaves the mode alone.
     assert (
-        pipeline(pricing_mode="VENDOR_GAMMA_VALIDATION", tier="pro").pricing_mode
-        is PricingMode.VENDOR_GAMMA_VALIDATION
+        pipeline(vendor_gamma_policy="COMPARE_ONLY", tier="pro").pricing_mode
+        is PricingMode.VENDOR_IV_LOCAL_GAMMA
     )
 
 
@@ -245,15 +268,66 @@ def test_an_unknown_pricing_mode_is_refused():
 
 
 def test_the_report_lists_what_it_checked():
+    """Every dimension is accounted for, with no silent omissions."""
     report = pipeline().pricing_compatibility
-    assert report.compatible_fields or report.unknown_fields
+    assert {d.dimension for d in report.dimensions} == set(PricingDimension)
 
 
 def test_the_report_separates_unknown_from_incompatible():
     """Different findings with different remedies: one needs a config change,
     the other needs vendor documentation."""
     report = pipeline().pricing_compatibility
-    assert set(report.unknown_fields).isdisjoint(report.incompatible_fields)
+    assert set(report.load_bearing_unknowns).isdisjoint(report.load_bearing_mismatches)
+
+
+def test_a_dimension_carries_one_status_and_cannot_be_two_things():
+    report = pipeline().pricing_compatibility
+    seen = [d.dimension for d in report.dimensions]
+    assert len(seen) == len(set(seen))
+
+
+def test_rewording_a_detail_cannot_move_a_decision():
+    """The v2.1.4 regression for §2.
+
+    v2.1.3 decided which unknowns were load-bearing by searching the message for
+    a field name, so an editorial change to the wording flipped a blocker into a
+    warning. Detail is now carried outside every decision and every hash.
+    """
+    from dataclasses import replace
+
+    report = pipeline().pricing_compatibility
+    reworded = PricingCompatibilityReport(
+        dimensions=tuple(
+            replace(d, detail="the interest rate convention is not published")
+            for d in report.dimensions
+        ),
+        hard_failures=report.hard_failures,
+    )
+    assert reworded.compatible is report.compatible
+    assert reworded.load_bearing_unknowns == report.load_bearing_unknowns
+    assert reworded.semantic_payload() == report.semantic_payload()
+
+
+def test_compatibility_is_derived_and_cannot_be_assigned():
+    """v2.1.3 carried a settable ``compatible`` flag next to the findings."""
+    with pytest.raises(TypeError):
+        PricingCompatibilityReport(compatible=True)  # type: ignore[call-arg]
+
+
+def test_a_hard_failure_is_honoured_even_with_every_dimension_resolved():
+    resolved = PricingCompatibilityReport(
+        dimensions=tuple(
+            PricingDimensionResult(
+                dimension=dimension,
+                status=CompatibilityStatus.NOT_APPLICABLE,
+                code="NOT_APPLICABLE",
+            )
+            for dimension in PricingDimension
+        ),
+        hard_failures=("TIER_CANNOT_SERVE_REQUEST",),
+    )
+    assert not resolved.blocking_dimensions
+    assert not resolved.compatible
 
 
 # =============================================================================

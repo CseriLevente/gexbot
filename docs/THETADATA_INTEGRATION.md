@@ -307,7 +307,58 @@ itself as a result.
 | Mode | Minimum tier | Why |
 |---|---|---|
 | `VENDOR_IV_LOCAL_GAMMA` | Standard | `implied_vol` arrives on the first-order greeks endpoint |
-| `VENDOR_GAMMA_VALIDATION` | Pro | gamma is a second-order greek |
+| `vendor_gamma_policy: COMPARE_ONLY` | Pro | gamma is a second-order greek. Not a pricing mode -- it sits alongside one, and does not relax the vendor-IV checks. |
 
 `contract_list_endpoint` is `UNCERTAIN` at every tier, since no such endpoint
 has been verified. That is why chain completeness stays `PARTIALLY_OBSERVED`.
+
+
+---
+
+## v2.1.4: running a capture
+
+`config/thetadata_capture.yaml` is the profile that would spend money. It is
+committed so the settings can be reviewed line by line before the session, not
+reconstructed from a shell history afterwards. **It has never been run.**
+
+A profile with `data.options_source: thetadata` is refused at load time if it
+names a synthetic underlying or leaves raw capture off. Both were possible in
+v2.1.3: the first computes real vendor gammas against an underlying labelled
+invented, the second pays for responses and discards them.
+
+```python
+from src.adapters.transport import FakeTransport
+from src.config.pipeline import ThetaDataResearchPipeline
+from src.config.schema import load_config
+
+pipeline = ThetaDataResearchPipeline.from_loaded_config(
+    load_config("config/thetadata_capture.yaml")
+)
+snapshot = pipeline.capture_and_compute(as_of=..., spot=...)
+```
+
+`capture_and_compute` is the whole run in one call, and there is no way to
+perform it and end up with a snapshot that does not say which configuration,
+which model and which compatibility decision produced it. v2.1.3 required four
+steps, each optional, including a `pipeline=pipeline` keyword that had to be
+remembered.
+
+`ThetaDataRuntime.fetch_chain` no longer accepts `request=`. The request is the
+session's, derived once from the configuration: a caller who could substitute
+one could fetch a different symbol, DTE window or strike range from the one the
+compatibility assessment was made about.
+
+### Migrating a v2.1.3 configuration
+
+`pricing_mode: VENDOR_GAMMA_VALIDATION` is **refused**, with a message naming
+its replacement:
+
+```yaml
+pricing_mode: VENDOR_IV_LOCAL_GAMMA
+vendor_gamma_policy: COMPARE_ONLY
+```
+
+It is not translated silently, because the old value *skipped* the vendor-IV
+compatibility checks. The same file re-read under v2.1.4 runs them, and may
+refuse to compute. That is a change in what the configuration does, so the
+operator writes the new form themselves.

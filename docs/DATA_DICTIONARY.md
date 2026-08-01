@@ -369,7 +369,8 @@ Dividend: `convention` (`ANNUAL_CASH_DIVIDEND`, `CONTINUOUS_DIVIDEND_YIELD`,
 
 ### `CertificationState`
 
-`NOT_READY`, `READY_FOR_CAPTURE_ONLY`, `CAPTURE_COMPLETED_NOT_VALIDATED`,
+`NOT_READY`, `READY_FOR_RAW_CAPTURE_ONLY`, `RAW_CAPTURE_COMPLETED`,
+`CALCULATION_NOT_VALIDATED`, `CALCULATION_VALIDATED`,
 `ADAPTER_CERTIFIED`. The last requires both a live capture and a validation
 report, so it is unreachable offline by construction.
 

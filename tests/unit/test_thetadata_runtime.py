@@ -228,17 +228,40 @@ def test_the_caller_never_repeats_a_configured_value():
         assert configured not in parameters, configured
 
 
-def test_an_explicit_request_still_overrides_the_default():
+def test_no_caller_can_substitute_the_request():
+    """The last override seam, closed in v2.1.4.
+
+    ``request=`` reopened every setting the parameters above are kept out of:
+    symbol, DTE window and strike range could all be replaced after the
+    compatibility assessment had been made about a different request. The
+    snapshot's own provenance record would then describe a session that had not
+    happened.
+    """
+    import inspect
+
+    parameters = set(inspect.signature(ThetaDataRuntime.fetch_chain).parameters)
+    assert "request" not in parameters
+
+    transport = FakeTransport(default=csv_response())
+    runtime = runtime_for(transport, max_dte=45)
+    with pytest.raises(TypeError):
+        runtime.fetch_chain(
+            request=ChainRequest(symbol="SPX", max_dte=7),
+            as_of=AS_OF,
+            spot=5000.25,
+        )
+
+
+def test_the_configured_request_is_the_one_that_goes_out():
     transport = FakeTransport(default=csv_response())
     runtime = runtime_for(transport, max_dte=45)
     runtime.fetch_chain(
-        request=ChainRequest(symbol="SPX", max_dte=7),
         as_of=AS_OF,
         spot=5000.25,
         spot_timestamp=AS_OF - timedelta(milliseconds=500),
         open_interest_as_of=date(2026, 3, 16),
     )
-    assert any("max_dte=7" in url for url in transport.urls())
+    assert any("max_dte=45" in url for url in transport.urls())
 
 
 def test_unsupported_parameters_fail_before_any_request():

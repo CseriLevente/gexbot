@@ -93,16 +93,18 @@ def contract_identity(
     not an identity, and a set containing a NaN strike compares unequal to
     itself.
     """
-    from src.domain.strikes import parse_strike
+    from src.domain.strikes import canonical_strike, parse_strike
 
     parsed, issue = parse_strike(strike)
     if parsed is None:
         raise ValueError(f"strike {strike!r} is {issue}; no identity can be built")
-    # Exactly the spelling ``OptionContract.canonical_id`` produces. The
-    # Decimal parse happens first so that "5000", "5000.0" and "5000.00" reach
-    # the formatter as one value rather than three strings that happen to
-    # format alike.
-    return f"{symbol.strip().upper()}:{expiry}:{float(parsed):.4f}:{right}"
+    # ``canonical_strike`` on the Decimal, with no float in between.
+    # ``OptionContract.canonical_id`` calls the same formatter, so the two
+    # spellings are equal by construction rather than because both happen to
+    # produce four decimal places. v2.1.3 wrote ``float(parsed)`` here, putting
+    # the exact parse through binary floating point on its way into the identity
+    # that parse exists to keep exact.
+    return f"{symbol.strip().upper()}:{expiry}:{canonical_strike(parsed)}:{right}"
 
 
 @dataclass(frozen=True, slots=True)

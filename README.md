@@ -39,7 +39,7 @@ say and nothing more:
 | `TESTED_SYNTHETICALLY` | Verified against generated inputs and closed-form identities. |
 | `TESTED_WITH_OFFLINE_FIXTURES` | Verified against recorded vendor-shaped payloads. No network. |
 | `NOT_VALIDATED_WITH_LIVE_THETADATA` | Never run against a real subscription. |
-| `READY_FOR_CAPTURE_ONLY` | Offline checks pass; one paid vendor session is the next evidence. Not certified. |
+| `READY_FOR_RAW_CAPTURE_ONLY` | Offline checks pass and the capture may proceed; one paid vendor session is the next evidence. Says nothing about whether a number computed from it could be trusted. |
 | `PLANNED` | Designed, not built. |
 | `NOT_IMPLEMENTED` | Absent. Some of these are absent on purpose. |
 
@@ -89,7 +89,12 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | One adapter exception hierarchy | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Schema-safe raw-store integrity scanning | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Collision-safe capture sessions | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
-| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the shipped default is `NOT_READY` on six load-bearing vendor unknowns |
+| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the shipped default is `READY_FOR_RAW_CAPTURE_ONLY`, and cannot be trusted to calculate while six load-bearing vendor conventions are unknown |
+| Typed capture and validation evidence | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `verify_capture` checks a manifest against its store |
+| Graded provenance (PLANNED / OBSERVED / VALIDATED) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; derived from a named raw record, never asserted |
+| Typed pricing dimensions and attestations | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; no comparison has been run, so nothing carries `LIVE_COMPARISON` evidence |
+| Canonical pipeline API (`fetch_chain` / `compute_gex` / `capture_and_compute`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| ThetaData capture profile (`config/thetadata_capture.yaml`) | `IMPLEMENTED` · **never run** · `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | Pricing mode derived from IV provenance | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Vendor/local rate and dividend value comparison | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Tier capability matrix | `IMPLEMENTED` · `NOT_VALIDATED_WITH_LIVE_THETADATA` |

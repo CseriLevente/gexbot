@@ -660,6 +660,12 @@ class GexSnapshot:
             entry.pop("curve", None)
         for void in payload["walls"]["gamma_voids"]:
             void.pop("detail", None)
+
+        # Metadata is nested and open-ended -- the adapter puts the pipeline's
+        # whole audit trail in there -- so the prose is stripped by rule rather
+        # than key by key. Every explanatory field carried alongside a decision
+        # goes; the codes, statuses and values that made the decision stay.
+        payload["meta"] = _without_prose(payload.get("meta", {}))
         return payload
 
     def with_meta(self, **changes: Any) -> GexSnapshot:
@@ -682,6 +688,34 @@ class GexSnapshot:
             default=str,
         )
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+#: Metadata keys whose values are written for humans. Excluded from the replay
+#: digest wherever they appear, at any depth.
+#:
+#: The rule is the point. v2.1.3 hashed ``pipeline.pricing_compatibility``
+#: whole, and that object stored its findings *as sentences*: "risk_free_rate:
+#: units are undocumented". Rewording a message moved the digest of an
+#: unchanged calculation, so a replay failure meant either a numeric regression
+#: or somebody improving a comment, and telling them apart meant reading the
+#: diff. Meanwhile a genuine change of finding that kept the same phrasing did
+#: not move it at all.
+PROSE_META_KEYS = frozenset(
+    {"detail", "dimension_detail", "warnings", "note", "notes", "scope"}
+)
+
+
+def _without_prose(value: Any) -> Any:
+    """Recursively drop explanatory text from a metadata tree."""
+    if isinstance(value, dict):
+        return {
+            key: _without_prose(item)
+            for key, item in value.items()
+            if key not in PROSE_META_KEYS
+        }
+    if isinstance(value, list | tuple):
+        return [_without_prose(item) for item in value]
+    return value
 
 
 def _quantise(value: Any, digits: int) -> Any:

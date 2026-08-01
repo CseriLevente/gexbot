@@ -26,8 +26,14 @@ TS = "2026-03-17T11:00:00.000"
 
 
 def cid(strike: int, right: str = "call") -> str:
-    """The canonical id the joiner produces, spelled out once."""
-    return f"SPXW:{EXPIRY}:{strike}.0000:{right}"
+    """The canonical id the joiner produces, spelled out once.
+
+    ``4900``, not ``4900.0000``: v2.1.4 puts both sides of the identity through
+    ``canonical_strike`` instead of a float and a ``.4f`` format. Written as a
+    literal on purpose -- calling the production formatter here would make the
+    test agree with itself whatever that formatter produced.
+    """
+    return f"SPXW:{EXPIRY}:{strike}:{right}"
 
 
 def quote_row(strike: int, right: str = "call") -> dict[str, str]:

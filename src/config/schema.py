@@ -752,6 +752,13 @@ def parse_config(raw: dict[str, Any], *, source_path: str = "<memory>") -> Loade
     except ThetaDataConfigError as exc:
         raise ConfigError(str(exc)) from exc
 
+    options_source = _as_str(
+        data.get("options_source", "synthetic"), "data.options_source"
+    )
+    _require_coherent_capture_profile(
+        options_source=options_source, engine=engine, thetadata=thetadata
+    )
+
     fingerprint = fingerprint_of(expanded)
     return LoadedConfig(
         engine=engine.with_(config_fingerprint=fingerprint),
@@ -759,9 +766,7 @@ def parse_config(raw: dict[str, Any], *, source_path: str = "<memory>") -> Loade
             stage=stage,
             enabled=enabled,
             disabled_reason=disabled_reason,
-            options_source=_as_str(
-                data.get("options_source", "synthetic"), "data.options_source"
-            ),
+            options_source=options_source,
             futures_source=_as_str(
                 data.get("futures_source", "none"), "data.futures_source"
             ),
@@ -774,6 +779,58 @@ def parse_config(raw: dict[str, Any], *, source_path: str = "<memory>") -> Loade
         thetadata=thetadata,
         raw=expanded,
     )
+
+
+#: Values of ``model.underlying_price_source`` that name no vendor print. Fine
+#: for the synthetic adapter; incoherent in a profile that fetches from
+#: ThetaData, because there is then a real underlying and this says otherwise.
+SYNTHETIC_UNDERLYING_SOURCES = frozenset({"synthetic"})
+
+
+def _require_coherent_capture_profile(
+    *, options_source: str, engine: Any, thetadata: Any
+) -> None:
+    """A ThetaData profile must not carry synthetic provenance.
+
+    ``config/research.yaml`` pairs ``data.options_source: synthetic`` with a
+    fully populated ``thetadata:`` block, which is correct -- the block is there
+    so the settings are reviewable before anybody spends money. Flipping
+    ``options_source`` to ``thetadata`` while leaving
+    ``underlying_price_source: synthetic`` is not correct, and nothing caught it:
+    the resulting snapshot would carry real vendor gammas against an underlying
+    labelled as invented.
+
+    Raw capture is required for the same reason it is required for capture
+    readiness -- a paid session whose bytes are discarded cannot be re-derived.
+    """
+    if options_source != "thetadata":
+        return
+
+    problems: list[str] = []
+    model_source = getattr(engine.model_spec.underlying_price_source, "value", "")
+    if model_source in SYNTHETIC_UNDERLYING_SOURCES:
+        problems.append(
+            f"model.underlying_price_source is {model_source!r}, which names no "
+            "vendor print"
+        )
+    if thetadata.underlying_price_source in SYNTHETIC_UNDERLYING_SOURCES:
+        problems.append(
+            f"thetadata.underlying_price_source is "
+            f"{thetadata.underlying_price_source!r}, which names no vendor print"
+        )
+    if not thetadata.raw_capture_enabled:
+        problems.append(
+            "thetadata.raw_capture_enabled is false, so the vendor responses this "
+            "profile pays for would be discarded"
+        )
+
+    if problems:
+        _fail(
+            "data.options_source",
+            "this profile fetches from ThetaData, but "
+            + "; ".join(problems)
+            + ". A capture profile must describe the capture it performs.",
+        )
 
 
 def _strict_loader() -> type:

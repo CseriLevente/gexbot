@@ -1,0 +1,173 @@
+# ThetaData capture profile -- NOT YET RUN.
+#
+# The one profile that would spend money. It is committed so the settings of a
+# real capture can be reviewed line by line *before* the session happens, rather
+# than reconstructed from a shell history afterwards.
+#
+# `config/research.yaml` runs the synthetic adapter and carries a `thetadata:`
+# block purely for review. This file is the other way round: `options_source` is
+# `thetadata`, so the loader enforces that nothing in it claims synthetic
+# provenance and that raw capture is on. See `_require_coherent_capture_profile`.
+#
+# **No capture has been taken with this file.** Every vendor convention below is
+# either unknown or, where an attestation appears, deliberately absent -- there
+# is nothing to attest to yet. Running it produces at most
+# READY_FOR_RAW_CAPTURE_ONLY, and a calculation from the result would be
+# refused. That is the intended state: capture the bytes first, compare against
+# them second, compute third.
+#
+# Before running it:
+#   1. set THETADATA_USERNAME / THETADATA_PASSWORD if the terminal needs them;
+#   2. confirm the subscription tier really is `standard` or better;
+#   3. confirm `artifacts/raw` is on a disk with room for the session;
+#   4. read docs/ADAPTER_CERTIFICATION.md, which describes what to compare
+#      afterwards and how to record the answers.
+#
+# Nothing in this repository can place an order: there is no broker adapter and
+# no order-placement code.
+
+stage: DEVELOPMENT
+enabled: true
+
+data:
+  options_source: thetadata
+  futures_source: none # not implemented
+  max_dte: 60
+
+model:
+  pricing_model: black_scholes_merton
+  day_count_convention: ACT/365F
+  risk_free_rate_source: configured_constant
+  # `zero`, not `configured_constant: 0.0`. The two are numerically identical
+  # and declaratively different: the vendor side says ZERO_DIVIDEND, and a model
+  # calling the same thing a continuous yield that happens to be zero reads as a
+  # convention mismatch -- correctly, because that is what the field says.
+  dividend_yield_source: zero
+  expiration_timestamp_rule: root_specific_settlement
+  # A real vendor print, not an invented one. `synthetic` here is refused.
+  underlying_price_source: vendor_index_snapshot
+  iv_price_source: NBBO_MID_IV
+  # Sent to the vendor as rate_value below, so both sides of the comparison are
+  # ours and RISK_FREE_RATE resolves. Omitting it would let ThetaData apply a
+  # default we cannot name.
+  risk_free_rate: 0.042
+  # Zero, stated. `annual_dividend: 0.0` with `dividend_convention:
+  # ZERO_DIVIDEND` says the same thing on the vendor side, so the two agree.
+  dividend_yield: 0.0
+  min_time_to_expiry_minutes: 60.0
+
+data_quality:
+  max_quote_greeks_skew_seconds: 5.0
+  max_quote_iv_skew_seconds: 5.0
+  max_quote_underlying_skew_seconds: 2.0
+  max_future_timestamp_seconds: 2.0
+  max_snapshot_age_seconds: 60.0
+  max_open_interest_age_sessions: 2
+
+gex:
+  spot_move_pct: 0.01
+  sign_convention: dealer_long_calls_short_puts
+  # Vendor gamma is compared, never aggregated. See thetadata.vendor_gamma_policy.
+  prefer_vendor_gamma: false
+  drop_crossed_quotes: true
+  require_open_interest: true
+
+zero_gamma:
+  grid_span_pct: 0.04
+  grid_step_pct: 0.001
+  conventions: [sticky_strike, frozen_iv, sticky_moneyness]
+  max_dte_for_grid: 60
+  min_points_for_smile_fit: 5
+  boundary_tolerance_pct: 0.10
+  max_grid_expansions: 3
+  grid_expansion_factor: 1.75
+
+walls:
+  node_min_share_of_max: 0.25
+  max_nodes_per_side: 5
+  void_max_share_of_max: 0.05
+  void_min_width_pct: 0.002
+  band_pct: 0.10
+  directional_wall_min_distance_pct: 0.0
+  directional_wall_band_pct: 0.10
+  irregular_spacing_factor: 1.5
+  min_observed_strikes_for_true_void: 2
+  min_ladder_coverage_for_true_void: 0.80
+
+confidence:
+  min_chain_completeness_ratio: 0.90
+  crossed_quote_zero_score_ratio: 0.10
+  min_universe_coverage_ratio: 0.70
+  min_good_iv_ratio: 0.90
+  ambiguous_root_spacing_pct: 0.50
+  steep_slope_threshold: 0.20
+  max_zero_gamma_shift_pct: UNSPECIFIED_CALIBRATE
+  max_sign_model_disagreement: UNSPECIFIED_CALIBRATE
+  max_0dte_dominance_ratio: UNSPECIFIED_CALIBRATE
+
+thetadata:
+  base_url: http://127.0.0.1:25503
+  auth_mode: local_terminal
+  tier: standard
+  timeout_seconds: 30.0
+  max_retries: 3
+  backoff_base_seconds: 0.25
+  username_env: THETADATA_USERNAME
+  password_env: THETADATA_PASSWORD
+
+  # The capture is the deliverable. Turning this off makes the profile invalid.
+  raw_capture_enabled: true
+  raw_capture_path: artifacts/raw
+
+  greeks_version: latest
+  rate_type: sofr
+  # Sent explicitly, with its units named, so the vendor cannot apply a default
+  # we would then have to guess at. 4.2 PERCENT_ANNUAL_RATE == 0.042 decimal,
+  # which is model.risk_free_rate above.
+  rate_value: 4.2
+  rate_units: PERCENT_ANNUAL_RATE
+  annual_dividend: 0.0
+  dividend_convention: ZERO_DIVIDEND
+
+  stock_price_source: vendor_default
+  max_dte: 60
+  strike_range: null
+  min_time: null
+  use_market_value: null
+
+  # Must match the top-level `model:` block; the loader refuses a file where
+  # they disagree.
+  iv_source: NBBO_MID_IV
+  underlying_price_source: vendor_index_snapshot
+  min_time_to_expiry_minutes: 60.0
+  expiration_rule: root_specific_settlement
+
+  pricing_mode: VENDOR_IV_LOCAL_GAMMA
+  # Standard cannot serve second-order greeks. Switch to COMPARE_ONLY on a Pro
+  # subscription to fetch the vendor's gamma alongside ours; it is compared and
+  # never aggregated, and it does not relax the vendor-IV checks.
+  vendor_gamma_policy: DISABLED
+
+  # Deliberately empty. Six load-bearing dimensions -- IV price basis,
+  # underlying source, underlying timestamp, expiration timestamp, day count and
+  # the minimum time floor -- are undocumented by ThetaData, and this repository
+  # has not compared any of them against real vendor output. Until it has, the
+  # honest entry is no entry, and every calculation is refused.
+  #
+  # After a capture, each answered question becomes:
+  #
+  #   pricing_attestations:
+  #     - dimension: DAY_COUNT
+  #       source: LIVE_COMPARISON
+  #       reference: artifacts/validation/2026-08-XX-day-count.md
+  #       observed_at: "2026-08-XX"
+  #       vendor_value: "ACT/365F"
+  #
+  # `source: VENDOR_DOCUMENTATION` is accepted and permits a calculation, but
+  # never reaches ADAPTER_CERTIFIED: documentation records what the vendor says
+  # it does.
+  pricing_attestations: []
+
+execution:
+  broker: none
+  trading_enabled: false

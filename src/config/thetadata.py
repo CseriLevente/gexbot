@@ -27,6 +27,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from src.adapters.errors import ThetaDataError
+from src.config.compatibility import (
+    AttestationError,
+    CompatibilityEvidence,
+    EvidenceSource,
+    PricingAssumptionAttestation,
+    PricingDimension,
+)
 from src.domain.iv import IVSource
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -37,6 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         DividendConvention,
         PricingMode,
         RateUnit,
+        VendorGammaPolicy,
     )
     from src.domain.contracts import ChainSnapshot
     from src.domain.model_spec import ModelSpec
@@ -128,11 +137,21 @@ class ThetaDataConfig:
     #: Which numbers come from where. Only VENDOR_IV_LOCAL_GAMMA mixes vendor
     #: and local quantities inside one calculation, so only it needs agreement.
     pricing_mode: PricingMode = None  # type: ignore[assignment]
+    #: What to do with the vendor's gamma. Orthogonal to ``pricing_mode``: in
+    #: v2.1.3 this was a third value of that enum, so switching the comparison on
+    #: moved the session out of VENDOR_IV_LOCAL_GAMMA and its compatibility
+    #: checks -- while vendor IV still fed the local gamma.
+    vendor_gamma_policy: VendorGammaPolicy = None  # type: ignore[assignment]
     #: How to read ``rate_value``. Undocumented by the vendor, so UNKNOWN is the
     #: honest default and it blocks pricing compatibility.
     rate_units: RateUnit = None  # type: ignore[assignment]
     #: What ``annual_dividend`` means. Cash and yield are different quantities.
     dividend_convention: DividendConvention = None  # type: ignore[assignment]
+    #: Recorded answers to the vendor conventions ThetaData does not publish
+    #: inline. The only production route from an UNKNOWN pricing dimension to a
+    #: resolved one, and each carries its source and reference into the audit
+    #: trail. An attestation cannot overturn a measured mismatch.
+    pricing_attestations: tuple[PricingAssumptionAttestation, ...] = ()
     #: Local model settings that MUST match the ModelSpec, checked by
     #: ThetaDataResearchPipeline rather than left to drift.
     min_time_to_expiry_minutes: float = 60.0
@@ -141,6 +160,69 @@ class ThetaDataConfig:
     #: When true, an incompatible pricing configuration raises instead of
     #: proceeding with a warning.
     fail_on_incompatible_pricing: bool = False
+
+    def __post_init__(self) -> None:
+        """Resolve the derived fields, then refuse an incoherent object.
+
+        Four fields carried ``= None`` with a lying type annotation, on the
+        assumption that everything came through ``thetadata_config_from_dict``.
+        ``ThetaDataConfig()`` therefore constructed happily and then raised
+        ``AttributeError: 'NoneType' object has no attribute 'value'`` from
+        ``as_dict`` -- inside the audit trail, which is the last place a config
+        should first be found to be invalid.
+
+        The pricing mode is *derived* from the IV source rather than defaulted,
+        so the two cannot be constructed in disagreement at all.
+        """
+        from src.config.pipeline import (
+            DividendConvention,
+            IvGammaPricingMode,
+            RateUnit,
+            VendorGammaPolicy,
+            derive_pricing_mode,
+            require_coherent_pricing_mode,
+        )
+
+        def resolve(name: str, enum_type: Any, default: Any) -> Any:
+            value = getattr(self, name)
+            if value is None:
+                value = default
+            # Accept the string form so a config assembled from raw values is
+            # still valid by construction rather than valid by convention.
+            resolved = enum_type(value)
+            object.__setattr__(self, name, resolved)
+            return resolved
+
+        iv_source = resolve("iv_source", IVSource, IVSource.VENDOR_DEFAULT_IV)
+        mode = resolve(
+            "pricing_mode", IvGammaPricingMode, derive_pricing_mode(iv_source=iv_source)
+        )
+        resolve("vendor_gamma_policy", VendorGammaPolicy, VendorGammaPolicy.DISABLED)
+        resolve("rate_units", RateUnit, RateUnit.UNKNOWN)
+        resolve(
+            "dividend_convention",
+            DividendConvention,
+            DividendConvention.UNKNOWN_VENDOR_CONVENTION,
+        )
+        require_coherent_pricing_mode(iv_source=iv_source, pricing_mode=mode)
+
+        attestations = tuple(self.pricing_attestations)
+        for attestation in attestations:
+            if not isinstance(attestation, PricingAssumptionAttestation):
+                raise AttestationError(
+                    "pricing_attestations must hold PricingAssumptionAttestation "
+                    f"objects, got {type(attestation).__name__}. A string or a "
+                    "boolean here would be an assertion that a question was "
+                    "answered, with nothing recording the answer."
+                )
+        claimed = [a.dimension for a in attestations]
+        duplicated = sorted({d.value for d in claimed if claimed.count(d) > 1})
+        if duplicated:
+            raise AttestationError(
+                f"pricing_attestations names {duplicated} more than once. Two "
+                "answers to one question is not more evidence; drop the stale one."
+            )
+        object.__setattr__(self, "pricing_attestations", attestations)
 
     def to_model_spec(self) -> ModelSpec:
         """The ModelSpec this configuration implies.
@@ -161,9 +243,21 @@ class ThetaDataConfig:
         if rate is None:
             rate_source, rate = RateSource.ZERO, 0.0
 
+        from src.config.pipeline import DividendConvention
+
         dividend_source = DividendSource.CONFIGURED_CONSTANT
         dividend = self.local_dividend_yield
         if dividend is None:
+            dividend_source, dividend = DividendSource.ZERO, 0.0
+        elif self.dividend_convention is DividendConvention.ZERO_DIVIDEND:
+            # A stated zero is a zero, not a continuous yield that happens to be
+            # 0.0. The two are numerically identical and *declaratively*
+            # different, and the compatibility check compares declarations: a
+            # config saying ZERO_DIVIDEND derived a spec saying
+            # CONFIGURED_CONSTANT, which the check then reported as the vendor
+            # and the model disagreeing about the dividend convention. v2.1.3
+            # never saw it because its tests asserted compatibility directly
+            # instead of deriving it.
             dividend_source, dividend = DividendSource.ZERO, 0.0
 
         return ModelSpec(
@@ -289,8 +383,10 @@ class ThetaDataConfig:
             "iv_source": self.iv_source.value,
             "duplicate_policy": self.duplicate_policy,
             "pricing_mode": self.pricing_mode.value,
+            "vendor_gamma_policy": self.vendor_gamma_policy.value,
             "rate_units": self.rate_units.value,
             "dividend_convention": self.dividend_convention.value,
+            "pricing_attestations": [a.as_dict() for a in self.pricing_attestations],
             "min_time_to_expiry_minutes": self.min_time_to_expiry_minutes,
             "underlying_price_source": self.underlying_price_source,
             "expiration_rule": self.expiration_rule,
@@ -347,8 +443,20 @@ class VendorParameterSet:
         }
 
 
-class ThetaDataConfigError(ValueError):
-    """Invalid ThetaData configuration."""
+class ThetaDataConfigError(ThetaDataError, ValueError):
+    """Invalid ThetaData configuration.
+
+    Sits under ``ThetaDataError`` as of v2.1.4, so ``except ThetaDataError``
+    catches every way the adapter can fail rather than every way it can fail
+    *after* the configuration was accepted. v2.1.3 unified the runtime failures
+    -- transport, retries, store, parser -- and left the configuration failures
+    on ``ValueError``, which is the half a caller is most likely to want to
+    handle separately and least likely to guess at.
+
+    ``ValueError`` is kept as a second base so existing ``except ValueError``
+    handlers, and the loader's own translation into ``ConfigError``, continue to
+    work.
+    """
 
 
 class MissingCredentialsError(ThetaDataConfigError):
@@ -390,8 +498,10 @@ ALLOWED_KEYS = frozenset(
         "iv_source",
         "duplicate_policy",
         "pricing_mode",
+        "vendor_gamma_policy",
         "rate_units",
         "dividend_convention",
+        "pricing_attestations",
         "min_time_to_expiry_minutes",
         "underlying_price_source",
         "expiration_rule",
@@ -416,6 +526,74 @@ VALID_DUPLICATE_POLICIES = ("reject", "collapse_exact", "newest_timestamp")
 #: optional milliseconds. Accepting anything serialisable would let "nine
 #: thirty" reach the vendor and come back as an unexplained empty chain.
 MIN_TIME_GRAMMAR = re.compile(r"^([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,3})?$")
+
+#: Keys a single ``pricing_attestations`` entry may carry. Unknown keys are
+#: refused rather than ignored: a misspelt ``refrence`` would otherwise produce
+#: an attestation with no reference, which is the one thing that must not load.
+ATTESTATION_KEYS = frozenset(
+    {"dimension", "source", "reference", "observed_at", "vendor_value", "note"}
+)
+
+
+def _parse_attestations(
+    raw_value: Any, fail: Any, *, key: str = "pricing_attestations"
+) -> tuple[PricingAssumptionAttestation, ...]:
+    """Build typed attestations from the configuration file.
+
+    Every field is required to be present and non-empty in the file, because the
+    object this produces is what lets a load-bearing pricing dimension count as
+    resolved. There is no shorthand form and no boolean form.
+    """
+    if raw_value is None:
+        return ()
+    if not isinstance(raw_value, list):
+        fail(f"expected a list of attestations, got {type(raw_value).__name__}", key)
+    parsed: list[PricingAssumptionAttestation] = []
+    for index, entry in enumerate(raw_value):
+        where = f"{key}[{index}]"
+        if not isinstance(entry, dict):
+            fail(f"expected a mapping, got {type(entry).__name__}", where)
+            continue
+        unknown = sorted(set(entry) - ATTESTATION_KEYS)
+        if unknown:
+            fail(
+                f"unknown keys {unknown}; valid keys are {sorted(ATTESTATION_KEYS)}",
+                where,
+            )
+        try:
+            dimension = PricingDimension(entry.get("dimension"))
+        except ValueError:
+            fail(
+                f"{entry.get('dimension')!r} is not a pricing dimension; valid "
+                f"values are {[d.value for d in PricingDimension]}",
+                f"{where}.dimension",
+            )
+            continue
+        try:
+            source = EvidenceSource(entry.get("source"))
+        except ValueError:
+            fail(
+                f"{entry.get('source')!r} is not an evidence source; valid values "
+                f"are {[s.value for s in EvidenceSource]}",
+                f"{where}.source",
+            )
+            continue
+        try:
+            parsed.append(
+                PricingAssumptionAttestation(
+                    dimension=dimension,
+                    evidence=CompatibilityEvidence(
+                        source=source,
+                        reference=str(entry.get("reference", "")),
+                        observed_at=str(entry.get("observed_at", "")),
+                    ),
+                    vendor_value=entry.get("vendor_value"),
+                    note=str(entry.get("note", "")),
+                )
+            )
+        except AttestationError as error:
+            fail(str(error), where)
+    return tuple(parsed)
 
 
 def _required(value: float | None) -> float:
@@ -632,6 +810,8 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
         DividendConvention,
         PricingMode,
         RateUnit,
+        VendorGammaPolicy,
+        reject_legacy_pricing_mode,
         require_supported_iv_source,
     )
 
@@ -657,6 +837,10 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
     # agreement -- so every compatibility check was skipped by default.
     from src.config.pipeline import derive_pricing_mode, require_coherent_pricing_mode
 
+    # Named before it is parsed: an old file saying VENDOR_GAMMA_VALIDATION must
+    # not be silently reinterpreted, because the checks it used to skip now run.
+    reject_legacy_pricing_mode(raw.get("pricing_mode"), where=f"{path}.pricing_mode")
+
     pricing_mode = enumerated(
         "pricing_mode",
         PricingMode,
@@ -665,16 +849,25 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
     require_coherent_pricing_mode(
         iv_source=iv_source, pricing_mode=pricing_mode, where=f"{path}.pricing_mode"
     )
+    vendor_gamma_policy = enumerated(
+        "vendor_gamma_policy", VendorGammaPolicy, VendorGammaPolicy.DISABLED.value
+    )
+    pricing_attestations = _parse_attestations(raw.get("pricing_attestations"), fail)
 
-    # The tier has to expose what the mode needs, or the mode is a wish.
+    # The tier has to expose what the mode *and* the policy need. Two additive
+    # requirements: in v2.1.3 the gamma requirement could only be expressed by
+    # replacing the vendor-IV mode, which dropped the vendor-IV requirement.
     from src.adapters.thetadata.capabilities import assess_tier
     from src.adapters.thetadata.endpoints import Tier
     from src.config.pipeline import required_capabilities
 
-    capability = assess_tier(Tier(tier), required_capabilities(pricing_mode))
+    capability = assess_tier(
+        Tier(tier), required_capabilities(pricing_mode, policy=vendor_gamma_policy)
+    )
     if not capability.satisfied:
         fail(
-            f"the {tier!r} tier does not expose what {pricing_mode.value} needs: "
+            f"the {tier!r} tier does not expose what {pricing_mode.value} with "
+            f"vendor_gamma_policy={vendor_gamma_policy.value} needs: "
             f"missing={list(capability.missing)} "
             f"uncertain={list(capability.uncertain)}",
             "tier",
@@ -729,6 +922,8 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
         iv_source=iv_source,
         duplicate_policy=duplicate_policy,
         pricing_mode=pricing_mode,
+        vendor_gamma_policy=vendor_gamma_policy,
+        pricing_attestations=pricing_attestations,
         rate_units=rate_units,
         dividend_convention=dividend_convention,
         min_time_to_expiry_minutes=_required(
@@ -903,7 +1098,6 @@ class ThetaDataRuntime:
         *,
         as_of: datetime,
         spot: float,
-        request: ChainRequest | None = None,
         spot_timestamp: datetime | None = None,
         open_interest_as_of: date | None = None,
         risk_free_rate: float = 0.0,
@@ -919,6 +1113,15 @@ class ThetaDataRuntime:
         ``strike_range`` or ``min_time`` argument. Those are configuration; a
         caller who could pass them here could also disagree with the config, and
         then the YAML would be a suggestion rather than a setting.
+
+        v2.1.3 also accepted a whole ``request``, which reopened every one of
+        those seams at once: symbol, DTE window and strike range could all be
+        replaced, so the snapshot's own provenance record could describe a
+        session that had not happened. The request is now the session's alone.
+
+        Prefer ``ThetaDataResearchPipeline.fetch_chain``. Reaching the runtime
+        directly means supplying the rate and dividend by hand, and those are
+        the numbers the compatibility check compared against the vendor's.
         """
         if capture is None and self.config.raw_capture_enabled:
             # Configuring a capture path and then getting no audit trail because
@@ -936,7 +1139,7 @@ class ThetaDataRuntime:
             )
 
         chain = self.client.fetch_chain(
-            request if request is not None else self.default_chain_request,
+            self.default_chain_request,
             as_of=as_of,
             spot=spot,
             spot_timestamp=spot_timestamp,

@@ -25,53 +25,63 @@ from datetime import date, timedelta
 from src.adapters.certification import (
     AdapterCertificationReadiness,
     OpenInterestProvenance,
+    ProvenanceEvidence,
     SpotProvenance,
     assess_readiness,
 )
+from src.adapters.raw_store import InMemoryRawStore
 from src.adapters.transport import FakeTransport
 from src.config.pipeline import ThetaDataResearchPipeline
 from src.config.thetadata import parse_thetadata_config
 from src.gex.sessions import eastern
+from tests.pricing_evidence import resolved_settings
 
 AS_OF = eastern(2026, 3, 17, 11, 0)
+
+#: Raw capture is mandatory for capture readiness (§6).
+CAPTURE_SETTINGS = {"raw_capture_enabled": True, "raw_capture_path": "artifacts/raw"}
+
+MANIFEST_HASH = "deadbeefdeadbeef"
 
 
 def pipeline(**overrides):
     """A pipeline whose *pricing* questions are settled.
 
-    These tests are about open-interest and spot provenance. Since v2.1.3 an
-    unresolved vendor pricing assumption is itself a blocker (§2), so without
-    this the fixture would be NOT_READY for reasons unrelated to what is being
-    tested. ``resolved`` stands in for vendor documentation having been read.
+    These tests are about open-interest and spot provenance, and an unresolved
+    vendor pricing assumption blocks the calculation for reasons unrelated to
+    what they check. The settings come from ``tests/pricing_evidence``, which
+    supplies typed attestations through the configuration loader -- v2.1.3
+    replaced the finished report with ``PricingCompatibilityReport(
+    compatible=True)`` instead, which asserted the conclusion and exercised
+    nothing.
     """
-    from dataclasses import replace
-
-    from src.config.pipeline import PricingCompatibilityReport
-
-    settings = {
-        "rate_value": 4.2,
-        "rate_units": "PERCENT_ANNUAL_RATE",
-        "annual_dividend": 0.0,
-        "dividend_convention": "ZERO_DIVIDEND",
-    }
+    settings = resolved_settings(**CAPTURE_SETTINGS)
     settings.update(overrides)
-    built = ThetaDataResearchPipeline.from_config(
+    return ThetaDataResearchPipeline.from_config(
         parse_thetadata_config(settings), transport=FakeTransport()
     )
-    if overrides.get("_unresolved_pricing"):
-        return built
-    return replace(
-        built,
-        pricing_compatibility=PricingCompatibilityReport(
-            compatible=True,
-            compatible_fields=("every load-bearing assumption documented",),
-        ),
+
+
+def unresolved_pipeline(**overrides):
+    """The default: vendor conventions undocumented."""
+    settings = {**CAPTURE_SETTINGS}
+    settings.update(overrides)
+    return ThetaDataResearchPipeline.from_config(
+        parse_thetadata_config(settings), transport=FakeTransport()
+    )
+
+
+def observed(field_path: str, record: str) -> ProvenanceEvidence:
+    return ProvenanceEvidence(
+        raw_record_id=record, field_path=field_path, manifest_hash=MANIFEST_HASH
     )
 
 
 def verified_oi() -> OpenInterestProvenance:
     return OpenInterestProvenance(
-        as_of=date(2026, 3, 16), source="vendor_field", caller_supplied=False
+        as_of=date(2026, 3, 16),
+        source="vendor_field",
+        evidence=observed("open_interest", "session-0001-snapshot"),
     )
 
 
@@ -80,6 +90,7 @@ def verified_spot() -> SpotProvenance:
         source="vendor_index_snapshot",
         timestamp=AS_OF - timedelta(milliseconds=200),
         tolerance_seconds=1.0,
+        evidence=observed("index_price", "session-0002-index"),
     )
 
 
@@ -89,6 +100,7 @@ def readiness(**overrides) -> AdapterCertificationReadiness:
         "as_of": AS_OF,
         "open_interest": verified_oi(),
         "spot": verified_spot(),
+        "raw_store": InMemoryRawStore(),
     }
     payload.update(overrides)
     return assess_readiness(**payload)
@@ -112,19 +124,16 @@ def test_missing_open_interest_provenance_blocks_certification():
 
 def test_a_caller_supplied_open_interest_date_is_recorded_as_such():
     """Accepted, but never described as observed."""
-    supplied = OpenInterestProvenance(
-        as_of=date(2026, 3, 16), source="caller", caller_supplied=True
-    )
+    supplied = OpenInterestProvenance(as_of=date(2026, 3, 16), source="caller")
     result = readiness(open_interest=supplied)
     assert "open_interest_as_of" in result.unverified_fields
-    assert any("caller" in warning for warning in result.warnings)
+    assert dict(result.provenance_grades)["open_interest_as_of"] == "PLANNED"
+    assert any("PLANNED" in warning for warning in result.warnings)
 
 
 def test_a_caller_supplied_date_does_not_block_capture():
     """It is a documented limitation, not a reason to refuse the session."""
-    supplied = OpenInterestProvenance(
-        as_of=date(2026, 3, 16), source="caller", caller_supplied=True
-    )
+    supplied = OpenInterestProvenance(as_of=date(2026, 3, 16), source="caller")
     assert readiness(open_interest=supplied).ready
 
 
@@ -133,7 +142,7 @@ def test_a_verified_vendor_source_replaces_caller_supplied_provenance():
 
 
 def test_open_interest_without_a_date_blocks_certification():
-    empty = OpenInterestProvenance(as_of=None, source="caller", caller_supplied=True)
+    empty = OpenInterestProvenance(as_of=None, source="caller")
     assert not readiness(open_interest=empty).ready
 
 
@@ -153,6 +162,7 @@ def test_spot_skew_beyond_tolerance_blocks_certification():
             source="vendor_index_snapshot",
             timestamp=AS_OF - timedelta(seconds=90),
             tolerance_seconds=1.0,
+            evidence=observed("index_price", "session-0002-index"),
         )
     )
     assert not result.ready
@@ -167,6 +177,7 @@ def test_spot_skew_within_tolerance_is_accepted():
             source="vendor_index_snapshot",
             timestamp=AS_OF - timedelta(milliseconds=500),
             tolerance_seconds=1.0,
+            evidence=observed("index_price", "session-0002-index"),
         )
     ).ready
 
@@ -203,29 +214,27 @@ def test_the_report_exposes_every_required_field():
         assert hasattr(result, attribute), attribute
 
 
-def test_a_pricing_mismatch_blocks_readiness():
-    """VENDOR_IV_LOCAL_GAMMA with undocumented vendor conventions."""
-    from src.config.pipeline import ThetaDataResearchPipeline as Pipeline
-    from src.config.thetadata import parse_thetadata_config as parse
+def test_a_pricing_mismatch_blocks_the_calculation_not_the_capture():
+    """VENDOR_IV_LOCAL_GAMMA with undocumented vendor conventions.
 
-    mismatched = Pipeline.from_config(
-        parse(
-            {
-                "annual_dividend": 1.3,
-                "dividend_convention": "UNKNOWN_VENDOR_CONVENTION",
-            }
-        ),
-        transport=FakeTransport(),
+    A capture is still worth taking: the bytes are what a later comparison runs
+    against. v2.1.3 refused, which meant the repository would not collect the
+    evidence that would have unblocked it.
+    """
+    unresolved = unresolved_pipeline(
+        annual_dividend=1.3, dividend_convention="UNKNOWN_VENDOR_CONVENTION"
     )
-    result = readiness(pipeline=mismatched)
-    assert not result.ready
-    assert any("pricing" in blocker.lower() for blocker in result.blockers)
+    result = readiness(pipeline=unresolved)
+    assert result.ready, result.blockers
+    assert not result.calculation_trusted
+    assert any("pricing" in blocker.lower() for blocker in result.calculation_blockers)
 
 
 def test_a_resolved_pricing_configuration_does_not_block():
     """v2.1.2 used LOCAL_IV_LOCAL_GAMMA here, which is now unreachable: every
     supported IV source is vendor-computed."""
     assert readiness().ready
+    assert readiness().calculation_trusted
 
 
 def test_unknown_chain_completeness_is_a_warning_not_a_blocker():

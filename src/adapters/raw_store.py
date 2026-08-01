@@ -47,7 +47,15 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: per-contract selected-source timestamp provenance. v2.1.2 made those
 #: changes and left the version at 2.1.1, so a replay could not tell that
 #: the parser had changed underneath it.
-PARSER_VERSION = "thetadata-v3-parser/2.1.3"
+#:
+#: 2.1.4 changed: the canonical contract identity is now spelled by
+#: ``canonical_strike`` on both sides -- ``SPXW:2026-03-17:5000:C`` rather than
+#: ``SPXW:2026-03-17:5000.0000:C``. The contract is the same contract and the
+#: strike is the same number, so no value the parser reads has changed meaning;
+#: but the identity string is the *join key* between an expected universe and a
+#: received chain, and two versions spelling it differently would not match each
+#: other's output. A replay across the boundary has to be able to see that.
+PARSER_VERSION = "thetadata-v3-parser/2.1.4"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching

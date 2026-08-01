@@ -6,14 +6,15 @@ looking further. The default configuration claimed ``LOCAL_IV_LOCAL_GAMMA``
 while fetching vendor-computed IV, so the check it needed most was the one it
 skipped -- and the report said ready.
 
-Two separate corrections meet here:
+The v2.1.4 defects are worse, and both live in the states themselves:
 
-* the mode is now derived from provenance (§1), so it cannot be asserted; and
-* an ``UNKNOWN`` on a field that changes gamma is a **blocker**, not a note
-  printed beside the answer.
+* ``capture_manifest`` and ``validation_report`` were ``Any``, tested with ``is
+  not None``. ``assess_readiness(capture_manifest=object(),
+  validation_report=object())`` returned ``ADAPTER_CERTIFIED``.
+* Capture readiness and calculation trust shared one ladder, so an unresolved
+  vendor convention blocked the capture that would have resolved it.
 
-The state machine exists because "ready to capture" and "certified" are
-different claims, and only the first is reachable without spending money.
+Both are regression-tested below.
 """
 
 from __future__ import annotations
@@ -23,56 +24,78 @@ from datetime import date, timedelta
 import pytest
 
 from src.adapters.certification import (
+    AdapterValidationReport,
+    CaptureVerification,
     CertificationState,
     OpenInterestProvenance,
+    ProvenanceEvidence,
+    ProvenanceGrade,
     SpotProvenance,
+    ValidationCheck,
     assess_readiness,
+    verify_capture,
 )
+from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
 from src.adapters.transport import FakeTransport
-from src.config.pipeline import (
-    PricingCompatibilityReport,
-    ThetaDataResearchPipeline,
-)
+from src.config.compatibility import EvidenceSource, PricingDimension
+from src.config.pipeline import ThetaDataResearchPipeline
 from src.config.thetadata import parse_thetadata_config
 from src.gex.sessions import eastern
+from tests.pricing_evidence import attestations, resolved_settings
 
 AS_OF = eastern(2026, 3, 17, 11, 0)
 
+#: Raw capture is mandatory for capture readiness (§6), so every pipeline here
+#: has it switched on and a store to write to.
+CAPTURE_SETTINGS = {"raw_capture_enabled": True, "raw_capture_path": "artifacts/raw"}
+
 
 def pipeline(**overrides):
+    settings = {**CAPTURE_SETTINGS}
+    settings.update(overrides)
     return ThetaDataResearchPipeline.from_config(
-        parse_thetadata_config(overrides), transport=FakeTransport()
+        parse_thetadata_config(settings), transport=FakeTransport()
     )
 
 
-def resolved_pipeline():
+def resolved_pipeline(**overrides):
     """Everything a vendor-IV session needs, stated explicitly.
 
-    This is what the configuration looks like once somebody has read the vendor
-    documentation and written the answers down. It is deliberately not the
-    default: the default is what we know today, which is less.
+    Built through the production configuration path: the attestations are
+    evidence objects the loader validates, and ``assess_pricing_compatibility``
+    decides what follows from them. v2.1.3 reached the same place by replacing
+    the finished report with ``PricingCompatibilityReport(compatible=True)``,
+    which tested nothing.
     """
-    built = pipeline(
-        rate_value=4.2,
-        rate_units="PERCENT_ANNUAL_RATE",
-        annual_dividend=0.0,
-        dividend_convention="ZERO_DIVIDEND",
-    )
-    # Stand in for vendor documentation settling the remaining conventions.
-    from dataclasses import replace
+    return pipeline(**resolved_settings(**{**CAPTURE_SETTINGS, **overrides}))
 
-    return replace(
-        built,
-        pricing_compatibility=PricingCompatibilityReport(
-            compatible=True,
-            compatible_fields=(
-                "risk_free_rate (4.2 PERCENT_ANNUAL_RATE == 0.042 decimal)",
-                "dividend_yield (ZERO_DIVIDEND)",
-                "expiration_timestamp (documented)",
-                "minimum_time_to_expiry (documented)",
-                "underlying_price_source (documented)",
-                "iv_calculation_convention (documented)",
-            ),
+
+def observed_oi(manifest_hash: str = "deadbeefdeadbeef") -> OpenInterestProvenance:
+    return OpenInterestProvenance(
+        as_of=date(2026, 3, 16),
+        source="vendor_field",
+        evidence=ProvenanceEvidence(
+            raw_record_id="session-0001-bulk-snapshot",
+            field_path="open_interest",
+            manifest_hash=manifest_hash,
+        ),
+    )
+
+
+def planned_oi() -> OpenInterestProvenance:
+    """A date somebody typed in. Accepted; never called observed."""
+    return OpenInterestProvenance(as_of=date(2026, 3, 16), source="caller")
+
+
+def observed_spot(manifest_hash: str = "deadbeefdeadbeef") -> SpotProvenance:
+    return SpotProvenance(
+        source="vendor_index_snapshot",
+        timestamp=AS_OF - timedelta(milliseconds=200),
+        tolerance_seconds=1.0,
+        evidence=ProvenanceEvidence(
+            raw_record_id="session-0002-index-snapshot",
+            field_path="index_price",
+            manifest_hash=manifest_hash,
         ),
     )
 
@@ -81,143 +104,395 @@ def readiness(**overrides):
     payload = {
         "pipeline": resolved_pipeline(),
         "as_of": AS_OF,
-        "open_interest": OpenInterestProvenance(
-            as_of=date(2026, 3, 16), source="vendor_field", caller_supplied=False
-        ),
-        "spot": SpotProvenance(
-            source="vendor_index_snapshot",
-            timestamp=AS_OF - timedelta(milliseconds=200),
-            tolerance_seconds=1.0,
-        ),
+        "open_interest": observed_oi(),
+        "spot": observed_spot(),
+        "raw_store": InMemoryRawStore(),
     }
     payload.update(overrides)
     return assess_readiness(**payload)
 
 
+def captured(store: InMemoryRawStore | None = None) -> CaptureVerification:
+    """A real capture: bytes in a store, and a manifest the store agrees with."""
+    from datetime import UTC, datetime
+
+    store = store if store is not None else InMemoryRawStore()
+    now = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
+    record = store.put(
+        record_id="session-0001-bulk-snapshot",
+        endpoint="/v3/option/snapshot/greeks",
+        query_params={"root": "SPXW"},
+        payload="ms_of_day,implied_vol\n1,0.2\n",
+        request_started_at=now,
+        response_received_at=now,
+        http_status=200,
+    )
+    manifest = RawCaptureManifest(
+        session_id="session",
+        record_ids=(record.record_id,),
+        payload_hashes=(record.payload_hash,),
+    )
+    return verify_capture(manifest, store)
+
+
+def validation_for(
+    capture: CaptureVerification, *, dimensions: bool = True, passed: bool = True
+) -> AdapterValidationReport:
+    checks = [
+        ValidationCheck(name="open_interest_as_of", passed=passed),
+        ValidationCheck(name="spot_timestamp", passed=passed),
+    ]
+    if dimensions:
+        checks.extend(
+            ValidationCheck(
+                name=f"vendor_{dimension.value.lower()}",
+                passed=passed,
+                dimension=dimension,
+            )
+            for dimension in PricingDimension
+        )
+    return AdapterValidationReport(
+        manifest_hash=capture.manifest_hash,
+        checks=tuple(checks),
+        validator="tests",
+        validated_at="2026-03-17",
+    )
+
+
 # =============================================================================
-# §2 -- unknowns that change gamma are blockers
+# §2/§3 -- unknowns that change gamma block the calculation, not the capture
 # =============================================================================
 
 
-def test_the_default_configuration_is_not_capture_ready():
-    """The regression. v2.1.2 reported ready here."""
+def test_the_default_configuration_cannot_be_trusted_to_calculate():
+    """The v2.1.2 regression. Still a refusal, now on the right axis."""
     result = readiness(pipeline=pipeline())
-    assert not result.ready
-    assert result.state is CertificationState.NOT_READY
+    assert not result.calculation_trusted
+    assert result.state is CertificationState.READY_FOR_RAW_CAPTURE_ONLY
+
+
+def test_unknown_pricing_does_not_block_a_raw_capture():
+    """The v2.1.4 correction.
+
+    v2.1.3 refused to capture until the vendor's conventions were known, and
+    capturing is how several of them get answered. Bytes are worth having
+    whatever we understand about the day count.
+    """
+    result = readiness(pipeline=pipeline())
+    assert result.ready, result.blockers
+    assert result.blockers == ()
 
 
 def test_the_default_blocks_specifically_on_load_bearing_unknowns():
     result = readiness(pipeline=pipeline())
-    assert any("load-bearing" in blocker for blocker in result.blockers)
+    assert any("load-bearing" in blocker for blocker in result.calculation_blockers)
 
 
-def test_an_unknown_vendor_rate_blocks_readiness():
+def test_an_unknown_vendor_rate_blocks_the_calculation():
     result = readiness(pipeline=pipeline(rate_value=4.2, rate_units="UNKNOWN"))
-    assert not result.ready
+    assert not result.calculation_trusted
 
 
-def test_a_vendor_default_rate_blocks_readiness():
+def test_a_vendor_default_rate_blocks_the_calculation():
     """No rate_value sent means the vendor used *something* we cannot name."""
     result = readiness(pipeline=pipeline(rate_value=None))
-    assert not result.ready
+    assert not result.calculation_trusted
 
 
-def test_an_unknown_dividend_convention_blocks_readiness():
+def test_an_unknown_dividend_convention_blocks_the_calculation():
     result = readiness(
         pipeline=pipeline(
             annual_dividend=1.3, dividend_convention="UNKNOWN_VENDOR_CONVENTION"
         )
     )
-    assert not result.ready
+    assert not result.calculation_trusted
 
 
 def test_a_resolved_configuration_can_become_capture_ready():
     """The fix must leave a path to ready, or it is just a refusal."""
     result = readiness()
     assert result.ready, result.blockers
-    assert result.state is CertificationState.READY_FOR_CAPTURE_ONLY
+    assert result.calculation_trusted, result.calculation_blockers
+    assert result.state is CertificationState.READY_FOR_RAW_CAPTURE_ONLY
 
 
-def test_a_manually_asserted_compatibility_cannot_bypass_unknowns():
-    """compatible=True with load-bearing unknowns still blocks.
+def test_an_attestation_cannot_overturn_a_measured_mismatch():
+    """Resolution is for open questions, not for disagreements."""
+    from src.config.compatibility import (
+        CompatibilityEvidence,
+        CompatibilityStatus,
+        PricingAssumptionAttestation,
+        PricingCompatibilityReport,
+        PricingDimensionResult,
+        apply_attestations,
+    )
 
-    The report's own ``compatible`` flag is not the authority; the unresolved
-    field list is.
-    """
-    from dataclasses import replace
-
-    dishonest = replace(
-        pipeline(),
-        pricing_compatibility=PricingCompatibilityReport(
-            compatible=True,
-            unknown_fields=(
-                "risk_free_rate: units are undocumented",
-                "dividend_yield: convention is undocumented",
+    measured = PricingCompatibilityReport(
+        dimensions=(
+            PricingDimensionResult(
+                dimension=PricingDimension.RISK_FREE_RATE,
+                status=CompatibilityStatus.MISMATCHED,
+                code="RATE_VALUE_DIFFERS",
+                vendor_value=0.05,
+                local_value=0.042,
+            ),
+        )
+    )
+    after = apply_attestations(
+        measured,
+        (
+            PricingAssumptionAttestation(
+                dimension=PricingDimension.RISK_FREE_RATE,
+                evidence=CompatibilityEvidence(
+                    source=EvidenceSource.VENDOR_DOCUMENTATION,
+                    reference="tests/fixtures/vendor_conventions.md",
+                    observed_at="2026-07-31",
+                ),
             ),
         ),
     )
-    assert not readiness(pipeline=dishonest).ready
+    assert not after.compatible
+    assert any("CANNOT_OVERRIDE_MISMATCH" in f for f in after.hard_failures)
 
 
-def test_incompatible_fields_block_even_without_unknowns():
-    from dataclasses import replace
-
-    built = replace(
-        pipeline(),
-        pricing_compatibility=PricingCompatibilityReport(
-            compatible=False,
-            incompatible_fields=("risk_free_rate: 0.05 vs 0.042",),
-        ),
+def test_an_attestation_without_a_reference_cannot_be_constructed():
+    from src.config.compatibility import (
+        AttestationError,
+        CompatibilityEvidence,
+        PricingAssumptionAttestation,
     )
-    result = readiness(pipeline=built)
+
+    with pytest.raises(AttestationError, match=r"reference"):
+        PricingAssumptionAttestation(
+            dimension=PricingDimension.DAY_COUNT,
+            evidence=CompatibilityEvidence(
+                source=EvidenceSource.VENDOR_DOCUMENTATION, observed_at="2026-07-31"
+            ),
+        )
+
+
+def test_an_attestation_without_a_date_cannot_be_constructed():
+    from src.config.compatibility import (
+        AttestationError,
+        CompatibilityEvidence,
+        PricingAssumptionAttestation,
+    )
+
+    with pytest.raises(AttestationError, match=r"observed_at"):
+        PricingAssumptionAttestation(
+            dimension=PricingDimension.DAY_COUNT,
+            evidence=CompatibilityEvidence(
+                source=EvidenceSource.VENDOR_DOCUMENTATION, reference="somewhere"
+            ),
+        )
+
+
+def test_a_partial_attestation_set_leaves_the_rest_blocking():
+    """Answering six of seven questions is not answering the seventh."""
+    partial = pipeline(
+        **resolved_settings(
+            pricing_attestations=attestations((PricingDimension.DAY_COUNT,)),
+            **CAPTURE_SETTINGS,
+        )
+    )
+    result = readiness(pipeline=partial)
+    assert not result.calculation_trusted
+    assert PricingDimension.DAY_COUNT not in (
+        partial.pricing_compatibility.load_bearing_unknowns
+    )
+
+
+# =============================================================================
+# §6 -- raw capture is mandatory for capture readiness
+# =============================================================================
+
+
+def test_capture_disabled_is_not_capture_ready():
+    """The one thing READY_FOR_RAW_CAPTURE_ONLY has to mean."""
+    result = readiness(pipeline=resolved_pipeline(raw_capture_enabled=False))
     assert not result.ready
-    assert any("incompatible" in blocker for blocker in result.blockers)
+    assert any("raw_capture_enabled" in blocker for blocker in result.blockers)
+    assert result.state is CertificationState.NOT_READY
+
+
+def test_capture_enabled_with_no_path_never_reaches_readiness():
+    """Refused at load time, which is earlier and therefore better."""
+    from src.config.thetadata import ThetaDataConfigError
+
+    with pytest.raises(ThetaDataConfigError, match=r"raw_capture_path"):
+        resolved_pipeline(raw_capture_enabled=True, raw_capture_path=None)
+
+
+def test_capture_configured_with_no_store_to_check_is_not_capture_ready():
+    result = readiness(raw_store=None)
+    assert not result.ready
+    assert any("no store was supplied" in blocker for blocker in result.blockers)
 
 
 # =============================================================================
-# §23 -- the state machine
+# §3/§4/§5 -- the state machine and the evidence it needs
 # =============================================================================
 
 
-def test_no_live_capture_can_ever_produce_certified():
-    """ADAPTER_CERTIFIED needs bytes AND a validation report; offline has neither."""
-    assert readiness().state is not CertificationState.ADAPTER_CERTIFIED
+def test_an_untyped_capture_is_refused_outright():
+    """The v2.1.4 regression, stated as plainly as it deserves.
+
+    ``assess_readiness(capture_manifest=object(), validation_report=object())``
+    returned ADAPTER_CERTIFIED.
+    """
+    with pytest.raises(TypeError, match=r"not a capture"):
+        readiness(capture=object())
 
 
-def test_a_capture_without_validation_is_not_certified():
-    result = readiness(capture_manifest=object())
-    assert result.state is CertificationState.CAPTURE_COMPLETED_NOT_VALIDATED
+def test_an_untyped_validation_is_refused_outright():
+    with pytest.raises(TypeError, match=r"not a validation"):
+        readiness(capture=captured(), validation=object())
+
+
+def test_a_manifest_the_store_cannot_support_is_not_a_capture():
+    store = InMemoryRawStore()
+    orphan = RawCaptureManifest(
+        session_id="session",
+        record_ids=("never-written",),
+        payload_hashes=("0" * 64,),
+    )
+    verification = verify_capture(orphan, store)
+    assert not verification.verified
+    assert any(f.startswith("MISSING_RECORD:") for f in verification.failures)
+
+    result = readiness(capture=verification)
+    assert result.state is CertificationState.READY_FOR_RAW_CAPTURE_ONLY
+
+
+def test_a_disabled_capture_manifest_is_not_a_capture():
+    verification = verify_capture(RawCaptureManifest.disabled(), InMemoryRawStore())
+    assert not verification.verified
+    assert any("CAPTURE_DISABLED" in f for f in verification.failures)
+
+
+def test_a_verified_capture_with_unknown_pricing_stops_at_raw_capture():
+    result = readiness(pipeline=pipeline(), capture=captured())
+    assert result.state is CertificationState.RAW_CAPTURE_COMPLETED
+    assert not result.calculation_trusted
+
+
+def test_a_verified_capture_with_resolved_pricing_permits_an_unvalidated_calculation():
+    result = readiness(capture=captured())
+    assert result.state is CertificationState.CALCULATION_NOT_VALIDATED
+    assert result.calculation_trusted
+
+
+def test_a_validation_report_must_describe_this_capture():
+    capture = captured()
+    foreign = AdapterValidationReport(
+        manifest_hash="0000000000000000",
+        checks=(ValidationCheck(name="anything", passed=True),),
+    )
+    result = readiness(capture=capture, validation=foreign)
+    assert any(
+        "describes manifest" in blocker for blocker in result.calculation_blockers
+    )
+    assert result.state is CertificationState.RAW_CAPTURE_COMPLETED
+
+
+def test_an_empty_validation_report_cannot_be_constructed():
+    with pytest.raises(ValueError, match=r"no checks"):
+        AdapterValidationReport(manifest_hash="0000000000000000")
+
+
+def test_a_validation_report_with_no_manifest_cannot_be_constructed():
+    with pytest.raises(ValueError, match=r"manifest_hash"):
+        AdapterValidationReport(
+            manifest_hash="  ", checks=(ValidationCheck(name="x", passed=True),)
+        )
+
+
+def test_a_failing_validation_does_not_advance_the_state():
+    capture = captured()
+    result = readiness(
+        capture=capture, validation=validation_for(capture, passed=False)
+    )
+    assert result.state is CertificationState.RAW_CAPTURE_COMPLETED
+
+
+def test_documented_conventions_cannot_reach_certified():
+    """The ceiling this release is under.
+
+    Every attestation here rests on ``VENDOR_DOCUMENTATION``. Documentation
+    records what the vendor says it does; only a live comparison observes what
+    it did, and no such comparison has been run.
+    """
+    capture = captured()
+    result = readiness(
+        capture=capture, validation=validation_for(capture, dimensions=False)
+    )
+    assert result.state is CertificationState.CALCULATION_VALIDATED
     assert result.state is not CertificationState.ADAPTER_CERTIFIED
 
 
-def test_certification_requires_both_a_capture_and_a_validation():
-    result = readiness(capture_manifest=object(), validation_report=object())
+def test_planned_provenance_cannot_reach_certified():
+    capture = captured()
+    result = readiness(
+        open_interest=planned_oi(),
+        capture=capture,
+        validation=validation_for(capture),
+    )
+    assert result.state is CertificationState.CALCULATION_VALIDATED
+    assert dict(result.provenance_grades)["open_interest_as_of"] == "PLANNED"
+
+
+def test_documented_conventions_can_never_reach_certified():
+    """The ceiling this repository is under, whatever else is supplied.
+
+    Every attestation it ships rests on ``VENDOR_DOCUMENTATION``. No arrangement
+    of captures and validation reports promotes a claim about what the vendor
+    says into an observation of what the vendor did.
+    """
+    capture = captured()
+    for validation in (None, validation_for(capture)):
+        result = readiness(capture=capture, validation=validation)
+        assert result.state is not CertificationState.ADAPTER_CERTIFIED
+
+
+def test_live_comparison_evidence_is_what_reaches_certified():
+    """The top rung is real, not decoration -- and it needs a real comparison."""
+    live = pipeline(
+        **resolved_settings(
+            pricing_attestations=attestations(source=EvidenceSource.LIVE_COMPARISON),
+            **CAPTURE_SETTINGS,
+        )
+    )
+    capture = captured()
+    result = readiness(
+        pipeline=live, capture=capture, validation=validation_for(capture)
+    )
     assert result.state is CertificationState.ADAPTER_CERTIFIED
 
 
 def test_blockers_override_every_other_state():
-    result = readiness(spot=None, capture_manifest=object(), validation_report=object())
+    capture = captured()
+    result = readiness(spot=None, capture=capture, validation=validation_for(capture))
     assert result.state is CertificationState.NOT_READY
 
 
 def test_missing_credentials_prevent_capture_readiness(monkeypatch):
     monkeypatch.delenv("THETA_USER", raising=False)
     monkeypatch.delenv("THETA_PASS", raising=False)
+
+    # The client factory already refuses to build, which is the stronger
+    # guarantee; swapping the config in afterwards is how the readiness report's
+    # own credential blocker gets exercised at all.
     from dataclasses import replace
 
-    built = resolved_pipeline()
     needs_auth = replace(
-        built,
+        resolved_pipeline(),
         config=parse_thetadata_config(
-            {
-                "authentication_mode": "basic",
-                "username_env": "THETA_USER",
-                "password_env": "THETA_PASS",
-                "rate_value": 4.2,
-                "rate_units": "PERCENT_ANNUAL_RATE",
-                "annual_dividend": 0.0,
-                "dividend_convention": "ZERO_DIVIDEND",
-            }
+            resolved_settings(
+                authentication_mode="basic",
+                username_env="THETA_USER",
+                password_env="THETA_PASS",
+                **CAPTURE_SETTINGS,
+            )
         ),
     )
     result = readiness(pipeline=needs_auth)
@@ -226,20 +501,26 @@ def test_missing_credentials_prevent_capture_readiness(monkeypatch):
 
 
 def test_the_state_is_serialised():
-    assert readiness().as_dict()["state"] == "READY_FOR_CAPTURE_ONLY"
+    payload = readiness().as_dict()
+    assert payload["state"] == "READY_FOR_RAW_CAPTURE_ONLY"
+    assert payload["schema_version"] == "adapter-certification/2.1.4"
+    assert payload["provenance_grades"]["spot"] == "OBSERVED"
 
 
-@pytest.mark.parametrize(
-    "state",
-    [
-        CertificationState.NOT_READY,
-        CertificationState.READY_FOR_CAPTURE_ONLY,
-        CertificationState.CAPTURE_COMPLETED_NOT_VALIDATED,
-        CertificationState.ADAPTER_CERTIFIED,
-    ],
-)
+@pytest.mark.parametrize("state", list(CertificationState))
 def test_every_state_is_declared(state):
     assert state.value
+
+
+def test_the_ladder_has_a_rung_for_each_distinct_claim():
+    assert [state.value for state in CertificationState] == [
+        "NOT_READY",
+        "READY_FOR_RAW_CAPTURE_ONLY",
+        "RAW_CAPTURE_COMPLETED",
+        "CALCULATION_NOT_VALIDATED",
+        "CALCULATION_VALIDATED",
+        "ADAPTER_CERTIFIED",
+    ]
 
 
 def test_unknown_chain_completeness_is_still_only_a_warning():
@@ -249,12 +530,52 @@ def test_unknown_chain_completeness_is_still_only_a_warning():
     assert any("completeness" in warning.lower() for warning in result.warnings)
 
 
+def test_documentation_backed_dimensions_are_called_out():
+    result = readiness()
+    assert any("vendor documentation" in warning for warning in result.warnings)
+
+
 def test_a_tier_that_cannot_serve_the_mode_blocks():
     """Enforced at config load, so the pipeline cannot even be built."""
     from src.config.thetadata import ThetaDataConfigError
 
     with pytest.raises(ThetaDataConfigError, match=r"(?i)tier"):
         pipeline(tier="value")
+
+
+# =============================================================================
+# §14 -- provenance grades are derived, not asserted
+# =============================================================================
+
+
+def test_provenance_without_evidence_is_planned():
+    assert planned_oi().grade is ProvenanceGrade.PLANNED
+
+
+def test_provenance_with_a_named_record_is_observed():
+    assert observed_oi().grade is ProvenanceGrade.OBSERVED
+
+
+def test_evidence_that_names_no_record_cannot_be_constructed():
+    with pytest.raises(ValueError, match=r"raw_record_id"):
+        ProvenanceEvidence(
+            raw_record_id="", field_path="open_interest", manifest_hash="abc"
+        )
+
+
+def test_evidence_that_names_no_manifest_cannot_be_constructed():
+    with pytest.raises(ValueError, match=r"manifest_hash"):
+        ProvenanceEvidence(
+            raw_record_id="r", field_path="open_interest", manifest_hash=""
+        )
+
+
+def test_a_validation_report_upgrades_observed_to_validated():
+    capture = captured()
+    result = readiness(capture=capture, validation=validation_for(capture))
+    grades = dict(result.provenance_grades)
+    assert grades["open_interest_as_of"] == "VALIDATED"
+    assert grades["spot"] == "VALIDATED"
 
 
 def test_readiness_never_implies_trading_readiness():

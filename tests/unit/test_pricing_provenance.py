@@ -28,10 +28,12 @@ import pytest
 
 from src.config.pipeline import (
     DividendConvention,
+    IvGammaPricingMode,
     PipelineConsistencyError,
     PricingMode,
     RateUnit,
     ThetaDataResearchPipeline,
+    VendorGammaPolicy,
     derive_pricing_mode,
 )
 from src.config.thetadata import ThetaDataConfigError, parse_thetadata_config
@@ -105,11 +107,35 @@ def test_pricing_mode_is_derived_deterministically():
     )
 
 
-def test_vendor_gamma_validation_is_selectable_with_vendor_iv():
-    """Comparing vendor gamma is orthogonal to where the IV came from."""
-    assert config(pricing_mode="VENDOR_GAMMA_VALIDATION", tier="pro").pricing_mode is (
-        PricingMode.VENDOR_GAMMA_VALIDATION
+def test_the_gamma_comparison_no_longer_displaces_the_iv_mode():
+    """The v2.1.4 regression.
+
+    ``VENDOR_GAMMA_VALIDATION`` was a third value of the pricing-mode enum, so
+    asking to compare the vendor's gamma moved the session *out of*
+    ``VENDOR_IV_LOCAL_GAMMA``. Vendor IV still fed the local gamma; the checks
+    that governed it simply stopped running. The two questions are now two
+    fields, and the IV answer is unchanged by the gamma answer.
+    """
+    built = config(vendor_gamma_policy="COMPARE_ONLY", tier="pro")
+    assert built.pricing_mode is IvGammaPricingMode.VENDOR_IV_LOCAL_GAMMA
+    assert built.vendor_gamma_policy is VendorGammaPolicy.COMPARE_ONLY
+
+
+def test_comparing_vendor_gamma_does_not_relax_the_iv_checks():
+    """The consequence that mattered, stated directly."""
+    without = pipeline(tier="pro")
+    with_comparison = pipeline(tier="pro", vendor_gamma_policy="COMPARE_ONLY")
+
+    assert not with_comparison.pricing_compatibility.compatible
+    assert set(with_comparison.pricing_compatibility.load_bearing_unknowns) == set(
+        without.pricing_compatibility.load_bearing_unknowns
     )
+
+
+def test_the_old_mode_name_is_refused_rather_than_translated():
+    """Reinterpreting it silently would change what the file does."""
+    with pytest.raises(ThetaDataConfigError, match=r"vendor_gamma_policy"):
+        config(pricing_mode="VENDOR_GAMMA_VALIDATION", tier="pro")
 
 
 def test_a_contradictory_manual_mode_fails():
@@ -117,12 +143,10 @@ def test_a_contradictory_manual_mode_fails():
         config(iv_source="NBBO_MID_IV", pricing_mode="LOCAL_IV_LOCAL_GAMMA")
 
 
-def test_no_supported_mode_aggregates_vendor_gamma():
-    from src.config.pipeline import MODE_CAPABILITIES
-
-    for mode, capability in MODE_CAPABILITIES.items():
-        assert capability.local_gamma_used_for_gex, mode
-        assert not capability.vendor_gamma_used_for_gex, mode
+def test_no_gamma_policy_aggregates_vendor_gamma():
+    """Read off the enum itself, not a parallel table that could drift from it."""
+    for policy in VendorGammaPolicy:
+        assert not policy.aggregates_vendor_gamma, policy
 
 
 # =============================================================================
@@ -143,13 +167,13 @@ def test_no_supported_mode_may_prefer_vendor_gamma():
         )
 
 
-def test_validation_mode_still_cannot_aggregate_vendor_gamma():
+def test_comparing_vendor_gamma_still_cannot_aggregate_it():
     from src.adapters.transport import FakeTransport
     from src.gex.config import GexEngineConfig
 
     with pytest.raises(PipelineConsistencyError):
         ThetaDataResearchPipeline.from_config(
-            config(pricing_mode="VENDOR_GAMMA_VALIDATION", tier="pro"),
+            config(vendor_gamma_policy="COMPARE_ONLY", tier="pro"),
             transport=FakeTransport(),
             engine_config=GexEngineConfig(prefer_vendor_gamma=True),
         )
@@ -201,7 +225,7 @@ def test_unknown_vendor_rate_units_are_not_compatible():
         ),
     )
     assert not report.compatible
-    assert report.unknown_fields
+    assert report.load_bearing_unknowns
 
 
 def test_a_null_vendor_rate_is_unknown_not_matched():
@@ -219,7 +243,7 @@ def test_a_null_vendor_rate_is_unknown_not_matched():
         ),
     )
     assert not report.compatible
-    assert any("UNKNOWN_VENDOR_DEFAULT" in f for f in report.unknown_fields)
+    assert any(d.code == "UNKNOWN_VENDOR_DEFAULT" for d in report.unknown)
 
 
 def test_normalised_values_must_actually_match():
@@ -236,7 +260,7 @@ def test_normalised_values_must_actually_match():
         ),
     )
     assert not report.compatible
-    assert report.incompatible_fields
+    assert report.load_bearing_mismatches
 
 
 def test_a_rate_source_mismatch_is_reported():
@@ -250,7 +274,9 @@ def test_a_rate_source_mismatch_is_reported():
             source="sofr", raw_value=0.042, unit=RateUnit.DECIMAL_ANNUAL_RATE
         ),
     )
-    assert any("source" in f for f in report.warnings + report.incompatible_fields)
+    # Two curves that agree today need not agree tomorrow, so this is a warning
+    # rather than a blocker -- but it is a coded one, not a turn of phrase.
+    assert any(w.startswith("RATE_SOURCE_DIFFERS:") for w in report.warnings)
 
 
 # =============================================================================
@@ -285,7 +311,7 @@ def test_the_same_convention_with_different_values_is_incompatible():
         ),
     )
     assert not report.compatible
-    assert report.incompatible_fields
+    assert report.load_bearing_mismatches
 
 
 def test_the_same_convention_and_value_is_compatible():
@@ -326,7 +352,7 @@ def test_an_unknown_vendor_convention_is_unknown_not_incompatible():
         ),
     )
     assert not report.compatible
-    assert report.unknown_fields
+    assert report.load_bearing_unknowns
 
 
 # =============================================================================
@@ -334,10 +360,10 @@ def test_an_unknown_vendor_convention_is_unknown_not_incompatible():
 # =============================================================================
 
 
-def test_standard_tier_cannot_request_vendor_gamma_validation():
+def test_standard_tier_cannot_request_the_vendor_gamma_comparison():
     """Second-order greeks are Pro-only, so there is no vendor gamma to compare."""
     with pytest.raises(ThetaDataConfigError, match=r"(?i)tier"):
-        config(tier="standard", pricing_mode="VENDOR_GAMMA_VALIDATION")
+        config(tier="standard", vendor_gamma_policy="COMPARE_ONLY")
 
 
 def test_value_tier_cannot_supply_vendor_iv():
@@ -346,8 +372,26 @@ def test_value_tier_cannot_supply_vendor_iv():
         config(tier="value", iv_source="NBBO_MID_IV")
 
 
-def test_pro_tier_supports_vendor_gamma_validation():
-    assert config(tier="pro", pricing_mode="VENDOR_GAMMA_VALIDATION") is not None
+def test_pro_tier_supports_the_vendor_gamma_comparison():
+    assert config(tier="pro", vendor_gamma_policy="COMPARE_ONLY") is not None
+
+
+def test_the_two_requirements_are_additive():
+    """A gamma comparison adds to the vendor-IV requirement, never replaces it."""
+    from src.adapters.thetadata.capabilities import (
+        SECOND_ORDER_GAMMA,
+        VENDOR_IV_FIELDS,
+    )
+    from src.config.pipeline import required_capabilities
+
+    iv_only = required_capabilities(IvGammaPricingMode.VENDOR_IV_LOCAL_GAMMA)
+    with_gamma = required_capabilities(
+        IvGammaPricingMode.VENDOR_IV_LOCAL_GAMMA,
+        policy=VendorGammaPolicy.COMPARE_ONLY,
+    )
+    assert VENDOR_IV_FIELDS in iv_only
+    assert set(iv_only) < set(with_gamma)
+    assert SECOND_ORDER_GAMMA in with_gamma
 
 
 def test_standard_tier_supports_vendor_iv_local_gamma():

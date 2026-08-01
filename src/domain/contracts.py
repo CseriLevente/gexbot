@@ -62,9 +62,19 @@ class OptionContract:
 
     @property
     def canonical_id(self) -> str:
+        """The identity string, produced by the one canonical formatter.
+
+        Shares ``canonical_strike`` with ``contract_identity``. Two formatters
+        that agree on every strike they were tested with are not the same
+        formatter, and the failure mode is quiet: one missing contract and one
+        unexpected contract for the same instrument, netting to a completeness
+        shortfall that does not exist.
+        """
+        from src.domain.strikes import canonical_strike_of
+
         return (
             f"{self.root.value}:{self.expiry.isoformat()}:"
-            f"{self.strike:.4f}:{self.right.value}"
+            f"{canonical_strike_of(self.strike)}:{self.right.value}"
         )
 
 

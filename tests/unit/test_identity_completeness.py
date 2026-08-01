@@ -38,7 +38,7 @@ def measure(*, expected=None, received=(), source="contract_list", **overrides):
 
 
 A, B, C, D = (
-    "SPXW:2026-03-20:4900.0000:call",
+    "SPXW:2026-03-20:4900:call",
     ("SPXW:2026-03-20:4910.0000:call"),
     "SPXW:2026-03-20:4920.0000:call",
     "SPXW:2026-03-20:4930.0000:call",

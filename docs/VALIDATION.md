@@ -223,9 +223,9 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.4` | `pyproject.toml` | anything ships |
-| Parser version | `thetadata-v3-parser/2.1.4` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
-| Engine version | `gex-engine/2.1.4` | `src/domain/model_spec.py` | the numerics change |
+| Package version | `2.1.5` | `pyproject.toml` | anything ships |
+| Parser version | `thetadata-v3-parser/2.1.5` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
+| Engine version | `gex-engine/2.1.5` | `src/domain/model_spec.py` | the numerics change |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

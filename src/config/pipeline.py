@@ -64,6 +64,7 @@ __all__ = [
     "SUPPORTED_IV_SOURCES",
     "UNSUPPORTED_IV_SOURCES",
     "VENDOR_COMPUTED_IV_SOURCES",
+    "CalculationMode",
     "CompatibilityEvidence",
     "CompatibilityStatus",
     "DividendAssumption",
@@ -461,15 +462,29 @@ def check_rate_compatibility(
             )
         )
 
+    # The units stay UNKNOWN however confidently the configuration states them.
+    #
+    # We send ``rate_value``. We do not send ``rate_units`` -- there is no such
+    # query parameter -- so how ThetaData reads the number is a fact about its
+    # API, not about our YAML. v2.1.4 marked this MATCHED from the local setting
+    # and thereby let a local declaration settle a remote semantic. Everything
+    # below is computed *under* the stated units, and says so.
     units = _result(
         PricingDimension.RATE_UNITS,
-        CompatibilityStatus.MATCHED,
-        "VENDOR_RATE_UNITS_STATED",
-        vendor=vendor.unit.value,
+        CompatibilityStatus.UNKNOWN,
+        "VENDOR_RATE_UNITS_UNVERIFIED",
+        vendor=None,
         local=local.unit.value,
-        evidence=CompatibilityEvidence(
-            source=EvidenceSource.LOCAL_CONFIGURATION, reference="rate_units"
+        detail=(
+            f"the configuration states the vendor reads rate_value as "
+            f"{vendor.unit.value}, but rate_units is not a parameter this "
+            "adapter sends; nothing has confirmed how the API reads it. 4.2 is "
+            "either 4.2% or 420%, and the difference is a factor of a hundred "
+            "in every gamma"
         ),
+    )
+    conditional = (
+        " -- conditional on the unverified rate units, which are the vendor's to define"
     )
 
     if local.normalized is None or vendor.normalized is None:
@@ -524,6 +539,10 @@ def check_rate_compatibility(
                 evidence=CompatibilityEvidence(
                     source=EvidenceSource.LOCAL_CONFIGURATION,
                     reference="rate_value+rate_units",
+                ),
+                detail=(
+                    f"we send {vendor.raw_value} and the model uses "
+                    f"{local.normalized}, which agree{conditional}"
                 ),
             ),
         ),
@@ -582,15 +601,22 @@ def check_dividend_compatibility(
             )
         )
 
+    # The convention stays UNKNOWN however confidently the configuration states
+    # it, for the same reason as the rate units: we send ``annual_dividend`` and
+    # we do not send ``dividend_convention``. Whether ThetaData reads 1.3 as a
+    # cash amount or a continuous yield is a fact about its API. v2.1.4 marked
+    # this MATCHED from the local setting.
     convention = _result(
         PricingDimension.DIVIDEND_CONVENTION,
-        CompatibilityStatus.MATCHED,
-        "DIVIDEND_CONVENTION_AGREES",
-        vendor=vendor.convention.value,
+        CompatibilityStatus.UNKNOWN,
+        "VENDOR_DIVIDEND_CONVENTION_UNVERIFIED",
+        vendor=None,
         local=local.convention.value,
-        evidence=CompatibilityEvidence(
-            source=EvidenceSource.LOCAL_CONFIGURATION,
-            reference="dividend_convention",
+        detail=(
+            f"the configuration states the vendor reads annual_dividend as "
+            f"{vendor.convention.value}, but dividend_convention is not a "
+            "parameter this adapter sends; nothing has confirmed how the API "
+            "reads it"
         ),
     )
     if vendor.convention is DividendConvention.ZERO_DIVIDEND:
@@ -642,6 +668,12 @@ def check_dividend_compatibility(
                         source=EvidenceSource.LOCAL_CONFIGURATION,
                         reference="annual_dividend",
                     ),
+                    detail=(
+                        "zero is the one dividend whose *value* does not depend "
+                        "on the convention: exp(-0*T) is 1 whether the vendor "
+                        "read it as cash or as a yield. The convention itself "
+                        "stays unverified"
+                    ),
                 ),
             )
         )
@@ -672,21 +704,97 @@ def check_dividend_compatibility(
                 ),
             )
         )
+    # The two numbers agree. Whether they *mean* the same thing depends on the
+    # convention, which is the vendor's and is unverified -- so a non-zero
+    # dividend is not settled by its magnitude alone. Zero is the exception,
+    # handled above.
     return PricingCompatibilityReport(
         dimensions=(
             convention,
             _result(
                 PricingDimension.DIVIDEND_VALUE,
-                CompatibilityStatus.MATCHED,
-                "DIVIDEND_VALUE_AGREES",
+                CompatibilityStatus.UNKNOWN,
+                "DIVIDEND_VALUE_UNVERIFIED_UNDER_AN_UNKNOWN_CONVENTION",
                 vendor=vendor.value,
                 local=local.value,
-                evidence=CompatibilityEvidence(
-                    source=EvidenceSource.LOCAL_CONFIGURATION,
-                    reference="annual_dividend",
+                detail=(
+                    f"both sides carry {vendor.value}, but a cash amount and a "
+                    "continuous yield of the same magnitude are different "
+                    "quantities and the vendor's reading is unverified"
                 ),
             ),
         )
+    )
+
+
+class CalculationMode(str, Enum):
+    """Which of the two calculations produced a snapshot.
+
+    Stamped into the metadata, so a number carries the answer with it. v2.1.4
+    had one calculation and no way to tell from the result whether the
+    assumptions behind it had been established.
+    """
+
+    #: Computed under whatever is currently known. Never an input to anything
+    #: that stands behind a number.
+    DIAGNOSTIC_UNTRUSTED = "DIAGNOSTIC_UNTRUSTED"
+    #: Every dependency established: pricing resolved, provenance observed,
+    #: capture complete, fingerprints matching.
+    TRUSTED = "TRUSTED"
+
+
+#: Emitted by every diagnostic calculation, so a scan of the warnings finds them.
+DIAGNOSTIC_WARNING_CODE = "DIAGNOSTIC_UNTRUSTED_CALCULATION"
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    """A nested metadata mapping, or an empty one.
+
+    ``ChainSnapshot.meta`` is ``dict[str, object]`` by design -- adapters put
+    arbitrary provenance in it -- so reading two levels down needs a narrowing
+    step rather than an annotation asserting what came out.
+    """
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _chain_fingerprint(chain: Any) -> str:
+    """A digest of the chain a calculation ran on."""
+    payload = json.dumps(
+        {
+            "as_of": chain.as_of.isoformat(),
+            "spot": chain.spot,
+            "contracts": sorted(q.contract.canonical_id for q in chain.quotes),
+            "manifest": (chain.meta.get("raw_capture_manifest") or {}).get(
+                "manifest_hash"
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _require_a_chain(chain: Any, *, mode: str) -> None:
+    """Refuse a computed snapshot where a chain belongs.
+
+    A ``GexSnapshot`` has ``meta`` and looks close enough to a chain to get some
+    way in. Passing a diagnostic result back as trusted input is the specific
+    mistake worth naming.
+    """
+    from src.domain.contracts import ChainSnapshot
+
+    if isinstance(chain, ChainSnapshot):
+        return
+    calculation_mode = getattr(chain, "meta", {}).get("calculation_mode")
+    if calculation_mode == CalculationMode.DIAGNOSTIC_UNTRUSTED.value:
+        raise PipelineConsistencyError(
+            "this is the output of a diagnostic calculation, not a chain. A "
+            "diagnostic result is untrusted permanently; recomputing from it "
+            "would launder that away."
+        )
+    raise PipelineConsistencyError(
+        f"the {mode} calculation needs a ChainSnapshot, got {type(chain).__name__}"
     )
 
 
@@ -845,6 +953,60 @@ class ThetaDataResearchPipeline:
         self,
         *,
         as_of: datetime,
+        open_interest_as_of: date | None = None,
+        expected_contract_ids: tuple[str, ...] | None = None,
+        expected_source: str = "none",
+        capture: Any = None,
+    ) -> ChainSnapshot:
+        """Fetch the chain this session is configured for, spot included.
+
+        Takes no ``spot``. Under ``underlying_price_source:
+        vendor_index_snapshot`` the underlying is the vendor's to give, and
+        every gamma in the snapshot is computed against it -- so this fetches
+        the index snapshot itself, inside the same capture session, and uses
+        what came back. v2.1.4 accepted whatever number the caller passed and
+        recorded it as the session's spot.
+
+        Takes no ``request`` either: the request is the session's, derived once
+        from the configuration. A caller who could substitute one could fetch a
+        different symbol, DTE window or strike range from the one the
+        compatibility assessment was made about.
+
+        For a genuinely external spot -- a historical research run, a spot from
+        somewhere this adapter does not reach -- see
+        ``fetch_chain_with_external_spot``, which is a different method because
+        it produces a differently-provenanced snapshot.
+        """
+        self.validate_integrity()
+        if not self._uses_vendor_index_spot:
+            raise PipelineConsistencyError(
+                f"underlying_price_source is {self.config.underlying_price_source!r}, "
+                "which this method cannot fetch. Use "
+                "fetch_chain_with_external_spot, which records the spot as "
+                "caller-supplied rather than observed."
+            )
+        session = capture if capture is not None else self._new_capture_session(as_of)
+        mark = session.mark() if session is not None else 0
+        spot, spot_timestamp, observation = self._capture_index_spot(
+            as_of=as_of, capture=session
+        )
+        return self._assemble(
+            as_of=as_of,
+            spot=spot,
+            spot_timestamp=spot_timestamp,
+            spot_source="vendor_index_snapshot",
+            spot_observation=observation,
+            open_interest_as_of=open_interest_as_of,
+            expected_contract_ids=expected_contract_ids,
+            expected_source=expected_source,
+            capture=session,
+            mark=mark,
+        )
+
+    def fetch_chain_with_external_spot(
+        self,
+        *,
+        as_of: datetime,
         spot: float,
         spot_timestamp: datetime | None = None,
         open_interest_as_of: date | None = None,
@@ -852,23 +1014,76 @@ class ThetaDataResearchPipeline:
         expected_source: str = "none",
         capture: Any = None,
     ) -> ChainSnapshot:
-        """Fetch the chain this session is configured for.
+        """Fetch with a spot from outside this adapter.
 
-        Takes no ``request``: the request is the session's, derived once from
-        the configuration. A caller who could substitute one could fetch a
-        different symbol, a different DTE window or a different strike range
-        from the one the compatibility assessment was made about, and the
-        resulting snapshot would carry a provenance record describing a session
-        that did not happen.
-
-        Takes no ``risk_free_rate`` or ``dividend_yield`` either. Those are the
-        model's, and they are exactly the numbers the compatibility check
-        compared against the vendor's.
+        A real use -- a research run against a historical print, a spot from a
+        source this repository does not read -- and a different claim. The
+        snapshot records the spot as ``caller_supplied``, which keeps it out of
+        a trusted calculation.
         """
+        self.validate_integrity()
+        session = capture if capture is not None else self._new_capture_session(as_of)
+        mark = session.mark() if session is not None else 0
+        return self._assemble(
+            as_of=as_of,
+            spot=spot,
+            spot_timestamp=spot_timestamp,
+            spot_source="caller_supplied",
+            spot_observation=None,
+            open_interest_as_of=open_interest_as_of,
+            expected_contract_ids=expected_contract_ids,
+            expected_source=expected_source,
+            capture=session,
+            mark=mark,
+        )
+
+    @property
+    def _uses_vendor_index_spot(self) -> bool:
+        return self.config.underlying_price_source == "vendor_index_snapshot"
+
+    def _new_capture_session(self, as_of: datetime) -> Any:
+        from src.adapters.raw_store import CaptureSession, new_capture_session_id
+
+        if not self.config.raw_capture_enabled:
+            return None
+        return CaptureSession(
+            store=self.runtime.client.raw_store,
+            session_id=new_capture_session_id(as_of=as_of),
+        )
+
+    def _capture_index_spot(
+        self, *, as_of: datetime, capture: Any
+    ) -> tuple[float, datetime | None, Any]:
+        """Fetch the index snapshot into this session and read it back."""
+        record = self.runtime.capture_index_snapshot(as_of=as_of, capture=capture)
+        if record is None:
+            raise PipelineConsistencyError(
+                "the index snapshot could not be captured, so this session has "
+                "no underlying it can attribute. Every gamma is computed "
+                "against that number."
+            )
+        return record
+
+    def _assemble(
+        self,
+        *,
+        as_of: datetime,
+        spot: float,
+        spot_timestamp: datetime | None,
+        spot_source: str,
+        spot_observation: Any,
+        open_interest_as_of: date | None,
+        expected_contract_ids: tuple[str, ...] | None,
+        expected_source: str,
+        capture: Any,
+        mark: int,
+    ) -> ChainSnapshot:
+        from dataclasses import replace as _replace
+
         # ``or 0.0`` never fires in practice: ``ModelSpec`` resolves an absent
         # rate or dividend to a stated ZERO source. It is here so the types say
         # so rather than relying on the resolver staying that way.
-        return self.runtime.fetch_chain(
+        chain = self.runtime.fetch_chain(
             as_of=as_of,
             spot=spot,
             spot_timestamp=spot_timestamp,
@@ -879,47 +1094,211 @@ class ThetaDataResearchPipeline:
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
             pipeline=self,
+            manifest_since=mark,
+            capture_plan_fingerprint=self.capture_plan.fingerprint,
+        )
+        return _replace(
+            chain,
+            meta={
+                **chain.meta,
+                "spot_provenance": {
+                    "source": spot_source,
+                    "timestamp": (
+                        spot_timestamp.isoformat() if spot_timestamp else None
+                    ),
+                    "observation": (
+                        spot_observation.as_dict() if spot_observation else None
+                    ),
+                },
+            },
         )
 
-    def compute_gex(self, chain: ChainSnapshot) -> Any:
-        """Compute with this session's engine settings.
+    @property
+    def capture_plan(self) -> Any:
+        """What this session must capture. Derived from what it is configured to do."""
+        from src.adapters.thetadata.capture_plan import capture_plan_for
+        from src.adapters.thetadata.endpoints import Tier
 
-        The engine config is the one ``from_config`` validated against the
-        pricing mode, so the gamma policy that reaches the calculation is the
-        one the consistency check saw.
+        return capture_plan_for(
+            pricing_mode=self.pricing_mode,
+            vendor_gamma_policy=self.vendor_gamma_policy,
+            underlying_price_source=self.config.underlying_price_source,
+            tier=Tier(self.config.tier),
+        )
+
+    # -- the two calculations ------------------------------------------------
+    #
+    # v2.1.4 had one, ``compute_gex``, and it called the engine. It ran with six
+    # load-bearing pricing dimensions UNKNOWN, on a chain that had never been
+    # through this pipeline, with no capture behind it -- and the number it
+    # returned was indistinguishable from one computed under settled
+    # assumptions. The compatibility report existed and nothing read it.
+
+    def compute_diagnostic_gex(self, chain: ChainSnapshot) -> Any:
+        """Compute under whatever is currently known, and mark it untrusted.
+
+        Legitimate and useful: looking at the shape of a number is how you find
+        out whether the assumptions are worth establishing. The result is
+        stamped so that no later reader, and no downstream layer, can mistake it
+        for one that was.
         """
+        self.validate_integrity()
+        _require_a_chain(chain, mode="diagnostic")
+        snapshot = self._compute(chain)
+        blockers = self.calculation_blockers(chain)
+        return snapshot.with_meta(
+            trusted=False,
+            calculation_mode=CalculationMode.DIAGNOSTIC_UNTRUSTED.value,
+            calculation_blockers=list(blockers),
+            pipeline_fingerprint=self.fingerprint(),
+            chain_fingerprint=_chain_fingerprint(chain),
+        ).with_warnings(DIAGNOSTIC_WARNING_CODE)
+
+    def compute_trusted_gex(
+        self, chain: ChainSnapshot, *, evidence_context: Any = None
+    ) -> Any:
+        """Compute only when everything the number depends on is established.
+
+        Refuses rather than warns. A warning beside a number is read by whoever
+        happens to look; a refusal is read by everybody.
+        """
+        self.validate_integrity()
+        _require_a_chain(chain, mode="trusted")
+        blockers = self.calculation_blockers(chain)
+        if blockers:
+            raise PipelineConsistencyError(
+                "a trusted GEX cannot be computed under unresolved assumptions: "
+                + "; ".join(blockers)
+                + ". compute_diagnostic_gex() will produce the number, marked "
+                "untrusted."
+            )
+        snapshot = self._compute(chain)
+        return snapshot.with_meta(
+            trusted=True,
+            calculation_mode=CalculationMode.TRUSTED.value,
+            calculation_blockers=[],
+            pipeline_fingerprint=self.fingerprint(),
+            chain_fingerprint=_chain_fingerprint(chain),
+            evidence_context=(
+                evidence_context.as_dict()
+                if hasattr(evidence_context, "as_dict")
+                else None
+            ),
+        )
+
+    def calculation_blockers(self, chain: ChainSnapshot) -> tuple[str, ...]:
+        """Everything standing between this chain and a trusted number."""
+        report = self.pricing_compatibility
+        blockers: list[str] = []
+
+        if report.hard_failures:
+            blockers.append(
+                f"the pricing assessment reports hard failures "
+                f"{list(report.hard_failures)}"
+            )
+        if report.load_bearing_mismatches:
+            blockers.append(
+                "load-bearing pricing dimensions disagree: "
+                f"{[d.value for d in report.load_bearing_mismatches]}"
+            )
+        if report.load_bearing_unknowns:
+            blockers.append(
+                "load-bearing pricing dimensions are UNKNOWN: "
+                f"{[d.value for d in report.load_bearing_unknowns]}"
+            )
+
+        provenance_meta = _mapping(chain.meta.get("pipeline"))
+        carried = provenance_meta.get("pipeline_fingerprint")
+        if carried != self.fingerprint():
+            blockers.append(
+                f"the chain carries pipeline fingerprint {carried!r}; this "
+                f"pipeline is {self.fingerprint()!r}"
+            )
+
+        manifest = _mapping(chain.meta.get("raw_capture_manifest"))
+        if not manifest.get("capture_enabled") or not manifest.get("record_ids"):
+            blockers.append(
+                "the chain carries no verified raw-capture manifest, so the "
+                "bytes behind the number cannot be produced"
+            )
+
+        engine_fingerprint = getattr(self.engine_config, "fingerprint", None)
+        if callable(engine_fingerprint):
+            carried_engine = provenance_meta.get("engine_fingerprint")
+            if carried_engine is not None and carried_engine != engine_fingerprint():
+                blockers.append("the chain was fetched under different engine settings")
+
+        provenance = _mapping(chain.meta.get("spot_provenance"))
+        if provenance.get("source") != "vendor_index_snapshot":
+            blockers.append(
+                f"the spot is {provenance.get('source') or 'unattributed'!r}, "
+                "not a vendor index observation"
+            )
+        elif provenance.get("observation") is None:
+            blockers.append("the spot was not read back out of a stored payload")
+
+        if chain.meta.get("open_interest_as_of") is None and not any(
+            q.open_interest for q in chain.quotes
+        ):
+            blockers.append("the chain carries no open interest")
+
+        plan = self.capture_plan
+        captured = set(_mapping(manifest.get("endpoint_records")))
+        missing = sorted(
+            endpoint.value
+            for endpoint in plan.required_endpoints
+            if endpoint.value not in captured
+        )
+        if missing:
+            blockers.append(f"the capture is missing required endpoints {missing}")
+
+        return tuple(blockers)
+
+    def validate_integrity(self) -> None:
+        """Recompute every derived report and refuse if one has been replaced.
+
+        ``dataclasses.replace(pipeline, pricing_compatibility=<permissive>)``
+        produced a pipeline whose reports no longer followed from its inputs,
+        and v2.1.4 read those reports without ever recomputing them. Called
+        before every fetch, every calculation and every readiness assessment.
+        """
+        from src.adapters.thetadata.capabilities import assess_tier
+        from src.adapters.thetadata.endpoints import Tier
+
+        expected = assess_pricing_compatibility(self.config, self.model_spec)
+        if expected.semantic_payload() != self.pricing_compatibility.semantic_payload():
+            raise PipelineConsistencyError(
+                "the pricing compatibility report does not follow from this "
+                "pipeline's configuration and model. It has been replaced, and "
+                "a report that was not derived from the inputs it describes "
+                "says nothing about them."
+            )
+
+        capability = assess_tier(
+            Tier(self.config.tier),
+            required_capabilities(self.pricing_mode, policy=self.vendor_gamma_policy),
+        )
+        carried = self.subscription_capability
+        if carried is None or carried.as_dict() != capability.as_dict():
+            raise PipelineConsistencyError(
+                "the subscription capability report does not follow from this "
+                "pipeline's tier and mode; it has been replaced"
+            )
+
+        if getattr(self.engine_config, "model_spec", None) is not None and (
+            self.engine_config.model_spec.fingerprint() != self.model_spec.fingerprint()
+        ):
+            raise PipelineConsistencyError(
+                "the engine config carries a different model spec than the "
+                "pipeline: engine "
+                f"{self.engine_config.model_spec.fingerprint()!r} vs pipeline "
+                f"{self.model_spec.fingerprint()!r}"
+            )
+
+    def _compute(self, chain: ChainSnapshot) -> Any:
         from src.gex.engine import compute_gex_snapshot
 
         return compute_gex_snapshot(chain, self.engine_config)
-
-    def capture_and_compute(
-        self,
-        *,
-        as_of: datetime,
-        spot: float,
-        spot_timestamp: datetime | None = None,
-        open_interest_as_of: date | None = None,
-        expected_contract_ids: tuple[str, ...] | None = None,
-        expected_source: str = "none",
-        capture: Any = None,
-    ) -> Any:
-        """Fetch and compute in one call, with the provenance attached.
-
-        The whole point of the class in one method: there is no way to run this
-        and end up with a snapshot that does not say which configuration, which
-        model and which compatibility decision produced it.
-        """
-        return self.compute_gex(
-            self.fetch_chain(
-                as_of=as_of,
-                spot=spot,
-                spot_timestamp=spot_timestamp,
-                open_interest_as_of=open_interest_as_of,
-                expected_contract_ids=expected_contract_ids,
-                expected_source=expected_source,
-                capture=capture,
-            )
-        )
 
     def fingerprint(self) -> str:
         """One digest over everything that changes a number.
@@ -954,6 +1333,12 @@ class ThetaDataResearchPipeline:
     def as_dict(self) -> dict[str, Any]:
         return {
             "pipeline_fingerprint": self.fingerprint(),
+            "engine_fingerprint": (
+                self.engine_config.fingerprint()
+                if hasattr(self.engine_config, "fingerprint")
+                else None
+            ),
+            "capture_plan_fingerprint": self.capture_plan.fingerprint,
             "pricing_mode": self.pricing_mode.value,
             "vendor_gamma_policy": self.vendor_gamma_policy.value,
             "pricing_compatibility": self.pricing_compatibility.as_dict(),
@@ -1169,10 +1554,12 @@ def assess_pricing_compatibility(
             ),
         )
     )
-    # The one production route from UNKNOWN to MATCHED. Each attestation names
-    # its source and reference; none of them can overturn a MISMATCHED
-    # dimension, which stays a hard failure.
-    return apply_attestations(report, config.pricing_attestations)
+    # Observed vendor values, *compared* against the local model's. v2.1.4
+    # granted MATCHED for the observation existing, so recording that the vendor
+    # uses ACT/360 against a local ACT/365F settled the dimension as agreement.
+    # None of them can overturn a MISMATCHED dimension, which stays a hard
+    # failure.
+    return apply_attestations(report, config.pricing_attestations, spec)
 
 
 def load_bearing_unknowns(report: PricingCompatibilityReport) -> tuple[str, ...]:

@@ -62,7 +62,14 @@ def _write(tmp_path: pathlib.Path, mutate) -> pathlib.Path:
 
 
 def test_the_pipeline_exposes_the_whole_run():
-    for name in ("fetch_chain", "compute_gex", "capture_and_compute"):
+    """Two calculations since v2.1.5, and the fetch that feeds them."""
+    for name in (
+        "fetch_chain",
+        "fetch_chain_with_external_spot",
+        "compute_diagnostic_gex",
+        "compute_trusted_gex",
+        "validate_integrity",
+    ):
         assert callable(getattr(ThetaDataResearchPipeline, name)), name
 
 
@@ -176,10 +183,13 @@ def test_the_capture_profile_settles_what_it_can():
         for d in report.dimensions
         if d.status is CompatibilityStatus.MATCHED
     }
+    # The two numbers this adapter sends. ``rate_units`` and
+    # ``dividend_convention`` are not sent, so they are the vendor's conventions
+    # and no configuration entry settles them (v2.1.5 §11).
     assert PricingDimension.RISK_FREE_RATE in matched
-    assert PricingDimension.RATE_UNITS in matched
-    assert PricingDimension.DIVIDEND_CONVENTION in matched
     assert PricingDimension.DIVIDEND_VALUE in matched
+    assert PricingDimension.RATE_UNITS not in matched
+    assert PricingDimension.DIVIDEND_CONVENTION not in matched
 
 
 def test_the_capture_profile_cannot_trade():

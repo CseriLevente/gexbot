@@ -60,6 +60,7 @@ __all__ = [
     "CsvBodyStatus",
     "DuplicateRowError",
     "FloatParseIssue",
+    "IndexSnapshot",
     "IntegerParseIssue",
     "ThetaDataAuthenticationError",
     "ThetaDataClient",
@@ -506,6 +507,20 @@ class GreeksParameters:
             "stock_price_source": self.stock_price_source,
             "use_market_value": self.use_market_value,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class IndexSnapshot:
+    """The vendor's index print and the clock it carries.
+
+    Returned as a value rather than raw rows so the pipeline is not reaching
+    into a CSV dictionary at the call site -- which is how a caller-supplied
+    number came to stand in for it.
+    """
+
+    spot: float
+    timestamp: datetime | None
+    symbol: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1166,6 +1181,11 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
             expiry=key[1],
             strike=float(key[2]),
             right=OptionRight(key[3]),
+            # ``key[2]`` is already the exact decimal spelling -- the whole point
+            # of ``parse_strike``. v2.1.4 kept only the float here, so identity
+            # was reconstructed downstream with ``str(float)`` and two strikes
+            # differing below double precision became one contract.
+            strike_decimal=Decimal(key[2]),
         )
         # Every source clock preserved separately. This is the whole point.
         timestamps = ContractTimestamps(
@@ -1507,6 +1527,33 @@ class ThetaDataClient:
     ) -> list[dict[str, str]]:
         return self._get(
             Endpoint.INDEX_PRICE_SNAPSHOT, {"symbol": symbol}, capture=capture
+        )
+
+    def fetch_index_snapshot(
+        self,
+        *,
+        symbol: str,
+        as_of: datetime,
+        capture: CaptureSession | None = None,
+    ) -> IndexSnapshot | None:
+        """The vendor's index print, captured into this session.
+
+        Separate from ``index_price`` because it returns the parsed value and
+        its clock rather than raw rows -- the pipeline needs a number and a
+        timestamp, and reaching into rows at the call site is how the two came
+        to be threaded by hand.
+        """
+        rows = self.index_price(symbol, capture=capture)
+        if not rows:
+            return None
+        row = rows[0]
+        price = _to_float_recorded(row.get("index_price"), field="index_price", sink=[])
+        if price is None:
+            return None
+        return IndexSnapshot(
+            spot=price,
+            timestamp=_to_datetime(row.get("timestamp")),
+            symbol=str(row.get("symbol", symbol)),
         )
 
     def fetch_chain(

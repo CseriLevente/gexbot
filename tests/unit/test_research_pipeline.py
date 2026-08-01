@@ -170,17 +170,18 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
         for d in report.dimensions
         if d.status is CompatibilityStatus.MATCHED
     }
+    # Only the two numbers we actually send are settleable from configuration.
+    # ``rate_units`` and ``dividend_convention`` are not parameters this adapter
+    # sends, so since v2.1.5 they are the vendor's conventions and stay unknown.
     assert PricingDimension.RISK_FREE_RATE in settled
-    assert PricingDimension.RATE_UNITS in settled
-    assert PricingDimension.DIVIDEND_CONVENTION in settled
     assert PricingDimension.DIVIDEND_VALUE in settled
-    # What remains is vendor conventions, which no configuration setting can
-    # answer -- see the attestation path in tests/pricing_evidence.py.
     assert set(report.load_bearing_unknowns) == {
         PricingDimension.DAY_COUNT,
+        PricingDimension.DIVIDEND_CONVENTION,
         PricingDimension.EXPIRATION_TIMESTAMP,
         PricingDimension.IV_PRICE_BASIS,
         PricingDimension.MINIMUM_TIME_FLOOR,
+        PricingDimension.RATE_UNITS,
         PricingDimension.UNDERLYING_SOURCE,
         PricingDimension.UNDERLYING_TIMESTAMP,
     }
@@ -212,17 +213,24 @@ def test_cash_dividend_is_not_interchangeable_with_a_yield():
     assert PricingDimension.DIVIDEND_CONVENTION in cash.load_bearing_mismatches
 
 
-def test_a_matching_zero_dividend_is_compatible():
+def test_a_matching_zero_dividend_settles_its_value():
+    """The convention stays the vendor's; zero makes the value independent of it."""
     from src.config.pipeline import DividendAssumption, check_dividend_compatibility
 
-    assert check_dividend_compatibility(
+    report = check_dividend_compatibility(
         vendor=DividendAssumption(
             convention=DividendConvention.ZERO_DIVIDEND, value=0.0
         ),
         local=DividendAssumption(
             convention=DividendConvention.ZERO_DIVIDEND, value=0.0
         ),
-    ).compatible
+    )
+    matched = {
+        d.dimension
+        for d in report.dimensions
+        if d.status is CompatibilityStatus.MATCHED
+    }
+    assert PricingDimension.DIVIDEND_VALUE in matched
 
 
 def test_incompatible_assumptions_block_the_research_calculation():

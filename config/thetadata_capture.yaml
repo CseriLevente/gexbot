@@ -148,24 +148,31 @@ thetadata:
   # never aggregated, and it does not relax the vendor-IV checks.
   vendor_gamma_policy: DISABLED
 
-  # Deliberately empty. Six load-bearing dimensions -- IV price basis,
-  # underlying source, underlying timestamp, expiration timestamp, day count and
-  # the minimum time floor -- are undocumented by ThetaData, and this repository
-  # has not compared any of them against real vendor output. Until it has, the
-  # honest entry is no entry, and every calculation is refused.
+  # Deliberately empty. Eight load-bearing dimensions are the vendor's to
+  # define -- IV price basis, underlying source, underlying timestamp,
+  # expiration timestamp, day count, the minimum time floor, and since v2.1.5
+  # the rate units and dividend convention -- and this repository has not
+  # compared any of them against real vendor output. Until it has, the honest
+  # entry is no entry, and every trusted calculation is refused.
   #
-  # After a capture, each answered question becomes:
+  # After a capture, each answered question becomes an *observation*:
   #
   #   pricing_attestations:
   #     - dimension: DAY_COUNT
-  #       source: LIVE_COMPARISON
-  #       reference: artifacts/validation/2026-08-XX-day-count.md
+  #       source: VENDOR_DOCUMENTATION
+  #       reference: docs/THETADATA_INTEGRATION.md
   #       observed_at: "2026-08-XX"
   #       vendor_value: "ACT/365F"
   #
-  # `source: VENDOR_DOCUMENTATION` is accepted and permits a calculation, but
-  # never reaches ADAPTER_CERTIFIED: documentation records what the vendor says
-  # it does.
+  # `vendor_value` is what the vendor *does*, and a comparator decides what
+  # follows: recording ACT/360 against a local ACT/365F produces MISMATCHED, not
+  # agreement. v2.1.4 treated the entry's presence as the answer.
+  #
+  # `source: LIVE_COMPARISON` is **refused here**. A configuration file cannot
+  # witness an event; editing this line does not make a request. Live evidence
+  # is emitted by AdapterValidator and bound to the capture it was read from.
+  # `VENDOR_DOCUMENTATION` is accepted, its reference must resolve to a real
+  # file, and it never reaches ADAPTER_CERTIFIED.
   pricing_attestations: []
 
 execution:

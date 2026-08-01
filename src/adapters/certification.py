@@ -36,25 +36,41 @@ Three v2.1.4 corrections shape the rest of this module:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 
-from src.adapters.raw_store import RawCaptureManifest
-from src.config.compatibility import EvidenceSource, PricingDimension
+from src.adapters.errors import (
+    ThetaDataCertificationError,
+    ThetaDataProvenanceError,
+)
+from src.adapters.raw_store import RawCaptureManifest, probe_raw_store
+from src.adapters.thetadata.capture_plan import CapturePlan, capture_plan_for
+from src.adapters.thetadata.endpoints import Tier
+from src.adapters.validation import (
+    AdapterValidationReport,
+    AdapterValidator,
+    ValidationCheck,
+    VerifiedFieldObservation,
+)
+from src.config.compatibility import EvidenceSource
 
 __all__ = [
     "CERTIFICATION_SCHEMA_VERSION",
     "AdapterCertificationReadiness",
     "AdapterValidationReport",
+    "AdapterValidator",
     "CaptureVerification",
     "CertificationState",
     "OpenInterestProvenance",
-    "ProvenanceEvidence",
+    "OpenInterestSource",
     "ProvenanceGrade",
     "SpotProvenance",
+    "SpotSource",
     "ValidationCheck",
+    "VerifiedFieldObservation",
     "assess_readiness",
     "verify_capture",
 ]
@@ -62,7 +78,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.4"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.5"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -93,42 +109,37 @@ class ProvenanceGrade(str, Enum):
         return self in (ProvenanceGrade.OBSERVED, ProvenanceGrade.VALIDATED)
 
 
-class ProvenanceError(ValueError):
-    """A provenance claim that does not point at anything."""
+class SpotSource(str, Enum):
+    """Which print the underlying came from.
 
-
-@dataclass(frozen=True, slots=True)
-class ProvenanceEvidence:
-    """Where an observed value was actually read from.
-
-    Every field is required. An evidence object that names no record is a
-    boolean wearing a dataclass, which is what this replaces.
+    An enum rather than a string because ``source="whatever_i_like"`` used to
+    pass, and the certification report then named a source nobody could look up.
     """
 
-    #: The stored raw record the value came out of.
-    raw_record_id: str
-    #: Which field of that payload. ``open_interest``, ``index_price``, and so on.
-    field_path: str
-    #: The capture manifest the record belongs to, so evidence cannot be
-    #: transplanted from one session onto another.
-    manifest_hash: str
-    observed_at: str = ""
+    VENDOR_INDEX_SNAPSHOT = "vendor_index_snapshot"
+    VENDOR_PER_CONTRACT = "vendor_per_contract"
+    CALLER_SUPPLIED = "caller_supplied"
+    SYNTHETIC = "synthetic"
 
-    def __post_init__(self) -> None:
-        for name in ("raw_record_id", "field_path", "manifest_hash"):
-            if not str(getattr(self, name)).strip():
-                raise ProvenanceError(
-                    f"ProvenanceEvidence.{name} is empty. Evidence that names no "
-                    "record cannot be checked, which makes it an assertion."
-                )
+    @property
+    def is_vendor_observed(self) -> bool:
+        return self in (
+            SpotSource.VENDOR_INDEX_SNAPSHOT,
+            SpotSource.VENDOR_PER_CONTRACT,
+        )
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "raw_record_id": self.raw_record_id,
-            "field_path": self.field_path,
-            "manifest_hash": self.manifest_hash,
-            "observed_at": self.observed_at,
-        }
+
+class OpenInterestSource(str, Enum):
+    """Where the open-interest settlement date came from."""
+
+    VENDOR_FIELD = "vendor_field"
+    CALLER = "caller"
+    SYNTHETIC = "synthetic"
+
+
+#: How far ahead of now a timestamp may be before it is a mistake rather than
+#: clock skew. Generous, because the point is to catch a date somebody typed.
+FUTURE_TOLERANCE_SECONDS = 3600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,29 +147,56 @@ class OpenInterestProvenance:
     """Where the open-interest settlement date came from."""
 
     as_of: date | None
-    #: ``vendor_field`` when the payload stated it; ``caller`` when a human did.
-    source: str
+    source: OpenInterestSource | str
+    #: The session the chain belongs to. Open interest settles *before* the
+    #: chain it weights, so a date after it is not a stale figure -- it is a
+    #: figure from a session that has not happened.
+    chain_date: date | None = None
     #: Present only when the date was read out of a stored response.
-    evidence: ProvenanceEvidence | None = None
+    observation: VerifiedFieldObservation | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            resolved = OpenInterestSource(self.source)
+        except ValueError as error:
+            raise ThetaDataProvenanceError(
+                f"{self.source!r} is not a recognised open-interest source; "
+                f"valid values are {[s.value for s in OpenInterestSource]}"
+            ) from error
+        object.__setattr__(self, "source", resolved)
+
+        if self.as_of is not None and not isinstance(self.as_of, date):
+            raise ThetaDataProvenanceError(
+                f"as_of must be a date, got {type(self.as_of).__name__}"
+            )
+        if (
+            self.as_of is not None
+            and self.chain_date is not None
+            and self.as_of > self.chain_date
+        ):
+            raise ThetaDataProvenanceError(
+                f"open interest as_of {self.as_of.isoformat()} is after the "
+                f"chain date {self.chain_date.isoformat()}. Open interest "
+                "settles before the session it weights; a later date describes "
+                "a session that has not happened."
+            )
 
     @property
     def claims_observation(self) -> bool:
-        """Whether this points at a stored record at all.
-
-        Deliberately not called ``grade``. Whether the claim *holds* depends on
-        a capture this object has never seen, so only ``assess_readiness`` can
-        answer that -- see ``grade_claim``.
-        """
         return (
-            self.as_of is not None and bool(self.source) and self.evidence is not None
+            self.as_of is not None
+            and bool(self.source)
+            and self.observation is not None
         )
 
     def as_dict(self) -> dict[str, Any]:
+        source = self.source
         return {
             "as_of": self.as_of.isoformat() if self.as_of else None,
-            "source": self.source,
+            "source": source.value if isinstance(source, Enum) else str(source),
+            "chain_date": self.chain_date.isoformat() if self.chain_date else None,
             "claims_observation": self.claims_observation,
-            "evidence": self.evidence.as_dict() if self.evidence else None,
+            "observation": (self.observation.as_dict() if self.observation else None),
         }
 
 
@@ -166,34 +204,85 @@ class OpenInterestProvenance:
 class SpotProvenance:
     """Which underlying print was used, when it was taken, and how close it was."""
 
-    source: str
+    source: SpotSource | str
     timestamp: datetime | None
     #: How far the spot print may be from the chain instant before the pairing
     #: stops being meaningful. A local policy, not a vendor fact.
     tolerance_seconds: float = 1.0
-    evidence: ProvenanceEvidence | None = None
+    observation: VerifiedFieldObservation | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            resolved = SpotSource(self.source)
+        except ValueError as error:
+            raise ThetaDataProvenanceError(
+                f"{self.source!r} is not a recognised spot source; valid values "
+                f"are {[s.value for s in SpotSource]}"
+            ) from error
+        object.__setattr__(self, "source", resolved)
+
+        if not isinstance(self.tolerance_seconds, int | float) or isinstance(
+            self.tolerance_seconds, bool
+        ):
+            raise ThetaDataProvenanceError(
+                f"tolerance_seconds must be a number, got "
+                f"{type(self.tolerance_seconds).__name__}"
+            )
+        if not math.isfinite(self.tolerance_seconds):
+            raise ThetaDataProvenanceError(
+                f"tolerance_seconds is {self.tolerance_seconds}. A non-finite "
+                "tolerance compares true against every skew, so nothing would "
+                "ever be out of tolerance."
+            )
+        if self.tolerance_seconds < 0:
+            raise ThetaDataProvenanceError(
+                f"tolerance_seconds is {self.tolerance_seconds}; a negative "
+                "tolerance rejects every spot, including a perfectly "
+                "synchronised one"
+            )
+
+        if self.timestamp is not None:
+            if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+                raise ThetaDataProvenanceError(
+                    "spot timestamp must be timezone-aware; a naive datetime "
+                    "silently means whatever the reading machine's zone is, and "
+                    "the whole point of this field is comparing two clocks"
+                )
+            ahead = (self.timestamp - datetime.now(UTC)).total_seconds()
+            if ahead > FUTURE_TOLERANCE_SECONDS:
+                raise ThetaDataProvenanceError(
+                    f"spot timestamp {self.timestamp.isoformat()} is "
+                    f"{ahead / 3600:.1f}h in the future. A print that has not "
+                    "happened cannot have been read."
+                )
 
     @property
     def claims_observation(self) -> bool:
         return (
             self.timestamp is not None
             and bool(self.source)
-            and self.evidence is not None
+            and self.observation is not None
         )
 
     def skew_seconds(self, as_of: datetime) -> float | None:
         if self.timestamp is None:
             return None
-        return abs((as_of - self.timestamp).total_seconds())
+        skew = abs((as_of - self.timestamp).total_seconds())
+        if not math.isfinite(skew):
+            raise ThetaDataProvenanceError(
+                "spot skew is not finite; one of the two clocks is unusable"
+            )
+        return skew
 
     def as_dict(self, as_of: datetime | None = None) -> dict[str, Any]:
+        source = self.source
         return {
-            "source": self.source,
+            "source": source.value if isinstance(source, Enum) else str(source),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "tolerance_seconds": self.tolerance_seconds,
             "skew_seconds": self.skew_seconds(as_of) if as_of else None,
             "claims_observation": self.claims_observation,
-            "evidence": self.evidence.as_dict() if self.evidence else None,
+            "observation": (self.observation.as_dict() if self.observation else None),
         }
 
 
@@ -218,6 +307,10 @@ class CaptureVerification:
     #: Claims the store could not support. Non-empty means not verified.
     failures: tuple[str, ...] = ()
     store_description: str = ""
+    #: Which capture plan this was checked against. Empty means the endpoint
+    #: requirements were not checked at all, which certification treats as
+    #: unverified rather than as "no requirements".
+    plan_fingerprint: str = ""
 
     @property
     def verified(self) -> bool:
@@ -239,66 +332,69 @@ class CaptureVerification:
             "confirmed_record_ids": list(self.confirmed_record_ids),
             "failures": list(self.failures),
             "store_description": self.store_description,
+            "plan_fingerprint": self.plan_fingerprint,
         }
 
 
 def grade_claim(
     claim: OpenInterestProvenance | SpotProvenance | None,
     *,
-    capture: CaptureVerification | None,
+    manifest: RawCaptureManifest | None,
+    store: Any,
     validated: bool,
 ) -> tuple[ProvenanceGrade, str]:
     """Decide what a provenance claim is actually worth.
 
     Returns the grade and, when the claim does not hold, a complaint naming why.
 
-    The check that was missing in the first cut of v2.1.4: a
-    ``ProvenanceEvidence`` was accepted as an observation merely for existing
-    and having three non-empty strings. Nothing compared ``raw_record_id``
-    against the store or ``manifest_hash`` against the capture, so
-    ``ProvenanceEvidence(raw_record_id="no-such-record", field_path="x",
-    manifest_hash="qqq")`` graded ``OBSERVED`` and, with a validation report,
-    ``VALIDATED``. That is the v2.1.3 defect one type-level down: evidence that
-    is checked for being well-formed rather than for being true.
+    v2.1.4 checked that the named record existed. v2.1.5 re-reads the field out
+    of the payload and compares the value, because "record r1 exists" says
+    nothing about whether r1 contains an open interest, whether it holds the
+    number claimed, or whether its endpoint has such a column at all.
     """
     if claim is None or not claim.claims_observation:
         return ProvenanceGrade.PLANNED, ""
 
-    evidence = claim.evidence
-    assert evidence is not None  # implied by claims_observation
+    observation = claim.observation
+    assert observation is not None  # implied by claims_observation
 
-    if capture is None or not capture.verified:
+    if manifest is None:
         return ProvenanceGrade.PLANNED, (
-            f"evidence names raw record {evidence.raw_record_id!r}, but no "
-            "verified capture was supplied, so nothing confirms that record "
-            "exists"
+            f"evidence names raw record {observation.record_id!r}, but no "
+            "capture was supplied, so nothing confirms that record exists"
         )
-    if evidence.manifest_hash != capture.manifest_hash:
-        return ProvenanceGrade.PLANNED, (
-            f"evidence names manifest {evidence.manifest_hash!r}; this capture "
-            f"is {capture.manifest_hash!r}. Evidence cannot be transplanted "
-            "from one session onto another."
+    try:
+        AdapterValidator.confirm_field(
+            manifest=manifest, store=store, observation=observation
         )
-    if evidence.raw_record_id not in capture.confirmed_record_ids:
-        return ProvenanceGrade.PLANNED, (
-            f"evidence names raw record {evidence.raw_record_id!r}, which this "
-            "capture does not confirm"
-        )
+    except ThetaDataProvenanceError as error:
+        return ProvenanceGrade.PLANNED, str(error)
     if validated:
         return ProvenanceGrade.VALIDATED, ""
     return ProvenanceGrade.OBSERVED, ""
 
 
-def verify_capture(manifest: RawCaptureManifest, store: Any) -> CaptureVerification:
-    """Check that every record a manifest claims is really in the store.
+def verify_capture(
+    manifest: RawCaptureManifest,
+    store: Any,
+    *,
+    plan: CapturePlan | None = None,
+) -> CaptureVerification:
+    """Check that every record a manifest claims is really in the store, and
+    that the manifest claims everything the session needs.
 
-    Compares identities and payload hashes as sets. A manifest listing three
-    records against a store holding two is not a capture that mostly happened;
-    it is a manifest that cannot be relied on to say which bytes produced which
-    number.
+    Two questions, and v2.1.4 asked only the first. A one-record capture -- a
+    quote snapshot with no open interest, no implied volatility and no
+    underlying -- verified cleanly, because every record it named was present.
+    It could not have produced a GEX number, and it advanced the certification
+    ladder anyway.
+
+    ``plan`` is the answer to the second question. It is optional only so that
+    the record-level checks stay usable on their own; certification always
+    supplies one.
     """
     if not isinstance(manifest, RawCaptureManifest):
-        raise TypeError(
+        raise ThetaDataCertificationError(
             f"verify_capture needs a RawCaptureManifest, got {type(manifest).__name__}"
         )
 
@@ -334,6 +430,67 @@ def verify_capture(manifest: RawCaptureManifest, store: Any) -> CaptureVerificat
     if confirmed and claimed != confirmed_hashes:
         failures.append("PAYLOAD_HASHES_DO_NOT_PAIR_WITH_RECORDS")
 
+    # -- the endpoint map has to describe the same records as the id list ----
+    #
+    # Checked whatever the plan requires: a manifest naming a record under any
+    # endpoint is claiming that record exists, and a claim the store cannot
+    # support is a claim regardless of whether this session needed that
+    # endpoint.
+    if manifest.endpoint_records:
+        mapped = {
+            record_id for ids in manifest.endpoint_records.values() for record_id in ids
+        }
+        stray = sorted(mapped - set(manifest.record_ids))
+        if stray:
+            failures.append(f"ENDPOINT_RECORD_NOT_IN_MANIFEST:{stray}")
+        unmapped = sorted(set(manifest.record_ids) - mapped)
+        if unmapped:
+            failures.append(f"RECORD_WITHOUT_AN_ENDPOINT:{unmapped}")
+        for endpoint, ids in sorted(manifest.endpoint_records.items()):
+            wrong = sorted(
+                record_id
+                for record_id in ids
+                if record_id in records and records[record_id].endpoint != endpoint
+            )
+            if wrong:
+                failures.append(f"ENDPOINT_MISATTRIBUTED:{endpoint}:{wrong}")
+
+    # -- does the manifest claim everything the session needs? ---------------
+    #
+    # Checked against the *store's* view of which endpoint answered each record,
+    # not against the manifest's own claim about itself. A manifest that says a
+    # record answered the open-interest endpoint proves nothing if the record it
+    # names came back from the quote endpoint.
+    if plan is not None:
+        confirmed_ids = set(confirmed)
+        served: dict[str, set[str]] = {}
+        for record_id in confirmed:
+            served.setdefault(records[record_id].endpoint, set()).add(record_id)
+
+        for endpoint in plan.required_endpoints:
+            claimed_ids: set[str] = set(manifest.records_for(endpoint.value))
+            actually = served.get(endpoint.value, set())
+            if not actually:
+                failures.append(
+                    f"MISSING_ENDPOINT:{endpoint.value}: "
+                    f"{plan.reason_for(endpoint) or 'required by this session'}"
+                )
+                continue
+            unconfirmed = claimed_ids - confirmed_ids
+            if unconfirmed:
+                failures.append(
+                    f"UNCONFIRMED_ENDPOINT_RECORD:{endpoint.value}:"
+                    f"{sorted(unconfirmed)}"
+                )
+        if (
+            manifest.capture_plan_fingerprint
+            and manifest.capture_plan_fingerprint != plan.fingerprint
+        ):
+            failures.append(
+                "CAPTURE_PLAN_MISMATCH: the manifest was taken against a "
+                f"different plan ({manifest.capture_plan_fingerprint[:16]}...)"
+            )
+
     integrity = getattr(store, "verify_integrity", None)
     if callable(integrity):
         report = integrity()
@@ -345,90 +502,13 @@ def verify_capture(manifest: RawCaptureManifest, store: Any) -> CaptureVerificat
         confirmed_record_ids=tuple(sorted(confirmed)),
         failures=tuple(sorted(failures)),
         store_description=type(store).__name__,
+        plan_fingerprint=plan.fingerprint if plan is not None else "",
     )
 
 
 # =============================================================================
 # Validation evidence -- bound to one capture
 # =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class ValidationCheck:
-    """One thing somebody checked about a capture."""
-
-    name: str
-    passed: bool
-    detail: str = ""
-    #: The pricing dimension this check settles, when it settles one. Lets a
-    #: validation report upgrade a documented convention to an observed one.
-    dimension: PricingDimension | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "passed": self.passed,
-            "detail": self.detail,
-            "dimension": self.dimension.value if self.dimension else None,
-        }
-
-
-class ValidationReportError(ValueError):
-    """A validation report that does not describe a specific capture."""
-
-
-@dataclass(frozen=True, slots=True)
-class AdapterValidationReport:
-    """What somebody checked, about which capture, and when.
-
-    The ``manifest_hash`` binding is the point. v2.1.3 took ``validation_report:
-    Any`` and asked only whether it was ``None``, so a report about a different
-    session -- or no session -- counted the same as a report about this one.
-    """
-
-    manifest_hash: str
-    checks: tuple[ValidationCheck, ...] = ()
-    validated_at: str = ""
-    validator: str = ""
-
-    def __post_init__(self) -> None:
-        if not str(self.manifest_hash).strip():
-            raise ValidationReportError(
-                "AdapterValidationReport.manifest_hash is empty. A report that "
-                "does not name a capture cannot be shown to describe one."
-            )
-        if not self.checks:
-            raise ValidationReportError(
-                "AdapterValidationReport carries no checks. An empty report is "
-                "not a passing report."
-            )
-
-    @property
-    def failed(self) -> tuple[ValidationCheck, ...]:
-        return tuple(c for c in self.checks if not c.passed)
-
-    @property
-    def passed(self) -> bool:
-        return not self.failed
-
-    @property
-    def validated_dimensions(self) -> frozenset[PricingDimension]:
-        return frozenset(
-            c.dimension for c in self.checks if c.passed and c.dimension is not None
-        )
-
-    def describes(self, capture: CaptureVerification) -> bool:
-        return self.manifest_hash == capture.manifest_hash
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "manifest_hash": self.manifest_hash,
-            "validator": self.validator,
-            "validated_at": self.validated_at,
-            "passed": self.passed,
-            "checks": [c.as_dict() for c in self.checks],
-            "validated_dimensions": sorted(d.value for d in self.validated_dimensions),
-        }
 
 
 class CertificationState(str, Enum):
@@ -509,27 +589,43 @@ def assess_readiness(
     open_interest: OpenInterestProvenance | None = None,
     spot: SpotProvenance | None = None,
     raw_store: Any = None,
-    capture: CaptureVerification | None = None,
+    manifest: RawCaptureManifest | None = None,
     validation: AdapterValidationReport | None = None,
 ) -> AdapterCertificationReadiness:
     """Evaluate every blocker. Deterministic, sorted, and never cached.
 
-    ``capture`` and ``validation`` are typed and are rejected outright if they
-    are not. v2.1.3 accepted ``Any`` for both and tested ``is not None``, so
-    ``assess_readiness(capture_manifest=object(), validation_report=object())``
-    returned ``ADAPTER_CERTIFIED`` -- the strongest claim in the repository,
-    reachable with two truthy values and no evidence at all.
+    Takes the **inputs to a verdict**, never a verdict.
+
+    v2.1.4 accepted a ``CaptureVerification``, which is a public dataclass:
+    ``CaptureVerification(confirmed_record_ids=("fake",), failures=())`` reports
+    ``verified=True``, and the state machine believed it. The verifier existed
+    and the public API did not have to use it. This takes a manifest and a
+    store and runs the verifier itself, so there is no verdict to forge.
+
+    ``validation`` is the same problem one level up, and gets the same answer:
+    a supplied report is re-derived from the capture and compared. A report the
+    validator would not have produced is refused -- no signature needed, because
+    the check is "would this code have said that?".
     """
-    if capture is not None and not isinstance(capture, CaptureVerification):
-        raise TypeError(
-            "capture must be a CaptureVerification produced by verify_capture(); "
-            f"got {type(capture).__name__}. A truthy object is not a capture."
+    if manifest is not None and not isinstance(manifest, RawCaptureManifest):
+        raise ThetaDataCertificationError(
+            "manifest must be a RawCaptureManifest; got "
+            f"{type(manifest).__name__}. Readiness takes the inputs to a "
+            "verdict, not a verdict -- a pre-computed CaptureVerification is "
+            "exactly what v2.1.4 accepted and could not check."
         )
     if validation is not None and not isinstance(validation, AdapterValidationReport):
-        raise TypeError(
+        raise ThetaDataCertificationError(
             "validation must be an AdapterValidationReport; got "
             f"{type(validation).__name__}. A truthy object is not a validation."
         )
+
+    # Recompute the pipeline's derived reports before reading any of them. A
+    # pipeline whose compatibility report was replaced still answers every
+    # question this function asks; it just answers them about something else.
+    validate = getattr(pipeline, "validate_integrity", None)
+    if callable(validate):
+        validate()
 
     blockers: list[str] = []
     calculation_blockers: list[str] = []
@@ -654,13 +750,18 @@ def assess_readiness(
         verified.append("raw_capture")
 
     # -- the audit trail itself ---------------------------------------------
-    if raw_store is not None and hasattr(raw_store, "verify_integrity"):
-        integrity = raw_store.verify_integrity()
-        if not integrity.ok:
+    #
+    # Probed, not inspected for attribute names. v2.1.4 called
+    # ``verify_integrity`` if the object happened to have one, so
+    # ``raw_store=object()`` skipped the check rather than failing it -- a store
+    # that could not have stored anything passed by having no methods at all.
+    if raw_store is not None:
+        health = probe_raw_store(raw_store)
+        if not health.usable:
             blockers.append(
-                f"raw store is not clean before capture: {integrity.counts()}. "
-                "Starting a paid session on top of an inconsistent audit trail "
-                "makes the new evidence hard to separate from the old."
+                f"the raw store is not usable: {list(health.failures)}. A paid "
+                "session's only copy of the evidence has to go somewhere that "
+                "is real, clean and writable."
             )
             unverified.append("raw_store_integrity")
         else:
@@ -668,42 +769,78 @@ def assess_readiness(
 
     # -- capture and validation evidence -------------------------------------
     #
-    # Settled before the provenance grades, because a grade of VALIDATED means
-    # "checked by a validation report bound to this capture" and that sentence
-    # is only answerable once we know whether the report binds. The first cut of
-    # v2.1.4 computed the grades first, so a report describing a *different*
-    # manifest still promoted them -- producing a stored report that claimed a
-    # bound validation on the same object that said there was no capture to bind
-    # to.
-    if capture is not None and not capture.verified:
-        calculation_blockers.append(
-            f"the capture manifest does not match its store: {list(capture.failures)}"
-        )
-        unverified.append("capture_manifest")
-    elif capture is not None:
-        verified.append("capture_manifest")
+    # Both derived here. The caller supplies a manifest and a store; the
+    # verifier and the validator run inside this function, so neither verdict
+    # can arrive pre-formed.
+    plan = capture_plan_for(
+        pricing_mode=pipeline.pricing_mode,
+        vendor_gamma_policy=pipeline.vendor_gamma_policy,
+        underlying_price_source=config.underlying_price_source,
+        tier=Tier(config.tier),
+    )
+    capture: CaptureVerification | None = None
+    if manifest is not None:
+        capture = verify_capture(manifest, raw_store, plan=plan)
+        if not capture.verified:
+            calculation_blockers.append(
+                f"the capture manifest does not match its store: "
+                f"{list(capture.failures)}"
+            )
+            unverified.append("capture_manifest")
+        else:
+            verified.append("capture_manifest")
 
     validation_binds = False
     if validation is not None:
-        if capture is None:
+        if manifest is None or capture is None or not capture.verified:
             calculation_blockers.append(
-                "a validation report was supplied with no capture to validate"
+                "a validation report was supplied with no verified capture to validate"
             )
             unverified.append("validation_report")
-        elif not validation.describes(capture):
+        elif not validation.describes(manifest.manifest_hash):
             calculation_blockers.append(
                 f"validation report describes manifest "
-                f"{validation.manifest_hash!r}, not {capture.manifest_hash!r}"
-            )
-            unverified.append("validation_report")
-        elif not validation.passed:
-            calculation_blockers.append(
-                f"validation checks failed: {[c.name for c in validation.failed]}"
+                f"{validation.manifest_hash!r}, not {manifest.manifest_hash!r}"
             )
             unverified.append("validation_report")
         else:
-            validation_binds = True
-            verified.append("validation_report")
+            # Every remaining problem is reported, not just the first. A report
+            # can be wrong about its pipeline *and* not be something this
+            # validator would produce, and a caller fixing one at a time learns
+            # more from being told both.
+            faults: list[str] = []
+            if validation.pipeline_fingerprint != pipeline.fingerprint():
+                faults.append(
+                    "the validation report describes a different pipeline "
+                    f"({validation.pipeline_fingerprint!r}); this one is "
+                    f"{pipeline.fingerprint()!r}"
+                )
+            # Re-derive and compare. A report this validator would not have
+            # produced is not a validation, whatever it says about itself --
+            # which is how one arbitrary passing check certified in v2.1.4.
+            rederived = AdapterValidator.validate(
+                manifest=manifest, store=raw_store, pipeline=pipeline
+            )
+            if rederived.semantic_payload() != validation.semantic_payload():
+                faults.append(
+                    "the validation report was not issued by this validator: "
+                    "re-running the validation over the same capture produces a "
+                    "different result. A report is a record of what was checked, "
+                    "not a statement that checking happened."
+                )
+            if faults:
+                calculation_blockers.extend(faults)
+                unverified.append("validation_report")
+            elif not validation.passed:
+                calculation_blockers.append(
+                    f"validation checks failed: "
+                    f"{[c.name for c in validation.failed]}; missing: "
+                    f"{list(validation.missing_checks)}"
+                )
+                unverified.append("validation_report")
+            else:
+                validation_binds = True
+                verified.append("validation_report")
 
     validated_provenance: set[str] = set()
     if validation is not None and validation_binds:
@@ -714,7 +851,10 @@ def assess_readiness(
     def graded(claim: Any, *, name: str) -> ProvenanceGrade:
         """Grade a claim against the capture, and complain if it does not hold."""
         grade, complaint = grade_claim(
-            claim, capture=capture, validated=name in validated_provenance
+            claim,
+            manifest=manifest if capture is not None and capture.verified else None,
+            store=raw_store,
+            validated=name in validated_provenance,
         )
         if complaint:
             # A claim that names a record nothing confirms is not a gap in the
@@ -802,7 +942,7 @@ def assess_readiness(
         blockers=blockers,
         calculation_blockers=calculation_blockers,
         capture=capture,
-        validation=validation,
+        validation=validation if validation_binds else None,
         report=report,
         grades=grades,
     )
@@ -848,26 +988,20 @@ def _resolve_state(
     if validation is None:
         return CertificationState.CALCULATION_NOT_VALIDATED
 
-    # Only a live comparison observes what the vendor did. A validation report
-    # says the *capture* was checked; it cannot promote a documented claim about
-    # a convention into an observation of one, so it is not folded in here.
-    # A dimension counts as settled for certification when the evidence could
-    # actually settle it. `LOCAL_CONFIGURATION` can, but only for the four
-    # dimensions whose answer is ours to give; `apply_attestations` refuses it
-    # elsewhere, and this mirrors that rule so the ladder cannot be climbed by
-    # any evidence the assessment would have rejected.
+    # A dimension counts as settled for certification only when the *bound
+    # validation report* names it, having read the bytes. v2.1.4 read this off
+    # the pipeline's static attestations, so a YAML entry counted as a live
+    # observation with no validation check behind it at all.
+    #
+    # ``LOCAL_CONFIGURATION`` still settles the two values we send, because
+    # there is no vendor claim to be wrong about -- but that is a property of
+    # the dimension, and ``vendor_owned`` decides it.
     live = {
         d.dimension
         for d in report.dimensions
-        if d.evidence is not None
-        and (
-            d.evidence.source.is_observation
-            or (
-                not d.dimension.vendor_owned
-                and not d.evidence.source.rests_on_a_vendor_claim
-            )
-        )
+        if d.evidence is not None and not d.dimension.vendor_owned
     }
+    live |= validation.validated_dimensions
     outstanding = {
         d.dimension
         for d in report.dimensions

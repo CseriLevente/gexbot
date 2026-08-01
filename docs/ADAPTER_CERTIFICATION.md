@@ -271,3 +271,108 @@ report `UNKNOWN` rather than agreement.
 
 An unknown that changes gamma is not a caveat printed beside the answer. It is
 the reason the answer has no stated meaning.
+
+
+---
+
+## v2.1.5: derived, not constructed
+
+Three objects in v2.1.4 were public dataclasses whose *presence* was the answer,
+and all three were accepted by the public readiness API:
+
+```python
+CaptureVerification(confirmed_record_ids=("fake",), failures=())   # verified
+ValidationCheck(name="anything", passed=True)                      # validated
+PricingAssumptionAttestation(dimension=DAY_COUNT, evidence=...)     # MATCHED
+```
+
+None of them had to have come from the code that checks anything.
+
+### The capture verdict is computed here
+
+`assess_readiness` takes a `RawCaptureManifest` and a `RawResponseStore`, and
+runs the verifier itself:
+
+```python
+readiness = assess_readiness(
+    pipeline=pipeline,
+    as_of=as_of,
+    open_interest=oi_provenance,
+    spot=spot_provenance,
+    manifest=manifest,       # not a CaptureVerification
+    raw_store=store,
+    validation=report,       # re-derived and compared
+)
+```
+
+There is no verdict parameter to forge. A supplied validation report is
+re-derived from the same capture and compared: a report this validator would not
+have produced is refused, which needs no signature because the check is "would
+this code have said that?".
+
+### Evidence is an observed value
+
+A `VendorObservation` records **what the vendor does**, and a per-dimension
+comparator decides what follows:
+
+```yaml
+pricing_attestations:
+  - dimension: DAY_COUNT
+    source: VENDOR_DOCUMENTATION
+    reference: docs/THETADATA_INTEGRATION.md   # must resolve
+    observed_at: "2026-08-XX"
+    vendor_value: "ACT/360"                    # -> MISMATCHED against ACT/365F
+```
+
+`source: LIVE_COMPARISON` is refused in configuration. A file cannot witness an
+event; only `AdapterValidator` emits live evidence, bound to the capture it read.
+
+### The capture must be complete
+
+A `CapturePlan` is derived from the pricing mode, the vendor-gamma policy, the
+underlying source and the tier. For a Standard vendor-IV session reading the
+vendor index:
+
+| Endpoint | Why |
+|---|---|
+| `/v3/option/snapshot/quote` | the chain itself |
+| `/v3/option/snapshot/open_interest` | the weight on every GEX term |
+| `/v3/option/snapshot/greeks/first_order` | the vendor IV that feeds local gamma |
+| `/v3/index/snapshot/price` | the underlying every gamma is computed against |
+
+Pro with `vendor_gamma_policy: COMPARE_ONLY` adds
+`/v3/option/snapshot/greeks/second_order`. A one-record capture verified in
+v2.1.4; it now reports `MISSING_ENDPOINT` per absent response.
+
+### Field provenance is re-read
+
+`VerifiedFieldObservation` names the record, the endpoint, the payload hash, the
+parser version, the field and the value -- and the verifier opens the payload
+and checks each. A Greeks response has no `open_interest` column, so it is
+refused as evidence about open interest rather than treated as weak evidence.
+
+### Why the validator still fails
+
+It opens the captured payloads and reads them back. Most vendor conventions are
+not in the payload: a snapshot reports what the vendor computed, not the
+convention it computed under. Two dimensions are partially recoverable by
+comparison; the rest are named, recorded as unestablished, and keep the report
+from passing.
+
+That is the mechanical reason `ADAPTER_CERTIFIED` is unreachable today. It is
+not a policy switch. See [OPEN_DECISIONS.md](OPEN_DECISIONS.md) OD-35.
+
+## v2.1.5: what a number is allowed to claim
+
+| Method | Runs when | Marks the result |
+|---|---|---|
+| `compute_diagnostic_gex(chain)` | always | `trusted=False`, `DIAGNOSTIC_UNTRUSTED`, every blocker listed, both fingerprints |
+| `compute_trusted_gex(chain)` | only when nothing is outstanding | `trusted=True`, `TRUSTED` |
+
+`compute_trusted_gex` refuses unless the pricing report has no load-bearing
+unknowns, no mismatches and no hard failures; the chain carries this pipeline's
+fingerprint; it carries a raw-capture manifest; the engine settings match; the
+spot is a vendor index observation read back from a stored payload; and the
+capture holds every endpoint the plan requires.
+
+A diagnostic result cannot be fed back as trusted input. Untrusted is permanent.

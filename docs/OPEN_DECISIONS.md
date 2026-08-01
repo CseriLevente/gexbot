@@ -630,6 +630,57 @@ empty list, and a test asserts it stays empty until a comparison has been run.
 
 ---
 
+## 34. Rate units and dividend convention are the vendor's - **UNKNOWN**
+
+**The question.** ThetaData accepts ``rate_value`` and ``annual_dividend`` as
+query parameters. It does not accept ``rate_units`` or ``dividend_convention``.
+So when we send ``rate_value=4.2``, how does the API read it?
+
+**Why this changed in v2.1.5.** Both were treated as locally owned on the
+reasoning that we configure them. Configuring a *label* for a number does not
+tell the vendor how to read the number. ``4.2`` is 4.2% or 420% depending on a
+convention that lives entirely inside the vendor's API, and the difference is a
+factor of a hundred in every gamma. Writing ``rate_units: DECIMAL_ANNUAL_RATE``
+in our YAML expresses a hope.
+
+**Current behaviour.** Both dimensions are ``vendor_owned``. The configuration's
+stated units are recorded and used to normalise the value, and the report says
+the units themselves are unverified. ``RISK_FREE_RATE`` can still be compared,
+conditionally, and says so in its detail.
+
+A **zero** dividend is the one exception: ``exp(-0*T)`` is 1 whether the vendor
+read it as cash or as a yield, so the *value* is settled and the *convention*
+stays unverified. A non-zero dividend is not settled by its magnitude alone.
+
+**What would settle it.** Vendor documentation stating the convention, recorded
+as a `VENDOR_DOCUMENTATION` observation; or a capture where a known rate
+produces a computable IV, recorded as a `LIVE_COMPARISON` by the validator.
+
+---
+
+## 35. Most vendor conventions are not in the response - **STRUCTURAL**
+
+**The question.** ``AdapterValidator`` opens the captured payloads and reads
+fields back. Why does it still fail most of its pricing checks?
+
+**Because a snapshot reports what the vendor computed, not the convention it
+computed under.** There is no ``day_count`` column. Two of the eight
+load-bearing vendor dimensions are partially recoverable by comparison --
+``UNDERLYING_SOURCE`` (does the greeks endpoint's ``underlying_price`` equal the
+index print?) and ``UNDERLYING_TIMESTAMP`` (does its clock match the quote
+instant?) -- and the rest are not in the bytes at all.
+
+The validator names each of them, records that it could not establish them, and
+therefore does not pass. That is the honest result, and it is the mechanical
+reason `ADAPTER_CERTIFIED` is unreachable today rather than a policy.
+
+**What would settle it.** Vendor documentation, or a purpose-built comparison
+that infers a convention from behaviour -- e.g. solving for the day count that
+reproduces the vendor's IV from a known price. Neither has been built, and
+neither should be guessed at.
+
+---
+
 ## Deferred, with reasons
 
 | Item | Why deferred | Revisit when |

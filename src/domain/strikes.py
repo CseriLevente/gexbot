@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation, getcontext, localcontext
 
-__all__ = ["StrikeError", "canonical_strike", "canonical_strike_of", "parse_strike"]
+__all__ = [
+    "StrikeError",
+    "canonical_strike",
+    "canonical_strike_of",
+    "decimal_of",
+    "parse_strike",
+]
 
 
 def parse_strike(value: str | float | None) -> tuple[Decimal | None, str | None]:
@@ -96,6 +102,18 @@ def canonical_strike_of(value: float) -> str:
     plain float that has not been through ``parse_strike``, so this is the last
     point at which a NaN can be stopped from becoming an identity.
     """
+    return canonical_strike(decimal_of(value))
+
+
+def decimal_of(value: float) -> Decimal:
+    """The exact value a float was *written* as, for callers who have only one.
+
+    ``Decimal(str(value))`` rather than ``Decimal(value)``: the second is the
+    exact binary content, which for most strikes is a forty-digit tail nobody
+    typed. This is a best effort and it is lossy by construction -- a float has
+    already merged everything below double precision. Callers that know the
+    exact strike should pass it rather than let this reconstruct one.
+    """
     if value != value or value in (float("inf"), float("-inf")):
         raise StrikeError(f"strike {value!r} is not finite; it has no canonical form")
-    return canonical_strike(Decimal(str(value)))
+    return Decimal(str(value))

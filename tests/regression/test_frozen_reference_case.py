@@ -213,8 +213,29 @@ EXPECTED_COMPONENT_SCORES = {
 #      is asserted individually in this module, and across the whole of
 #      v2.1.4 exactly two assertions in this file changed -- this digest and
 #      the model fingerprint, both driven by the same version string.
+#   7. 89f38199 -> 568d2c2d, from v2.1.5. Classification:
+#      VERSION_METADATA_ONLY, measured the same way as (6). Five v2.1.5
+#      changes could plausibly have reached this digest; four provably do
+#      not:
+#
+#      - the engine version, gex-engine/2.1.4 -> 2.1.5, appearing twice as
+#        before. This is the whole of the move.
+#      - the parser version, thetadata-v3-parser/2.1.4 -> 2.1.5. Absent:
+#        the reference case is synthetic and no parser touches it.
+#      - ``OptionContract.strike_decimal``, the exact strike carried
+#        alongside the float. Absent: the payload has no per-contract
+#        strike representation, and for these strikes the canonical
+#        spelling is unchanged anyway.
+#      - ``calculation_mode`` and ``trusted``, stamped by the two new
+#        calculations. Absent: the reference snapshot is computed by
+#        ``compute_gex_snapshot`` directly, not through a pipeline.
+#      - ``spot_provenance``. Absent for the same reason.
+#
+#      Each was checked by searching the serialised payload. No GEX number
+#      moved: across the whole of v2.1.5 exactly two assertions in this file
+#      changed, both driven by the one version string.
 EXPECTED_OUTPUT_HASH = (
-    "89f38199c4245d0b2ce3b950807b0c0aa5d3ef23c9a2754cf5d88a1ccd45bacb"
+    "568d2c2d39507fa6779d998754eac6c98b0465f0793d68ad1a6982117671b494"
 )
 # v2.1.3: 8b5b7454ba7c5500 -> ded3172bfee2682f. Classification: BEHAVIORAL.
 #
@@ -228,6 +249,13 @@ EXPECTED_OUTPUT_HASH = (
 # The fingerprint is *supposed* to move when the configuration does; a
 # config change that left it fixed would be the defect.
 EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
+# v2.1.5: 70b3afda56f505e7 -> d3d458592b6f87e0.
+# Classification: VERSION_METADATA_ONLY.
+#
+# The only input that changed is ``model_version``, gex-engine/2.1.4 ->
+# 2.1.5. Rate, dividend, IV source, expiration rule, time floor, day count
+# and pricing model are all untouched.
+#
 # v2.1.4: e05c611b9b953372 -> 70b3afda56f505e7.
 # Classification: VERSION_METADATA_ONLY.
 #
@@ -251,7 +279,7 @@ EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
 # floor, day count or pricing model changed. The fingerprint is *supposed* to
 # move when the engine version does -- an engine change that left it fixed would
 # be undetectable in replay, which is the whole point of including it.
-EXPECTED_MODEL_FINGERPRINT = "70b3afda56f505e7"
+EXPECTED_MODEL_FINGERPRINT = "d3d458592b6f87e0"
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

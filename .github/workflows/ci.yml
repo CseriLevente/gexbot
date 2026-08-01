@@ -159,7 +159,22 @@ jobs:
         run: python -m pytest tests/unit/test_model_distribution.py -v
 
       - name: Adapter-certification readiness and state machine
-        run: python -m pytest tests/unit/test_adapter_certification.py tests/unit/test_certification_states.py -v
+        run: python -m pytest tests/unit/test_certification_states.py -v
+
+      - name: Derived certification -- verifier, validator, field provenance
+        run: python -m pytest tests/unit/test_adapter_validator.py -v
+
+      - name: Capture plan, raw-store health, per-snapshot manifests
+        run: python -m pytest tests/unit/test_capture_plan.py -v
+
+      - name: Observed vendor values are compared, not accepted
+        run: python -m pytest tests/unit/test_observations_and_comparators.py -v
+
+      - name: Trusted and diagnostic calculation gates
+        run: python -m pytest tests/unit/test_calculation_gate.py -v
+
+      - name: Exact contract identity and the adapter exception hierarchy
+        run: python -m pytest tests/unit/test_exact_identity_and_errors.py -v
 
       - name: Capture profile and the canonical pipeline API
         run: python -m pytest tests/unit/test_capture_profile.py -v

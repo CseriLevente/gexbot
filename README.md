@@ -89,7 +89,13 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | One adapter exception hierarchy | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Schema-safe raw-store integrity scanning | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Collision-safe capture sessions | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
-| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the shipped default is `READY_FOR_RAW_CAPTURE_ONLY`, and cannot be trusted to calculate while six load-bearing vendor conventions are unknown |
+| Adapter-certification readiness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the shipped default is `READY_FOR_RAW_CAPTURE_ONLY`, and cannot be trusted to calculate while eight load-bearing vendor conventions are unknown |
+| Derived certification (verifier and validator run inside readiness) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a caller cannot supply a verdict |
+| Field-level provenance re-read from the payload | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
+| Capture plan: every endpoint the session needs | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Vendor index spot captured in the same session | `IMPLEMENTED` · **never run against a vendor** · `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| Trusted vs diagnostic calculation | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; unresolved pricing refuses a trusted GEX |
+| Exact decimal strike carried through the domain | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Typed capture and validation evidence | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `verify_capture` checks a manifest against its store |
 | Graded provenance (PLANNED / OBSERVED / VALIDATED) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; derived from a named raw record, never asserted |
 | Typed pricing dimensions and attestations | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; no comparison has been run, so nothing carries `LIVE_COMPARISON` evidence |

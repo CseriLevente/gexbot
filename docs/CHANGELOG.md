@@ -1,5 +1,92 @@
 # Changelog
 
+## 2.1.5 - evidence integrity and calculation trust
+
+v2.1.4 made the evidence typed. v2.1.5 makes it *derived*.
+
+The pattern this release removes, stated once: **an object whose presence was
+the answer.** Each of these was a public dataclass that the production path
+accepted, and none of them had to have come from the code that checks anything.
+
+```python
+CaptureVerification(confirmed_record_ids=("fake",), failures=())   # verified
+ValidationCheck(name="anything", passed=True)                      # validated
+PricingAssumptionAttestation(dimension=DAY_COUNT, evidence=...)     # MATCHED
+```
+
+The third is the clearest. It carried a ``vendor_value`` field, and nothing read
+it: recording that the vendor uses ACT/360 while the local model uses ACT/365F
+produced ``MATCHED``. Observing a disagreement is the thing evidence most needs
+to be able to express, and it was the one thing it could not say.
+
+Alongside those, the calculation had no gate at all. ``pipeline.compute_gex()``
+called the engine -- with six load-bearing dimensions ``UNKNOWN``, on a chain
+from another pipeline, with no capture behind it -- and the number that came out
+was indistinguishable from one computed under settled assumptions.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.4 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | `compute_gex()` consulted nothing | A number computed under six unknowns looked like one computed under none | `compute_diagnostic_gex` / `compute_trusted_gex`; the trusted one refuses unless pricing, fingerprints, capture and provenance all hold |
+| 2 | `assess_readiness(capture=...)` took a verdict | A hand-built `CaptureVerification` advanced the state machine | Takes a manifest and a store; runs the verifier itself |
+| 3 | Any non-empty passing check set was a validation | `ValidationCheck(name="anything", passed=True)` certified | `AdapterValidator.validate` derives the report; readiness re-derives and compares |
+| 4 | `LIVE_COMPARISON` was writable in YAML | A file claimed a comparison that had not been run | Refused in the loader *and* in the config object; only the validator emits it |
+| 5 | Evidence set `MATCHED` directly | ACT/360 against ACT/365F was agreement | `VendorObservation` carries the observed value; per-dimension comparators derive the status |
+| 6 | Pricing evidence was independent of validation | A static attestation counted as live-observed | Only a bound, passing validation check naming the dimension counts |
+| 7 | `ProvenanceEvidence` proved a record id existed | A Greeks response was evidence about open interest | `VerifiedFieldObservation` re-reads the payload: endpoint, field, value, hash |
+| 8 | `verify_capture` never asked whether the manifest claimed *enough* | A one-record capture certified | A `CapturePlan` derived from mode, policy, underlying and tier; every required endpoint must be present |
+| 9 | `fetch_chain(spot=...)` took the caller's number | Every gamma is computed against it | The vendor index snapshot is fetched inside the same capture session and read back from the stored payload |
+| 10 | `raw_store=object()` skipped the integrity check | A store that could not store anything passed | `probe_raw_store`: protocol, integrity, write, read-back |
+| 11 | `rate_units` and `dividend_convention` were "local" | We do not send them; how the vendor reads 4.2 is its API's business | Both are vendor-owned; a local YAML entry cannot settle them |
+| 12 | Provenance accepted naive datetimes, NaN tolerances, future dates | A tolerance of NaN compares true against every skew | Strict `__post_init__` on both provenance types, with source enums |
+| 13 | `OptionContract` held only a float strike | Two strikes differing below double precision became one contract | `strike_decimal` carried alongside; identity, keys and dedup use it |
+| 14 | `from_session` took the whole session | A second chain pull inherited the first's records | `CaptureSession.mark()` and `from_session(since=...)` |
+| 15 | Derived reports were read, never recomputed | `dataclasses.replace(pipeline, pricing_compatibility=...)` bypassed every check | `validate_integrity()`, called before fetch, calculation and readiness |
+| 16 | Public certification raised bare `TypeError` | "The adapter refused" meant enumerating builtins | `ThetaDataCertificationError` / `ProvenanceError` / `ValidationError` |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | -- |
+| `EXPECTED_MODEL_FINGERPRINT` | `70b3afda56f505e7` | `d3d458592b6f87e0` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `89f38199...` | `568d2c2d...` | `VERSION_METADATA_ONLY` |
+
+**No GEX number changed.** Across the release exactly two assertions in the
+regression file moved, both driven by `MODEL_VERSION`. Five v2.1.5 changes could
+plausibly have reached the output hash; four provably do not, checked by
+searching the serialised payload rather than reasoned about. The note in
+`tests/regression/test_frozen_reference_case.py` records each.
+
+### Behavioural changes worth knowing
+
+* `pipeline.compute_gex()` and `capture_and_compute()` are gone. Use
+  `compute_diagnostic_gex` (always untrusted) or `compute_trusted_gex` (refuses
+  under unresolved assumptions).
+* `pipeline.fetch_chain()` takes no `spot`. Under `vendor_index_snapshot` it
+  fetches the index itself; for an external spot use
+  `fetch_chain_with_external_spot`, whose snapshots cannot be trusted.
+* `assess_readiness` takes `manifest=` and `raw_store=` instead of `capture=`.
+* `rate_units` and `dividend_convention` no longer resolve from configuration.
+  A previously "compatible" profile now reports two more unknowns, correctly.
+* A `pricing_attestations` entry needs a `vendor_value`, and its `reference`
+  must resolve to a file in the repository or a URL.
+* `OptionContract.key` carries the canonical strike string, not a float.
+
+### Not added, deliberately
+
+Real ThetaData requests, Databento, MES/ES futures feeds, feature-store work,
+trading strategies, regime thresholds, a risk engine, position sizing, IBKR,
+broker execution, order classes, paper trading, live trading, and arbitrary
+calibrated trading values.
+
 ## 2.1.4 - certification state and provenance integrity
 
 v2.1.3 built the machinery for deciding whether vendor numbers may be trusted.

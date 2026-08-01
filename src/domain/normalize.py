@@ -472,6 +472,6 @@ def validate_chain(
 
 def _duplicate_keys(
     quotes: tuple[OptionQuote, ...],
-) -> dict[tuple[str, date, float, str], int]:
+) -> dict[tuple[str, date, str, str], int]:
     counts = Counter(quote.contract.key for quote in quotes)
     return {key: count for key, count in counts.items() if count > 1}

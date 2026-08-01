@@ -210,7 +210,19 @@ def test_a_vendor_percent_rate_normalises_to_a_local_decimal():
             unit=RateUnit.DECIMAL_ANNUAL_RATE,
         ),
     )
-    assert report.compatible
+    # The *values* agree. The units do not become known by our stating them --
+    # ``rate_units`` is not a parameter this adapter sends, so how ThetaData
+    # reads 4.2 is its own convention (v2.1.5 §11). The rate is therefore
+    # comparable and the units stay unverified.
+    from src.config.compatibility import CompatibilityStatus, PricingDimension
+
+    by_dimension = {d.dimension: d for d in report.dimensions}
+    assert by_dimension[PricingDimension.RISK_FREE_RATE].status is (
+        CompatibilityStatus.MATCHED
+    )
+    assert by_dimension[PricingDimension.RATE_UNITS].status is (
+        CompatibilityStatus.UNKNOWN
+    )
 
 
 def test_unknown_vendor_rate_units_are_not_compatible():
@@ -314,17 +326,29 @@ def test_the_same_convention_with_different_values_is_incompatible():
     assert report.load_bearing_mismatches
 
 
-def test_the_same_convention_and_value_is_compatible():
+def test_a_matching_non_zero_dividend_is_still_unverified():
+    """Two numbers agreeing is not two numbers meaning the same thing.
+
+    A cash amount and a continuous yield of 0.013 are different quantities, and
+    which one the vendor read is its convention. v2.1.4 called this compatible
+    because our own config said what we hoped the vendor did.
+    """
+    from src.config.compatibility import CompatibilityStatus, PricingDimension
     from src.config.pipeline import DividendAssumption, check_dividend_compatibility
 
-    assert check_dividend_compatibility(
+    report = check_dividend_compatibility(
         vendor=DividendAssumption(
             convention=DividendConvention.CONTINUOUS_DIVIDEND_YIELD, value=0.013
         ),
         local=DividendAssumption(
             convention=DividendConvention.CONTINUOUS_DIVIDEND_YIELD, value=0.013
         ),
-    ).compatible
+    )
+    assert not report.compatible
+    by_dimension = {d.dimension: d for d in report.dimensions}
+    assert by_dimension[PricingDimension.DIVIDEND_VALUE].status is (
+        CompatibilityStatus.UNKNOWN
+    )
 
 
 def test_a_zero_convention_with_a_non_zero_value_is_a_mismatch():
@@ -354,17 +378,31 @@ def test_a_zero_convention_with_a_non_zero_value_is_a_mismatch():
     assert any(d.vendor_value == 3.5 for d in report.dimensions)
 
 
-def test_an_explicit_zero_dividend_stays_valid():
+def test_an_explicit_zero_dividend_settles_the_value_but_not_the_convention():
+    """Zero is the one dividend whose value does not depend on the convention.
+
+    exp(-0*T) is 1 whether the vendor read it as cash or as a yield, so the
+    *value* is safe. The convention is still unestablished, and the report has
+    to keep saying so.
+    """
+    from src.config.compatibility import CompatibilityStatus, PricingDimension
     from src.config.pipeline import DividendAssumption, check_dividend_compatibility
 
-    assert check_dividend_compatibility(
+    report = check_dividend_compatibility(
         vendor=DividendAssumption(
             convention=DividendConvention.ZERO_DIVIDEND, value=0.0
         ),
         local=DividendAssumption(
             convention=DividendConvention.ZERO_DIVIDEND, value=0.0
         ),
-    ).compatible
+    )
+    by_dimension = {d.dimension: d for d in report.dimensions}
+    assert by_dimension[PricingDimension.DIVIDEND_VALUE].status is (
+        CompatibilityStatus.MATCHED
+    )
+    assert by_dimension[PricingDimension.DIVIDEND_CONVENTION].status is (
+        CompatibilityStatus.UNKNOWN
+    )
 
 
 def test_an_unknown_vendor_convention_is_unknown_not_incompatible():

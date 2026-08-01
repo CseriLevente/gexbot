@@ -21,14 +21,17 @@ import re
 
 __all__ = [
     "ThetaDataAuthenticationError",
+    "ThetaDataCertificationError",
     "ThetaDataConfigurationError",
     "ThetaDataError",
     "ThetaDataHTTPError",
+    "ThetaDataProvenanceError",
     "ThetaDataRateLimitError",
     "ThetaDataRawStoreError",
     "ThetaDataResponseTooLargeError",
     "ThetaDataRetryExhaustedError",
     "ThetaDataSchemaError",
+    "ThetaDataValidationError",
     "ThetaDataVendorError",
     "redact_secrets",
 ]
@@ -108,6 +111,25 @@ class ThetaDataResponseTooLargeError(ThetaDataError):
 
 class ThetaDataRawStoreError(ThetaDataError):
     """A raw-response store failure: append-only violation, unsafe id, IO."""
+
+
+class ThetaDataCertificationError(ThetaDataError):
+    """A certification input that cannot be accepted.
+
+    v2.1.4 raised a bare ``TypeError`` from ``assess_readiness`` when handed an
+    untyped capture, and ``ValueError`` subclasses from the provenance and
+    validation objects. Public certification refusals are part of the adapter's
+    contract, so they belong in the adapter's hierarchy -- a caller writing
+    ``except ThetaDataError`` should not also have to enumerate builtins.
+    """
+
+
+class ThetaDataProvenanceError(ThetaDataCertificationError):
+    """A provenance claim that does not hold against the raw evidence."""
+
+
+class ThetaDataValidationError(ThetaDataCertificationError):
+    """A validation report that does not describe what it claims to."""
 
 
 def http_error_for(

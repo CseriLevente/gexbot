@@ -30,10 +30,9 @@ from urllib.parse import urlparse
 from src.adapters.errors import ThetaDataError
 from src.config.compatibility import (
     AttestationError,
-    CompatibilityEvidence,
     EvidenceSource,
-    PricingAssumptionAttestation,
     PricingDimension,
+    VendorObservation,
 )
 from src.domain.iv import IVSource
 
@@ -151,7 +150,7 @@ class ThetaDataConfig:
     #: inline. The only production route from an UNKNOWN pricing dimension to a
     #: resolved one, and each carries its source and reference into the audit
     #: trail. An attestation cannot overturn a measured mismatch.
-    pricing_attestations: tuple[PricingAssumptionAttestation, ...] = ()
+    pricing_attestations: tuple[VendorObservation, ...] = ()
     #: Local model settings that MUST match the ModelSpec, checked by
     #: ThetaDataResearchPipeline rather than left to drift.
     min_time_to_expiry_minutes: float = 60.0
@@ -223,12 +222,23 @@ class ThetaDataConfig:
 
         attestations = tuple(self.pricing_attestations)
         for attestation in attestations:
-            if not isinstance(attestation, PricingAssumptionAttestation):
+            if not isinstance(attestation, VendorObservation):
                 raise AttestationError(
-                    "pricing_attestations must hold PricingAssumptionAttestation "
-                    f"objects, got {type(attestation).__name__}. A string or a "
-                    "boolean here would be an assertion that a question was "
-                    "answered, with nothing recording the answer."
+                    "pricing_attestations must hold VendorObservation objects, "
+                    f"got {type(attestation).__name__}. A string or a boolean "
+                    "here would be an assertion that a question was answered, "
+                    "with nothing recording the answer."
+                )
+            if attestation.source is EvidenceSource.LIVE_COMPARISON:
+                # Configuration is static; a live comparison is an event. The
+                # loader refuses this in YAML, and so must the object, or the
+                # rule is one constructor call from being irrelevant.
+                raise ThetaDataConfigError(
+                    f"pricing_attestations[{attestation.dimension.value}]: "
+                    "LIVE_COMPARISON records that a comparison against real "
+                    "vendor output was run. A configuration object cannot "
+                    "witness an event. Live evidence is emitted by "
+                    "AdapterValidator and bound to the capture it was read from."
                 )
         claimed = [a.dimension for a in attestations]
         duplicated = sorted({d.value for d in claimed if claimed.count(d) > 1})
@@ -552,7 +562,7 @@ ATTESTATION_KEYS = frozenset(
 
 def _parse_attestations(
     raw_value: Any, fail: Any, *, key: str = "pricing_attestations"
-) -> tuple[PricingAssumptionAttestation, ...]:
+) -> tuple[VendorObservation, ...]:
     """Build typed attestations from the configuration file.
 
     Every field is required to be present and non-empty in the file, because the
@@ -563,7 +573,7 @@ def _parse_attestations(
         return ()
     if not isinstance(raw_value, list):
         fail(f"expected a list of attestations, got {type(raw_value).__name__}", key)
-    parsed: list[PricingAssumptionAttestation] = []
+    parsed: list[VendorObservation] = []
     for index, entry in enumerate(raw_value):
         where = f"{key}[{index}]"
         if not isinstance(entry, dict):
@@ -593,22 +603,64 @@ def _parse_attestations(
                 f"{where}.source",
             )
             continue
+        if source is EvidenceSource.LIVE_COMPARISON:
+            fail(
+                "LIVE_COMPARISON records that a comparison against real vendor "
+                "output was run. A configuration file cannot witness an event: "
+                "editing this line does not make a request. Live evidence is "
+                "emitted by AdapterValidator and bound to the capture it was "
+                "read from. Use VENDOR_DOCUMENTATION for what the vendor says.",
+                f"{where}.source",
+            )
+            continue
+        reference = str(entry.get("reference", ""))
+        if source is EvidenceSource.VENDOR_DOCUMENTATION:
+            _require_resolvable_reference(reference, fail, where=f"{where}.reference")
         try:
             parsed.append(
-                PricingAssumptionAttestation(
+                VendorObservation(
                     dimension=dimension,
-                    evidence=CompatibilityEvidence(
-                        source=source,
-                        reference=str(entry.get("reference", "")),
-                        observed_at=str(entry.get("observed_at", "")),
-                    ),
-                    vendor_value=entry.get("vendor_value"),
+                    observed_value=entry.get("vendor_value"),
+                    source=source,
+                    reference=reference,
+                    observed_at=str(entry.get("observed_at", "")),
                     note=str(entry.get("note", "")),
                 )
             )
         except AttestationError as error:
             fail(str(error), where)
     return tuple(parsed)
+
+
+def _require_resolvable_reference(reference: str, fail: Any, *, where: str) -> None:
+    """A documentation reference has to point at something a reader can open.
+
+    Not a URL check and not a content check -- just the difference between a
+    path into this repository that exists and one that does not. An
+    unresolvable reference is the same as no reference: nobody reviewing the
+    certification report can go and look.
+    """
+    text = reference.strip()
+    if not text:
+        fail("a documentation reference is required", where)
+        return
+    if text.startswith(("http://", "https://")):
+        return
+    target = pathlib.Path(text.split("#", 1)[0])
+    if target.is_absolute() or ".." in target.parts:
+        fail(
+            f"{text!r} must be a path inside the repository or a URL",
+            where,
+        )
+        return
+    root = pathlib.Path(__file__).resolve().parents[2]
+    if not (root / target).exists():
+        fail(
+            f"{text!r} does not exist. A reference nobody can open is the same "
+            "as no reference: the certification report names a source that "
+            "cannot be checked.",
+            where,
+        )
 
 
 def _required(value: float | None) -> float:
@@ -1108,6 +1160,50 @@ class ThetaDataRuntime:
             "max_retries": self.config.max_retries,
         }
 
+    def capture_index_snapshot(
+        self, *, as_of: datetime, capture: Any
+    ) -> tuple[float, datetime | None, Any] | None:
+        """Fetch the vendor's index print into this capture session.
+
+        The underlying every gamma is computed against, read from the vendor
+        rather than accepted from a caller, and stored in the same session as
+        the chain it prices -- so the manifest links the two.
+
+        Returns ``(spot, timestamp, observation)``. The observation is read back
+        out of the stored payload, so the number in the snapshot and the number
+        in the audit trail are the same number by construction.
+        """
+        from src.adapters.thetadata.endpoints import Endpoint
+        from src.adapters.validation import AdapterValidator
+
+        record = self.client.fetch_index_snapshot(
+            symbol=self.default_chain_request.symbol, as_of=as_of, capture=capture
+        )
+        if record is None:
+            return None
+        if capture is None:
+            # No capture session, so nothing was stored and there is nothing to
+            # read back. The value is still usable; it just cannot be attributed.
+            return record.spot, record.timestamp, None
+
+        from src.adapters.raw_store import RawCaptureManifest
+
+        manifest = RawCaptureManifest.from_session(capture)
+        observation = AdapterValidator.observe_field(
+            manifest=manifest,
+            store=self.client.raw_store,
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT,
+            field_path="index_price",
+        )
+        price = observation.observed_value
+        if isinstance(price, bool) or not isinstance(price, int | float):
+            raise ThetaDataConfigError(
+                f"the index snapshot returned {price!r} for index_price, which "
+                "is not a number. Every gamma in the chain is computed against "
+                "this value."
+            )
+        return float(price), observation.source_timestamp, observation
+
     def fetch_chain(
         self,
         *,
@@ -1121,6 +1217,8 @@ class ThetaDataRuntime:
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
         pipeline: Any = None,
+        manifest_since: int = 0,
+        capture_plan_fingerprint: str = "",
     ) -> ChainSnapshot:
         """Fetch and assemble using the configured settings.
 
@@ -1175,8 +1273,18 @@ class ThetaDataRuntime:
 
         from src.adapters.raw_store import RawCaptureManifest
 
+        # ``manifest_since`` is a mark taken before this fetch. Without it a
+        # session reused for a second chain pull gives the second snapshot a
+        # manifest naming the first snapshot's responses.
         manifest = (
-            RawCaptureManifest.from_session(capture)
+            RawCaptureManifest.from_session(
+                capture,
+                since=manifest_since,
+                capture_plan_fingerprint=capture_plan_fingerprint,
+                pipeline_fingerprint=(
+                    pipeline.fingerprint() if pipeline is not None else ""
+                ),
+            )
             if capture is not None
             else RawCaptureManifest.disabled()
         )

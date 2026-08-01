@@ -337,8 +337,11 @@ def test_join_matches_on_root_expiry_strike_and_right():
     chain = build()
     assert len(chain.quotes) == 20  # 5 strikes x 2 rights x 2 expiries
     by_key = {q.contract.key: q for q in chain.quotes}
-    call = by_key[("SPXW", date(2026, 3, 20), 5000.0, "call")]
-    put = by_key[("SPXW", date(2026, 3, 20), 5000.0, "put")]
+    # The strike enters the key as its canonical *string* since v2.1.5. A float
+    # key merges strikes differing below double precision, silently joining two
+    # distinct contracts into one.
+    call = by_key[("SPXW", date(2026, 3, 20), "5000", "call")]
+    put = by_key[("SPXW", date(2026, 3, 20), "5000", "put")]
     assert call.open_interest == 4200
     assert put.open_interest == 9100
     assert call.gamma is not None

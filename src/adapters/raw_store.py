@@ -55,7 +55,7 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: but the identity string is the *join key* between an expected universe and a
 #: received chain, and two versions spelling it differently would not match each
 #: other's output. A replay across the boundary has to be able to see that.
-PARSER_VERSION = "thetadata-v3-parser/2.1.4"
+PARSER_VERSION = "thetadata-v3-parser/2.1.5"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -429,7 +429,11 @@ class InMemoryRawStore:
         return self._payloads[record_id]
 
     def records(self) -> tuple[RawResponseRecord, ...]:
-        return tuple(self._records[key] for key in sorted(self._records))
+        return tuple(
+            self._records[key]
+            for key in sorted(self._records)
+            if not is_probe_record(key)
+        )
 
 
 class FileRawStore:
@@ -567,6 +571,14 @@ class FileRawStore:
                 record_id = str(data["record_id"])
                 expected_hash = str(data["payload_hash"])
 
+                # Health-probe records are the store proving it works, not
+                # evidence. They are never removed -- an append-only store has
+                # no delete -- so they are skipped here instead, or a probe
+                # would make every later scan look like it had grown.
+                if is_probe_record(record_id):
+                    indexed_paths.add(self._payload_path(record_id))
+                    continue
+
                 if record_id in seen_ids:
                     findings.append(
                         IntegrityFinding(
@@ -666,6 +678,8 @@ class FileRawStore:
             if not line.strip():
                 continue
             data = json.loads(line)
+            if is_probe_record(str(data.get("record_id", ""))):
+                continue
             out.append(
                 RawResponseRecord(
                     record_id=data["record_id"],
@@ -730,6 +744,106 @@ class NullRawStore:
         return ()
 
 
+@dataclass(frozen=True, slots=True)
+class RawStoreHealth:
+    """Whether a store is a place to put a paid session's only copy.
+
+    v2.1.4 accepted anything with the right attribute names. ``raw_store=
+    object()`` has no ``verify_integrity``, so the integrity check was skipped
+    rather than failed, and readiness passed on a store that could not have
+    stored anything.
+    """
+
+    usable: bool
+    failures: tuple[str, ...] = ()
+    store_description: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "usable": self.usable,
+            "failures": list(self.failures),
+            "store_description": self.store_description,
+        }
+
+
+#: Prefix for health-probe records. Kept out of the capture namespace: a probe
+#: that leaves a record behind has corrupted the audit trail it was checking.
+PROBE_PREFIX = "healthprobe"
+
+
+def probe_raw_store(store: Any) -> RawStoreHealth:
+    """Check that a store is real, clean, and can actually be written to.
+
+    Four separate questions, because they fail for different reasons: does it
+    implement the protocol, does it report clean, can it take a write, and can
+    that write be read back byte-for-byte.
+
+    The probe writes into a namespace no capture uses and does not remove the
+    record afterwards -- deleting from an append-only store is the one operation
+    it does not have. ``verify_integrity`` and ``records()`` therefore ignore
+    probe records, so the probe cannot make a later scan look dirty.
+    """
+    failures: list[str] = []
+    description = type(store).__name__
+
+    if not isinstance(store, RawResponseStore):
+        return RawStoreHealth(
+            usable=False,
+            failures=(
+                f"PROTOCOL: {description} does not implement RawResponseStore; a "
+                "store that cannot put, get or list is not somewhere to keep "
+                "evidence",
+            ),
+            store_description=description,
+        )
+
+    integrity = getattr(store, "verify_integrity", None)
+    if callable(integrity):
+        report = integrity()
+        if not report.ok:
+            failures.append(f"INTEGRITY: store is not clean: {report.counts()}")
+
+    payload = f"{PROBE_PREFIX}-{uuid.uuid4().hex}"
+    record_id = f"{PROBE_PREFIX}-{uuid.uuid4().hex[:16]}"
+    now = datetime.now(UTC)
+    try:
+        record = store.put(
+            record_id=record_id,
+            endpoint="/internal/health-probe",
+            query_params={},
+            payload=payload,
+            request_started_at=now,
+            response_received_at=now,
+            http_status=200,
+        )
+    except Exception as exc:
+        failures.append(f"WRITE: the store refused a probe record: {exc}")
+        return RawStoreHealth(
+            usable=False, failures=tuple(failures), store_description=description
+        )
+
+    try:
+        read_back = store.get_payload(record_id)
+    except Exception as exc:
+        failures.append(f"READ: the probe record could not be read back: {exc}")
+    else:
+        if read_back != payload:
+            failures.append("READ: the probe record did not read back byte-identical")
+        if record.payload_hash != payload_hash(payload):
+            failures.append("HASH: the store recorded a hash of different bytes")
+
+    return RawStoreHealth(
+        usable=not failures,
+        failures=tuple(failures),
+        store_description=description,
+    )
+
+
+def is_probe_record(record_id: str) -> bool:
+    """Probe records are health checks, not evidence, and never count as either."""
+    return record_id.startswith(PROBE_PREFIX)
+
+
 @dataclass(slots=True)
 class CaptureSession:
     """Groups the records belonging to one chain pull.
@@ -748,6 +862,19 @@ class CaptureSession:
     def next_sequence(self) -> int:
         self._sequence += 1
         return self._sequence
+
+    def mark(self) -> int:
+        """Where this session's record list currently ends.
+
+        Pass the result to ``RawCaptureManifest.from_session(session, since=...)``
+        to build a manifest of only what was captured afterwards.
+
+        v2.1.4 always took the whole list, so a session reused for a second chain
+        pull gave the second snapshot a manifest naming the first snapshot's
+        responses. A provenance record listing bytes that produced a different
+        number is worse than no provenance record, because it looks like one.
+        """
+        return len(self.captured)
 
     def capture(
         self,
@@ -809,20 +936,60 @@ class RawCaptureManifest:
     #: False when capture was disabled. Recorded explicitly rather than left to
     #: an absent key, which reads the same as "we forgot".
     capture_enabled: bool = True
+    #: Which endpoint each record answered. Without it a manifest is a bag of
+    #: ids, and "is every response this session needs present?" is unanswerable
+    #: -- which is how a one-record capture certified in v2.1.4.
+    endpoint_records: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: The plan this capture was taken against, so a later reader can tell what
+    #: the capture was *meant* to contain rather than only what it does.
+    capture_plan_fingerprint: str = ""
+    #: Which code read these bytes, and which configuration asked for them.
+    parser_version: str = PARSER_VERSION
+    pipeline_fingerprint: str = ""
+    #: Per record, the canonical hash of the parameters that produced it. Two
+    #: captures of the same endpoint with different filters are different
+    #: evidence.
+    request_parameter_hashes: dict[str, str] = field(default_factory=dict)
 
     @property
     def manifest_hash(self) -> str:
+        """Full SHA-256, not a truncated identifier.
+
+        v2.1.4 used the first sixteen hex characters. Sixty-four bits is fine
+        for spotting an accidental change and is not what this is for: the hash
+        is the binding between a validation report and one capture, and a
+        binding is a thing somebody might want to forge.
+        """
         payload = json.dumps(
             {
                 "session_id": self.session_id,
                 "record_ids": sorted(self.record_ids),
                 "payload_hashes": sorted(self.payload_hashes),
                 "capture_enabled": self.capture_enabled,
+                "endpoint_records": {
+                    endpoint: sorted(ids)
+                    for endpoint, ids in sorted(self.endpoint_records.items())
+                },
+                "capture_plan_fingerprint": self.capture_plan_fingerprint,
+                "parser_version": self.parser_version,
+                "pipeline_fingerprint": self.pipeline_fingerprint,
+                "request_parameter_hashes": dict(
+                    sorted(self.request_parameter_hashes.items())
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def records_for(self, endpoint: str) -> tuple[str, ...]:
+        return tuple(self.endpoint_records.get(endpoint, ()))
+
+    @property
+    def endpoints(self) -> frozenset[str]:
+        return frozenset(
+            endpoint for endpoint, ids in self.endpoint_records.items() if ids
+        )
 
     @classmethod
     def disabled(cls) -> RawCaptureManifest:
@@ -830,13 +997,42 @@ class RawCaptureManifest:
         return cls(session_id="", capture_enabled=False)
 
     @classmethod
-    def from_session(cls, session: CaptureSession) -> RawCaptureManifest:
-        records = tuple(session.captured)
+    def from_session(
+        cls,
+        session: CaptureSession,
+        *,
+        since: int = 0,
+        capture_plan_fingerprint: str = "",
+        pipeline_fingerprint: str = "",
+    ) -> RawCaptureManifest:
+        """The records this snapshot used, and only those.
+
+        ``since`` is a mark taken from ``CaptureSession.mark()`` before the
+        fetch. v2.1.4 always took the whole session, so a second chain pull
+        inherited the first pull's responses -- a provenance record naming bytes
+        that produced a different number.
+        """
+        records = tuple(session.captured[since:])
+        endpoint_records: dict[str, tuple[str, ...]] = {}
+        for record in records:
+            endpoint_records[record.endpoint] = (
+                *endpoint_records.get(record.endpoint, ()),
+                record.record_id,
+            )
         return cls(
             session_id=session.session_id,
             record_ids=tuple(sorted(r.record_id for r in records)),
             request_ids=tuple(sorted(r.request_id for r in records if r.request_id)),
             payload_hashes=tuple(sorted(r.payload_hash for r in records)),
+            endpoint_records={
+                endpoint: tuple(sorted(ids))
+                for endpoint, ids in sorted(endpoint_records.items())
+            },
+            capture_plan_fingerprint=capture_plan_fingerprint,
+            pipeline_fingerprint=pipeline_fingerprint,
+            request_parameter_hashes={
+                r.record_id: canonical_parameter_hash(r.query_params) for r in records
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -847,5 +1043,15 @@ class RawCaptureManifest:
             "request_ids": list(self.request_ids),
             "payload_hashes": list(self.payload_hashes),
             "record_count": len(self.record_ids),
+            "endpoint_records": {
+                endpoint: list(ids)
+                for endpoint, ids in sorted(self.endpoint_records.items())
+            },
+            "capture_plan_fingerprint": self.capture_plan_fingerprint,
+            "parser_version": self.parser_version,
+            "pipeline_fingerprint": self.pipeline_fingerprint,
+            "request_parameter_hashes": dict(
+                sorted(self.request_parameter_hashes.items())
+            ),
             "manifest_hash": self.manifest_hash,
         }

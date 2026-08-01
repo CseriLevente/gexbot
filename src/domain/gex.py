@@ -672,6 +672,14 @@ class GexSnapshot:
         """Copy with extra metadata. Used to prove metadata reaches the hash."""
         return replace(self, meta={**self.meta, **changes})
 
+    def with_warnings(self, *codes: str) -> GexSnapshot:
+        """Copy with extra warning codes, deduplicated and order-stable.
+
+        Used by the diagnostic calculation to stamp its own untrustworthiness
+        somewhere a scan of the warnings will find it.
+        """
+        return replace(self, warnings=tuple(dict.fromkeys((*self.warnings, *codes))))
+
     def output_hash(self, *, significant_digits: int = HASH_SIGNIFICANT_DIGITS) -> str:
         """Digest of the deterministic output, for replay checks.
 

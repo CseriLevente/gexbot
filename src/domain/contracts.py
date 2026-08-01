@@ -11,8 +11,10 @@ network access.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -43,22 +45,94 @@ class OptionRoot(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class OptionContract:
-    """Identity of a single option series."""
+    """Identity of a single option series.
+
+    The strike is carried twice, on purpose.
+
+    ``strike_decimal`` is the exact value the parser read, and it is what
+    *identity* is made of: the join key, the canonical id, duplicate detection,
+    expected-universe matching and serialisation all go through it. ``strike``
+    is the double the Black-Scholes maths needs, and is used for nothing else.
+
+    v2.1.4 held only the float and recovered the identity from it with
+    ``str(float)``. That is the shortest round-tripping spelling, so two strikes
+    differing beyond double precision produced one identity -- the parser read
+    them exactly, as ``Decimal``, and the next layer merged them. Two contracts
+    became one, and the open interest of one of them silently joined the other.
+    """
 
     root: OptionRoot
     expiry: date
     strike: float
     right: OptionRight
     multiplier: float = INDEX_OPTION_MULTIPLIER
+    #: The exact strike. Derived from ``strike`` when a caller has nothing more
+    #: precise, which is the honest reading of a bare float.
+    strike_decimal: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        from src.domain.strikes import StrikeError, canonical_strike, decimal_of
+
+        if self.strike_decimal is None:
+            # A non-finite strike is left without an exact form rather than
+            # refused here. ``normalize.py`` exists to *report* such a contract,
+            # and it cannot report one it was unable to construct. Asking such a
+            # contract for its identity still fails, which is the right place
+            # for it to fail.
+            if math.isfinite(self.strike):
+                object.__setattr__(self, "strike_decimal", decimal_of(self.strike))
+            return
+
+        # A caller may pass a string or a float here; normalise before comparing.
+        exact = (
+            self.strike_decimal
+            if isinstance(self.strike_decimal, Decimal)
+            else Decimal(str(self.strike_decimal))
+        )
+        object.__setattr__(self, "strike_decimal", exact)
+        # Two representations of one number must not be able to disagree. A
+        # caller supplying both is asserting they are the same value; if the
+        # exact one does not round to the float, one of them is wrong and
+        # nothing downstream could tell which.
+        if float(exact) != self.strike:
+            raise StrikeError(
+                f"strike_decimal {canonical_strike(exact)} and strike "
+                f"{self.strike!r} disagree; they are meant to be one number in "
+                "two representations, and nothing downstream could tell which "
+                "of them was intended"
+            )
 
     @property
-    def key(self) -> tuple[str, date, float, str]:
+    def exact_strike(self) -> Decimal:
+        """The exact strike. Absent only when the float was not finite."""
+        if self.strike_decimal is None:
+            from src.domain.strikes import StrikeError
+
+            raise StrikeError(
+                f"strike {self.strike!r} is not finite, so this contract has no "
+                "identity; it can be validated and reported, not joined"
+            )
+        return self.strike_decimal
+
+    @property
+    def canonical_strike(self) -> str:
+        """The one spelling of this strike."""
+        from src.domain.strikes import canonical_strike
+
+        return canonical_strike(self.exact_strike)
+
+    @property
+    def key(self) -> tuple[str, date, str, str]:
         """Canonical identity, used as the join key across vendor responses.
 
         Root is part of the key: SPX and SPXW can share an expiry date and a
         strike while being different instruments with different settlement times.
+
+        The strike enters as its canonical *string*, not as a float. A float key
+        merges strikes that differ below double precision, which is a silent
+        join of two distinct contracts.
         """
-        return (self.root.value, self.expiry, self.strike, self.right.value)
+        return (self.root.value, self.expiry, self.canonical_strike, self.right.value)
 
     @property
     def canonical_id(self) -> str:
@@ -70,11 +144,9 @@ class OptionContract:
         unexpected contract for the same instrument, netting to a completeness
         shortfall that does not exist.
         """
-        from src.domain.strikes import canonical_strike_of
-
         return (
             f"{self.root.value}:{self.expiry.isoformat()}:"
-            f"{canonical_strike_of(self.strike)}:{self.right.value}"
+            f"{self.canonical_strike}:{self.right.value}"
         )
 
 

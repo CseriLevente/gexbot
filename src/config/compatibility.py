@@ -35,7 +35,9 @@ __all__ = [
     "PricingCompatibilityReport",
     "PricingDimension",
     "PricingDimensionResult",
+    "VendorObservation",
     "apply_attestations",
+    "compare_observation",
 ]
 
 
@@ -78,21 +80,26 @@ class PricingDimension(str, Enum):
     def vendor_owned(self) -> bool:
         """Whether the answer is the vendor's to give.
 
-        The four below are settled by *our* configuration: we send the rate, its
-        units, the dividend and its convention, so both sides of the comparison
-        are ours and there is no vendor statement to be right or wrong about.
-        Every other dimension describes something the vendor did inside its own
-        solver, and no local setting can establish it.
+        The test is narrow and mechanical: **do we send this to the vendor?**
 
-        The distinction decides which evidence is admissible.
-        ``LOCAL_CONFIGURATION`` cannot settle a vendor-owned dimension -- there
-        is nothing local to read -- and accepting it would let an operator reach
-        ``ADAPTER_CERTIFIED`` by editing a YAML file.
+        We send ``rate_value`` and ``annual_dividend``. Those two numbers are
+        ours, both sides of the comparison are ours, and there is no vendor
+        statement to be right or wrong about.
+
+        We do **not** send ``rate_units`` or ``dividend_convention``. v2.1.4
+        treated them as locally owned on the reasoning that we configure them --
+        but configuring a label for a number does not tell the vendor how to read
+        it. ``rate_value: 4.2`` is 4.2% or 420% depending on a convention that
+        lives entirely inside the vendor's API, and writing ``rate_units:
+        DECIMAL_ANNUAL_RATE`` in our YAML expresses a hope. A local declaration
+        cannot settle a remote semantic.
+
+        The distinction decides which evidence is admissible:
+        ``LOCAL_CONFIGURATION`` cannot settle a vendor-owned dimension, because
+        there is nothing local to read.
         """
         return self not in (
-            PricingDimension.RATE_UNITS,
             PricingDimension.RISK_FREE_RATE,
-            PricingDimension.DIVIDEND_CONVENTION,
             PricingDimension.DIVIDEND_VALUE,
         )
 
@@ -247,24 +254,30 @@ def _normalise(value: object | None) -> Any:
 
 
 @dataclass(frozen=True, slots=True)
-class PricingAssumptionAttestation:
-    """A recorded answer to one dimension the vendor does not publish inline.
+class VendorObservation:
+    """What the vendor's convention was observed to be. Not what follows from it.
 
-    This is the *only* production route from ``UNKNOWN`` to ``MATCHED``, and it
-    is deliberately not a boolean. Constructing one requires naming where the
-    answer came from, pointing at it, and saying when it was established; a
-    caller who cannot supply those has not resolved anything.
+    The v2.1.4 defect this replaces: ``PricingAssumptionAttestation`` set a
+    dimension to ``MATCHED``. It carried a ``vendor_value`` field and nothing
+    ever read it, so recording that the vendor uses ACT/360 while the local
+    model uses ACT/365F produced ``MATCHED`` -- the object's *presence* was the
+    answer. Observing a disagreement is the thing evidence most needs to be able
+    to express, and it was the one thing this could not say.
 
-    It cannot overturn a ``MISMATCHED`` dimension. An attestation says "the
-    question has been answered", not "the disagreement does not matter" -- and a
-    measured disagreement is not a question.
+    An observation states a value and where it came from. What follows is
+    ``compare_observation``'s to decide.
     """
 
     dimension: PricingDimension
-    evidence: CompatibilityEvidence
-    #: What the vendor's convention turned out to be. Recorded so a later
-    #: attestation that contradicts this one is visible rather than silent.
-    vendor_value: object | None = None
+    #: What the vendor does. Required: an observation of nothing is not one.
+    observed_value: object
+    source: EvidenceSource
+    reference: str
+    observed_at: str
+    #: Set by ``AdapterValidator`` for a live comparison, so the observation can
+    #: be traced to the exact bytes it was read from. Empty for documentation.
+    record_ids: tuple[str, ...] = ()
+    manifest_hash: str = ""
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -272,49 +285,248 @@ class PricingAssumptionAttestation:
             raise AttestationError(
                 f"dimension must be a PricingDimension, got {self.dimension!r}"
             )
-        if not isinstance(self.evidence, CompatibilityEvidence):
+        if not isinstance(self.source, EvidenceSource):
             raise AttestationError(
-                "evidence must be a CompatibilityEvidence; a string or a boolean "
-                "is an assertion, not evidence"
+                f"source must be an EvidenceSource, got {self.source!r}; a string "
+                "is an assertion, not a provenance"
             )
-        if not isinstance(self.evidence.source, EvidenceSource):
+        if self.observed_value is None or (
+            isinstance(self.observed_value, str) and not self.observed_value.strip()
+        ):
             raise AttestationError(
-                f"evidence.source must be an EvidenceSource, got "
-                f"{self.evidence.source!r}"
+                f"{self.dimension.value}: observed_value is empty. An observation "
+                "that records no value has not observed anything, and there is "
+                "nothing for a comparator to compare."
             )
-        if not self.evidence.reference.strip():
+        if not self.reference.strip():
             raise AttestationError(
-                f"{self.dimension.value}: evidence.reference is empty. Point at "
-                "the documentation section, the comparison run, or the config "
-                "key that settles this -- an unreferenced attestation cannot be "
-                "checked by anyone reading the certification report."
+                f"{self.dimension.value}: reference is empty. Point at the "
+                "documentation section, the comparison run, or the config key -- "
+                "an unreferenced observation cannot be checked by anyone reading "
+                "the certification report."
             )
-        if not self.evidence.observed_at.strip():
+        if not self.observed_at.strip():
             raise AttestationError(
-                f"{self.dimension.value}: evidence.observed_at is empty. Vendor "
-                "conventions change; an answer with no date cannot be known to "
-                "still hold."
+                f"{self.dimension.value}: observed_at is empty. Vendor conventions "
+                "change; an answer with no date cannot be known to still hold."
             )
+        if self.source is EvidenceSource.LIVE_COMPARISON and not self.manifest_hash:
+            raise AttestationError(
+                f"{self.dimension.value}: a LIVE_COMPARISON observation must name "
+                "the capture it was read from. Evidence of what the vendor did is "
+                "evidence about specific bytes."
+            )
+
+    @property
+    def evidence(self) -> CompatibilityEvidence:
+        return CompatibilityEvidence(
+            source=self.source,
+            reference=self.reference,
+            observed_at=self.observed_at,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "dimension": self.dimension.value,
+            "observed_value": _normalise(self.observed_value),
             "evidence": self.evidence.as_dict(),
-            "vendor_value": _normalise(self.vendor_value),
+            "record_ids": list(self.record_ids),
+            "manifest_hash": self.manifest_hash,
             "note": self.note,
         }
 
 
+#: v2.1.4 name. The type is different -- it no longer carries a verdict -- but
+#: the role is the same, and the old name reads correctly at call sites.
+PricingAssumptionAttestation = VendorObservation
+
+
+def _as_float(value: object) -> float | None:
+    """A number, or nothing. Never a guess."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _as_token(value: object) -> str:
+    """Compare conventions as case-insensitive tokens, not as prose."""
+    text = value.value if isinstance(value, Enum) else str(value)
+    return text.strip().upper().replace(" ", "_")
+
+
+#: How close two rates have to be to be the same rate.
+RATE_TOLERANCE = 1e-9
+#: And two dividends.
+DIVIDEND_TOLERANCE = 1e-9
+#: And two time floors, in minutes.
+FLOOR_TOLERANCE = 1e-9
+
+
+def compare_observation(
+    observation: VendorObservation, spec: Any
+) -> PricingDimensionResult:
+    """Compare what the vendor does against what the local model does.
+
+    The comparator is per dimension because the comparison is: a day count is a
+    token, a time floor is a number of minutes, and a solver version has no
+    local counterpart at all. Where there is nothing meaningful to compare
+    against, the answer stays ``UNKNOWN`` -- an observation we cannot interpret
+    is not agreement.
+    """
+    dimension = observation.dimension
+    observed = observation.observed_value
+    evidence = observation.evidence
+
+    def result(
+        status: CompatibilityStatus, code: str, local: object | None, detail: str = ""
+    ) -> PricingDimensionResult:
+        return PricingDimensionResult(
+            dimension=dimension,
+            status=status,
+            code=code,
+            vendor_value=observed,
+            local_value=local,
+            evidence=evidence if status is not CompatibilityStatus.UNKNOWN else None,
+            detail=detail,
+        )
+
+    def tokens(local: object, matched: str, differs: str) -> PricingDimensionResult:
+        if _as_token(observed) == _as_token(local):
+            return result(CompatibilityStatus.MATCHED, matched, local)
+        return result(
+            CompatibilityStatus.MISMATCHED,
+            differs,
+            local,
+            detail=(
+                f"the vendor uses {observed!r} where the local model uses "
+                f"{local!r}; these are different conventions, not different "
+                "spellings"
+            ),
+        )
+
+    def numbers(
+        local: float | None, tolerance: float, matched: str, differs: str
+    ) -> PricingDimensionResult:
+        vendor_number = _as_float(observed)
+        if vendor_number is None:
+            return result(
+                CompatibilityStatus.UNKNOWN,
+                "OBSERVED_VALUE_NOT_A_NUMBER",
+                local,
+                detail=f"{observed!r} could not be read as a number",
+            )
+        if local is None:
+            return result(
+                CompatibilityStatus.UNKNOWN, "NO_COMPARABLE_LOCAL_VALUE", None
+            )
+        if abs(vendor_number - local) > tolerance:
+            return result(
+                CompatibilityStatus.MISMATCHED,
+                differs,
+                local,
+                detail=f"vendor {vendor_number} vs local {local}",
+            )
+        return result(CompatibilityStatus.MATCHED, matched, local)
+
+    if dimension is PricingDimension.DAY_COUNT:
+        return tokens(
+            spec.day_count_convention, "DAY_COUNT_AGREES", "DAY_COUNT_DIFFERS"
+        )
+    if dimension is PricingDimension.MINIMUM_TIME_FLOOR:
+        return numbers(
+            float(spec.minimum_time_to_expiry_minutes),
+            FLOOR_TOLERANCE,
+            "TIME_FLOOR_AGREES",
+            "TIME_FLOOR_DIFFERS",
+        )
+    if dimension is PricingDimension.IV_PRICE_BASIS:
+        return tokens(
+            spec.iv_price_source, "IV_PRICE_BASIS_AGREES", "IV_PRICE_BASIS_DIFFERS"
+        )
+    if dimension is PricingDimension.UNDERLYING_SOURCE:
+        return tokens(
+            spec.underlying_price_source,
+            "UNDERLYING_SOURCE_AGREES",
+            "UNDERLYING_SOURCE_DIFFERS",
+        )
+    if dimension is PricingDimension.UNDERLYING_TIMESTAMP:
+        # The local model reads the underlying at the option quote instant. A
+        # vendor that reads it anywhere else is pricing against a different
+        # spot, whatever the two prints happen to be worth today.
+        return tokens(
+            "OPTION_QUOTE_INSTANT",
+            "UNDERLYING_TIMESTAMP_AGREES",
+            "UNDERLYING_TIMESTAMP_DIFFERS",
+        )
+    if dimension is PricingDimension.EXPIRATION_TIMESTAMP:
+        return tokens(
+            spec.expiration_timestamp_rule,
+            "EXPIRATION_RULE_AGREES",
+            "EXPIRATION_RULE_DIFFERS",
+        )
+    if dimension is PricingDimension.RISK_FREE_RATE:
+        return numbers(
+            _as_float(spec.risk_free_rate),
+            RATE_TOLERANCE,
+            "RATE_VALUE_AGREES",
+            "RATE_VALUE_DIFFERS",
+        )
+    if dimension is PricingDimension.RATE_UNITS:
+        # The local model always states its rate as a decimal. The question is
+        # how the vendor reads the number we send it.
+        return tokens("DECIMAL_ANNUAL_RATE", "RATE_UNITS_AGREE", "RATE_UNITS_DIFFER")
+    if dimension is PricingDimension.DIVIDEND_CONVENTION:
+        local_convention = (
+            "ZERO_DIVIDEND"
+            if _as_float(spec.dividend_yield) in (0.0, None)
+            else "CONTINUOUS_DIVIDEND_YIELD"
+        )
+        return tokens(
+            local_convention,
+            "DIVIDEND_CONVENTION_AGREES",
+            "DIVIDEND_CONVENTION_DIFFERS",
+        )
+    if dimension is PricingDimension.DIVIDEND_VALUE:
+        return numbers(
+            _as_float(spec.dividend_yield),
+            DIVIDEND_TOLERANCE,
+            "DIVIDEND_VALUE_AGREES",
+            "DIVIDEND_VALUE_DIFFERS",
+        )
+
+    # SOLVER_VERSION and anything added later without a comparator. There is no
+    # local solver version to compare against, so an observation of the vendor's
+    # is recorded and settles nothing.
+    return result(
+        CompatibilityStatus.UNKNOWN,
+        "NO_LOCAL_COUNTERPART",
+        None,
+        detail=(
+            f"{dimension.value} has no local counterpart to compare against, so "
+            "observing the vendor's value records it without settling anything"
+        ),
+    )
+
+
 def apply_attestations(
     report: PricingCompatibilityReport,
-    attestations: tuple[PricingAssumptionAttestation, ...],
+    attestations: tuple[VendorObservation, ...],
+    spec: Any,
 ) -> PricingCompatibilityReport:
-    """Fold recorded answers into an assessment.
+    """Fold observed vendor values into an assessment, and compare them.
 
     Three outcomes, all of them explicit:
 
-    * an ``UNKNOWN`` load-bearing dimension becomes ``MATCHED``, carrying the
-      evidence, so the certification report can say *how* it was settled;
+    * an ``UNKNOWN`` load-bearing dimension gets a *comparison*: the observed
+      vendor value against the local model's, which may agree, disagree, or be
+      uninterpretable. v2.1.4 wrote ``MATCHED`` unconditionally here;
     * an attestation aimed at a ``MISMATCHED`` dimension becomes a hard failure,
       because overriding a measured disagreement is the one thing this must
       never allow;
@@ -354,24 +566,17 @@ def apply_attestations(
             continue
         if (
             attestation.dimension.vendor_owned
-            and attestation.evidence.source is EvidenceSource.LOCAL_CONFIGURATION
+            and attestation.source is EvidenceSource.LOCAL_CONFIGURATION
         ):
             hard_failures.append(
                 f"LOCAL_EVIDENCE_CANNOT_SETTLE_A_VENDOR_CONVENTION:"
                 f"{attestation.dimension.value}"
             )
             continue
-        resolved.append(
-            PricingDimensionResult(
-                dimension=attestation.dimension,
-                status=CompatibilityStatus.MATCHED,
-                code=f"ATTESTED_{attestation.evidence.source.value}",
-                vendor_value=attestation.vendor_value,
-                local_value=current.local_value,
-                evidence=attestation.evidence,
-                detail=attestation.note,
-            )
-        )
+        # The comparator decides, not the observation. v2.1.4 wrote MATCHED
+        # here, so an observation recording that the vendor uses ACT/360 against
+        # a local ACT/365F settled the dimension as agreement.
+        resolved.append(compare_observation(attestation, spec))
 
     return report.merged_with(
         PricingCompatibilityReport(

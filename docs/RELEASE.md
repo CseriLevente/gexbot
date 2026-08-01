@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.4.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.5.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.4.zip
+sha256sum gex-bot-v2.1.5.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.4.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.5.zip -Algorithm SHA256
 ```
 
 ---

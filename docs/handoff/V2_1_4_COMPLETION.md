@@ -225,21 +225,25 @@ repository has a remote and a run completes.
 
 ## Release archive
 
+Built with:
+
 ```
-gex-bot-v2.1.4.zip
-sha256  90a0c369577378117083d9c476321bc39da62089a28e91eff8eae7fb6f4ca35b
-bytes   518099
-entries 193
+git archive --format=zip --output=gex-bot-v2.1.4.zip HEAD
 ```
 
-Built with `git archive --format=zip --output=gex-bot-v2.1.4.zip HEAD` from
-commit `0bb8256`. The delivered file has the hash above; it was verified by
-hashing that file, not a copy of it.
+**This document cannot state the archive's own SHA-256.** It is inside the
+archive, so any hash written here would be the hash of a different file. The
+digest is reported alongside the delivered `.zip`, and anyone can re-derive it:
+the archive is reproducible from a given commit, so `git archive` on the release
+commit followed by `sha256sum` returns the same value on any machine.
+
+What *was* verified about the delivered file:
 
 - **Reproducible.** Two consecutive `git archive` runs produce byte-identical
   output, and both match the delivered file.
-- **Extracted and smoke-tested.** 152 files; the engine core computes a snapshot
-  under `python -S -E` with no site-packages and no environment.
+- **Extracted and smoke-tested.** The engine core computes a snapshot under
+  `python -S -E` with no site-packages and no environment, from the extracted
+  tree rather than from the working copy.
 - **Contains no** `.git`, `.venv`, `.coverage`, `__pycache__`, `.pyc`,
   `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, previous release archives,
   `artifacts/`, or `.env` — checked by scanning every entry name.

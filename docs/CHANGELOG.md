@@ -49,6 +49,21 @@ The repository remains incapable of placing an order.
 | 13 | CI `push` triggered on `main` | The repository's branch is `master`, so no job had ever run on a push | Triggers on `master` and `main`, plus `workflow_dispatch` |
 | 14 | Provenance carried caller-set booleans | The caller asserting it had observed something is not an observation | `ProvenanceGrade` PLANNED / OBSERVED / VALIDATED, derived from a `ProvenanceEvidence` naming a stored record |
 
+### Found by reviewing this release, before it shipped
+
+Seven defects in the v2.1.4 work itself, five of them in the very machinery
+meant to close v2.1.3's bypass. Each was reproduced before being fixed.
+
+| Defect | Why it mattered | Fix |
+|---|---|---|
+| `ProvenanceEvidence` was checked for being well-formed, never for being true | Evidence naming a record that does not exist, in a session that never happened, graded `VALIDATED` and reached `ADAPTER_CERTIFIED` — the v2.1.3 defect one type-level down | `grade_claim` compares the record id and manifest hash against the verified capture; a claim that does not hold is a calculation blocker, not a soft "not yet observed" |
+| `LOCAL_CONFIGURATION` evidence settled any dimension | Seven attestations in a YAML file reached `ADAPTER_CERTIFIED` with no comparison run | `PricingDimension.vendor_owned`; local evidence on a vendor-owned dimension is a hard failure, and the certification ladder mirrors the rule |
+| `ZERO_DIVIDEND` returned `BOTH_ZERO` without reading either value | `annual_dividend: 3.5` is sent to the vendor, so its IV was solved under q=3.5 against a local q=0.0 — and the report recorded the vendor's dividend as 0.0 | The values are compared; a non-zero under a zero convention is `MISMATCHED` |
+| Provenance grades were computed before the validation report was checked for binding | A report describing a different manifest still promoted grades to `VALIDATED`, beside a blocker saying there was no capture to bind to | Binding is settled first |
+| `verify_capture` tested payload-hash *membership* | One retry written under two ids satisfied two distinct manifest claims | The confirmed hashes must pair with the claimed ones exactly |
+| `canonical_strike` raised `InvalidOperation` above ~1e28, and spelled `NaN` | `canonical_id` became a property that throws inside chain parsing; a NaN identity compares unequal to itself | Non-finite refused with `StrikeError`; the decimal context is widened for large integral values |
+| `ThetaDataConfig()` bypassed the IV-source and legacy-mode guards | `ThetaDataConfig(iv_source=TRADE_IV)` constructed and then priced against a source with no implementation; a stored v2.1.3 dict raised an opaque `ValueError` | Both guards run in `__post_init__`, and `require_coherent_pricing_mode` now checks both directions |
+
 ### Additional defects found
 
 * **An explicitly zero dividend derived a spec that called itself a continuous

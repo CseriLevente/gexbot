@@ -108,8 +108,38 @@ calculation.
 
 ## Defects fixed
 
-Fourteen numbered defects, plus three found while fixing them. The full table is
-in [CHANGELOG.md](../CHANGELOG.md).
+Fourteen numbered defects, three found while fixing them, and seven found by
+reviewing this release before it shipped. The full tables are in
+[CHANGELOG.md](../CHANGELOG.md).
+
+### The review of this release found more than the release did
+
+Worth stating plainly, because it is the most useful thing in this document.
+A review of the v2.1.4 diff surfaced seven defects, **five of them inside the
+machinery written to close v2.1.3's bypass**. Two recreated that bypass exactly:
+
+```python
+ProvenanceEvidence(raw_record_id="no-such-record", field_path="x",
+                   manifest_hash="qqq")   # -> VALIDATED -> ADAPTER_CERTIFIED
+```
+
+Evidence was checked for being *well-formed* — three non-empty strings — and
+never for being *true*. Nothing compared the record id against the store or the
+manifest hash against the capture. The tests did not catch it because the
+fixtures wrote `manifest_hash="deadbeefdeadbeef"` as a literal, which named a
+session that had never happened, and every assertion passed anyway.
+
+The second: `LOCAL_CONFIGURATION` evidence was accepted on every dimension, so
+seven attestations typed into a YAML file reached `ADAPTER_CERTIFIED` without a
+comparison having been run.
+
+The lesson generalises past this repository. Replacing a boolean with a typed
+object moves the failure from "anyone can assert it" to "anyone can assert it in
+a well-formed way" — which is progress only if something downstream checks the
+assertion against the world. Both fixes are that check, and the fixtures now
+*derive* their evidence from the capture rather than stating it alongside.
+
+All seven were reproduced before being fixed and are regression-tested.
 
 ### Found while fixing, not from the list
 
@@ -194,7 +224,7 @@ Every number below was produced on this machine, now.
 | `ruff check .` | clean |
 | `ruff format --check .` | 110 files already formatted |
 | `mypy src` | no issues in 56 source files |
-| `pytest` | 1769 tests, all passing |
+| `pytest` | 1786 tests, all passing |
 | `pytest -m integration` | 18 passing |
 | `pytest -m regression` | 46 passing |
 | `pytest -m replay` | 10 passing |

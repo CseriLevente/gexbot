@@ -180,8 +180,17 @@ class ThetaDataConfig:
             RateUnit,
             VendorGammaPolicy,
             derive_pricing_mode,
+            reject_legacy_pricing_mode,
             require_coherent_pricing_mode,
+            require_supported_iv_source,
         )
+
+        # Before the enum coercion below, which would turn the v2.1.3 mode name
+        # into an opaque ``ValueError: 'VENDOR_GAMMA_VALIDATION' is not a valid
+        # IvGammaPricingMode`` instead of the message naming its replacement.
+        # The YAML loader does this; a config rebuilt from a stored ``as_dict``
+        # went straight past it.
+        reject_legacy_pricing_mode(self.pricing_mode)
 
         def resolve(name: str, enum_type: Any, default: Any) -> Any:
             value = getattr(self, name)
@@ -194,6 +203,12 @@ class ThetaDataConfig:
             return resolved
 
         iv_source = resolve("iv_source", IVSource, IVSource.VENDOR_DEFAULT_IV)
+        # An unimplemented source resolves through the vendor-default fallback,
+        # so the operator gets a different number than the one they selected.
+        # The YAML loader refused this; direct construction did not, which meant
+        # `ThetaDataConfig(iv_source=IVSource.TRADE_IV)` built happily and then
+        # priced against a source with no implementation behind it.
+        require_supported_iv_source(iv_source)
         mode = resolve(
             "pricing_mode", IvGammaPricingMode, derive_pricing_mode(iv_source=iv_source)
         )

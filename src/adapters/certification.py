@@ -142,19 +142,22 @@ class OpenInterestProvenance:
     evidence: ProvenanceEvidence | None = None
 
     @property
-    def grade(self) -> ProvenanceGrade:
-        """Derived. v2.1.3 let the caller set this with a boolean."""
-        if self.as_of is None or not self.source:
-            return ProvenanceGrade.PLANNED
-        if self.evidence is None:
-            return ProvenanceGrade.PLANNED
-        return ProvenanceGrade.OBSERVED
+    def claims_observation(self) -> bool:
+        """Whether this points at a stored record at all.
+
+        Deliberately not called ``grade``. Whether the claim *holds* depends on
+        a capture this object has never seen, so only ``assess_readiness`` can
+        answer that -- see ``grade_claim``.
+        """
+        return (
+            self.as_of is not None and bool(self.source) and self.evidence is not None
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "as_of": self.as_of.isoformat() if self.as_of else None,
             "source": self.source,
-            "grade": self.grade.value,
+            "claims_observation": self.claims_observation,
             "evidence": self.evidence.as_dict() if self.evidence else None,
         }
 
@@ -171,12 +174,12 @@ class SpotProvenance:
     evidence: ProvenanceEvidence | None = None
 
     @property
-    def grade(self) -> ProvenanceGrade:
-        if self.timestamp is None or not self.source:
-            return ProvenanceGrade.PLANNED
-        if self.evidence is None:
-            return ProvenanceGrade.PLANNED
-        return ProvenanceGrade.OBSERVED
+    def claims_observation(self) -> bool:
+        return (
+            self.timestamp is not None
+            and bool(self.source)
+            and self.evidence is not None
+        )
 
     def skew_seconds(self, as_of: datetime) -> float | None:
         if self.timestamp is None:
@@ -189,7 +192,7 @@ class SpotProvenance:
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "tolerance_seconds": self.tolerance_seconds,
             "skew_seconds": self.skew_seconds(as_of) if as_of else None,
-            "grade": self.grade.value,
+            "claims_observation": self.claims_observation,
             "evidence": self.evidence.as_dict() if self.evidence else None,
         }
 
@@ -239,6 +242,53 @@ class CaptureVerification:
         }
 
 
+def grade_claim(
+    claim: OpenInterestProvenance | SpotProvenance | None,
+    *,
+    capture: CaptureVerification | None,
+    validated: bool,
+) -> tuple[ProvenanceGrade, str]:
+    """Decide what a provenance claim is actually worth.
+
+    Returns the grade and, when the claim does not hold, a complaint naming why.
+
+    The check that was missing in the first cut of v2.1.4: a
+    ``ProvenanceEvidence`` was accepted as an observation merely for existing
+    and having three non-empty strings. Nothing compared ``raw_record_id``
+    against the store or ``manifest_hash`` against the capture, so
+    ``ProvenanceEvidence(raw_record_id="no-such-record", field_path="x",
+    manifest_hash="qqq")`` graded ``OBSERVED`` and, with a validation report,
+    ``VALIDATED``. That is the v2.1.3 defect one type-level down: evidence that
+    is checked for being well-formed rather than for being true.
+    """
+    if claim is None or not claim.claims_observation:
+        return ProvenanceGrade.PLANNED, ""
+
+    evidence = claim.evidence
+    assert evidence is not None  # implied by claims_observation
+
+    if capture is None or not capture.verified:
+        return ProvenanceGrade.PLANNED, (
+            f"evidence names raw record {evidence.raw_record_id!r}, but no "
+            "verified capture was supplied, so nothing confirms that record "
+            "exists"
+        )
+    if evidence.manifest_hash != capture.manifest_hash:
+        return ProvenanceGrade.PLANNED, (
+            f"evidence names manifest {evidence.manifest_hash!r}; this capture "
+            f"is {capture.manifest_hash!r}. Evidence cannot be transplanted "
+            "from one session onto another."
+        )
+    if evidence.raw_record_id not in capture.confirmed_record_ids:
+        return ProvenanceGrade.PLANNED, (
+            f"evidence names raw record {evidence.raw_record_id!r}, which this "
+            "capture does not confirm"
+        )
+    if validated:
+        return ProvenanceGrade.VALIDATED, ""
+    return ProvenanceGrade.OBSERVED, ""
+
+
 def verify_capture(manifest: RawCaptureManifest, store: Any) -> CaptureVerification:
     """Check that every record a manifest claims is really in the store.
 
@@ -272,6 +322,17 @@ def verify_capture(manifest: RawCaptureManifest, store: Any) -> CaptureVerificat
             failures.append(f"INCOMPLETE_CAPTURE:{record_id}")
             continue
         confirmed.append(record_id)
+
+    # Every payload hash the manifest claims must be accounted for exactly once.
+    # Membership alone is too weak: two records carrying the same bytes -- a
+    # retry written under two ids -- would satisfy two distinct manifest claims,
+    # and the bytes claimed under the second hash would never have been stored.
+    claimed = sorted(manifest.payload_hashes)
+    confirmed_hashes = sorted(
+        records[record_id].payload_hash for record_id in confirmed
+    )
+    if confirmed and claimed != confirmed_hashes:
+        failures.append("PAYLOAD_HASHES_DO_NOT_PAIR_WITH_RECORDS")
 
     integrity = getattr(store, "verify_integrity", None)
     if callable(integrity):
@@ -605,13 +666,64 @@ def assess_readiness(
         else:
             verified.append("raw_store_integrity")
 
-    # -- open-interest provenance -------------------------------------------
+    # -- capture and validation evidence -------------------------------------
+    #
+    # Settled before the provenance grades, because a grade of VALIDATED means
+    # "checked by a validation report bound to this capture" and that sentence
+    # is only answerable once we know whether the report binds. The first cut of
+    # v2.1.4 computed the grades first, so a report describing a *different*
+    # manifest still promoted them -- producing a stored report that claimed a
+    # bound validation on the same object that said there was no capture to bind
+    # to.
+    if capture is not None and not capture.verified:
+        calculation_blockers.append(
+            f"the capture manifest does not match its store: {list(capture.failures)}"
+        )
+        unverified.append("capture_manifest")
+    elif capture is not None:
+        verified.append("capture_manifest")
+
+    validation_binds = False
+    if validation is not None:
+        if capture is None:
+            calculation_blockers.append(
+                "a validation report was supplied with no capture to validate"
+            )
+            unverified.append("validation_report")
+        elif not validation.describes(capture):
+            calculation_blockers.append(
+                f"validation report describes manifest "
+                f"{validation.manifest_hash!r}, not {capture.manifest_hash!r}"
+            )
+            unverified.append("validation_report")
+        elif not validation.passed:
+            calculation_blockers.append(
+                f"validation checks failed: {[c.name for c in validation.failed]}"
+            )
+            unverified.append("validation_report")
+        else:
+            validation_binds = True
+            verified.append("validation_report")
+
     validated_provenance: set[str] = set()
-    if validation is not None and validation.passed:
+    if validation is not None and validation_binds:
         validated_provenance = {
             c.name for c in validation.checks if c.passed and c.dimension is None
         }
 
+    def graded(claim: Any, *, name: str) -> ProvenanceGrade:
+        """Grade a claim against the capture, and complain if it does not hold."""
+        grade, complaint = grade_claim(
+            claim, capture=capture, validated=name in validated_provenance
+        )
+        if complaint:
+            # A claim that names a record nothing confirms is not a gap in the
+            # evidence; it is a false statement in the audit trail, and it must
+            # not be reported as a soft "not yet observed".
+            calculation_blockers.append(f"{name}: {complaint}")
+        return grade
+
+    # -- open-interest provenance -------------------------------------------
     if open_interest is None or open_interest.as_of is None:
         blockers.append(
             "open_interest provenance is missing: no settlement date and no "
@@ -621,9 +733,7 @@ def assess_readiness(
         unverified.append("open_interest_as_of")
         grades["open_interest_as_of"] = ProvenanceGrade.PLANNED.value
     else:
-        grade = open_interest.grade
-        if grade.is_observation and "open_interest_as_of" in validated_provenance:
-            grade = ProvenanceGrade.VALIDATED
+        grade = graded(open_interest, name="open_interest_as_of")
         grades["open_interest_as_of"] = grade.value
         if grade.is_observation:
             verified.append("open_interest_as_of")
@@ -632,10 +742,9 @@ def assess_readiness(
             # report must not let that distinction quietly disappear.
             warnings.append(
                 f"open_interest_as_of={open_interest.as_of.isoformat()} is "
-                f"{grade.value} (source={open_interest.source!r}): no stored raw "
-                "record was named, so it has not been observed from a vendor "
-                "payload. Record this alongside the capture; the capture is what "
-                "upgrades it."
+                f"{grade.value} (source={open_interest.source!r}): it has not "
+                "been shown to come from a stored vendor payload. Record this "
+                "alongside the capture; the capture is what upgrades it."
             )
             unverified.append("open_interest_as_of")
 
@@ -659,9 +768,7 @@ def assess_readiness(
         unverified.append("spot_timestamp")
         grades["spot"] = ProvenanceGrade.PLANNED.value
     else:
-        grade = spot.grade
-        if grade.is_observation and "spot_timestamp" in validated_provenance:
-            grade = ProvenanceGrade.VALIDATED
+        grade = graded(spot, name="spot_timestamp")
         grades["spot"] = grade.value
         skew = spot.skew_seconds(as_of)
         if skew is not None and skew > spot.tolerance_seconds:
@@ -676,39 +783,10 @@ def assess_readiness(
         else:
             warnings.append(
                 f"spot provenance is {grade.value}: the timestamp is within "
-                "tolerance but no stored raw record was named, so it has not "
-                "been observed from a vendor payload."
+                "tolerance but it has not been shown to come from a stored "
+                "vendor payload."
             )
             unverified.extend(("spot_source", "spot_timestamp"))
-
-    # -- capture and validation evidence -------------------------------------
-    if capture is not None and not capture.verified:
-        calculation_blockers.append(
-            f"the capture manifest does not match its store: {list(capture.failures)}"
-        )
-        unverified.append("capture_manifest")
-    elif capture is not None:
-        verified.append("capture_manifest")
-
-    if validation is not None:
-        if capture is None:
-            calculation_blockers.append(
-                "a validation report was supplied with no capture to validate"
-            )
-            unverified.append("validation_report")
-        elif not validation.describes(capture):
-            calculation_blockers.append(
-                f"validation report describes manifest "
-                f"{validation.manifest_hash!r}, not {capture.manifest_hash!r}"
-            )
-            unverified.append("validation_report")
-        elif not validation.passed:
-            calculation_blockers.append(
-                f"validation checks failed: {[c.name for c in validation.failed]}"
-            )
-            unverified.append("validation_report")
-        else:
-            verified.append("validation_report")
 
     # -- known and accepted limitations -------------------------------------
     warnings.append(
@@ -773,10 +851,22 @@ def _resolve_state(
     # Only a live comparison observes what the vendor did. A validation report
     # says the *capture* was checked; it cannot promote a documented claim about
     # a convention into an observation of one, so it is not folded in here.
+    # A dimension counts as settled for certification when the evidence could
+    # actually settle it. `LOCAL_CONFIGURATION` can, but only for the four
+    # dimensions whose answer is ours to give; `apply_attestations` refuses it
+    # elsewhere, and this mirrors that rule so the ladder cannot be climbed by
+    # any evidence the assessment would have rejected.
     live = {
         d.dimension
         for d in report.dimensions
-        if d.evidence is not None and not d.evidence.source.rests_on_a_vendor_claim
+        if d.evidence is not None
+        and (
+            d.evidence.source.is_observation
+            or (
+                not d.dimension.vendor_owned
+                and not d.evidence.source.rests_on_a_vendor_claim
+            )
+        )
     }
     outstanding = {
         d.dimension

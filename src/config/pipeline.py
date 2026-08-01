@@ -157,7 +157,25 @@ def derive_pricing_mode(*, iv_source: IVSource) -> PricingMode:
 def require_coherent_pricing_mode(
     *, iv_source: IVSource, pricing_mode: PricingMode, where: str = "pricing_mode"
 ) -> None:
-    """Refuse a mode that misdescribes where the IV came from."""
+    """Refuse a mode that misdescribes where the IV came from.
+
+    Both directions. v2.1.4's first cut only rejected ``LOCAL_IV_LOCAL_GAMMA``
+    on a vendor source, so ``dataclasses.replace(config, iv_source=
+    LOCALLY_SOLVED_MID_IV)`` produced a locally-solved IV still labelled
+    ``VENDOR_IV_LOCAL_GAMMA`` -- the derivation in ``__post_init__`` does not
+    re-run when the field is already set. Harmless today because the local
+    solver does not exist; silent on the day it lands.
+    """
+    if (
+        pricing_mode is PricingMode.VENDOR_IV_LOCAL_GAMMA
+        and iv_source in LOCAL_IV_SOURCES
+    ):
+        raise ThetaDataConfigError(
+            f"{where}: VENDOR_IV_LOCAL_GAMMA says a vendor-computed IV feeds "
+            f"the local gamma, but iv_source={iv_source.value} is solved "
+            "locally. The mode has to follow the provenance; derive it with "
+            "derive_pricing_mode rather than carrying one over."
+        )
     if pricing_mode is PricingMode.LOCAL_IV_LOCAL_GAMMA:
         if iv_source in VENDOR_COMPUTED_IV_SOURCES:
             raise ThetaDataConfigError(
@@ -576,6 +594,41 @@ def check_dividend_compatibility(
         ),
     )
     if vendor.convention is DividendConvention.ZERO_DIVIDEND:
+        # Both sides *say* zero. Check that they are, rather than writing 0.0
+        # into the audit trail because the convention name contains the word.
+        #
+        # ``annual_dividend`` is forwarded to the vendor as a query parameter,
+        # so a config declaring ZERO_DIVIDEND while sending 3.5 has the vendor
+        # solving its IV under q=3.5 and the local model pricing under q=0.0.
+        # The first cut of v2.1.4 returned BOTH_ZERO here without looking, and
+        # recorded the vendor's dividend as 0.0 -- the compatibility report,
+        # whose entire job is to catch exactly this, agreeing that it had not
+        # happened.
+        non_zero = tuple(
+            sorted(
+                name
+                for name, value in (("vendor", vendor.value), ("local", local.value))
+                if value is not None and abs(value) > DIVIDEND_TOLERANCE
+            )
+        )
+        if non_zero:
+            return PricingCompatibilityReport(
+                dimensions=(
+                    convention,
+                    _result(
+                        PricingDimension.DIVIDEND_VALUE,
+                        CompatibilityStatus.MISMATCHED,
+                        "ZERO_DIVIDEND_WITH_A_NON_ZERO_VALUE",
+                        vendor=vendor.value,
+                        local=local.value,
+                        detail=(
+                            f"the convention says zero but {list(non_zero)} "
+                            "carries a non-zero dividend, which is sent to the "
+                            "vendor and changes its IV"
+                        ),
+                    ),
+                )
+            )
         return PricingCompatibilityReport(
             dimensions=(
                 convention,
@@ -583,8 +636,8 @@ def check_dividend_compatibility(
                     PricingDimension.DIVIDEND_VALUE,
                     CompatibilityStatus.MATCHED,
                     "BOTH_ZERO",
-                    vendor=0.0,
-                    local=0.0,
+                    vendor=vendor.value if vendor.value is not None else 0.0,
+                    local=local.value if local.value is not None else 0.0,
                     evidence=CompatibilityEvidence(
                         source=EvidenceSource.LOCAL_CONFIGURATION,
                         reference="annual_dividend",

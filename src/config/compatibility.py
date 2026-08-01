@@ -74,6 +74,28 @@ class PricingDimension(str, Enum):
         """
         return self is not PricingDimension.SOLVER_VERSION
 
+    @property
+    def vendor_owned(self) -> bool:
+        """Whether the answer is the vendor's to give.
+
+        The four below are settled by *our* configuration: we send the rate, its
+        units, the dividend and its convention, so both sides of the comparison
+        are ours and there is no vendor statement to be right or wrong about.
+        Every other dimension describes something the vendor did inside its own
+        solver, and no local setting can establish it.
+
+        The distinction decides which evidence is admissible.
+        ``LOCAL_CONFIGURATION`` cannot settle a vendor-owned dimension -- there
+        is nothing local to read -- and accepting it would let an operator reach
+        ``ADAPTER_CERTIFIED`` by editing a YAML file.
+        """
+        return self not in (
+            PricingDimension.RATE_UNITS,
+            PricingDimension.RISK_FREE_RATE,
+            PricingDimension.DIVIDEND_CONVENTION,
+            PricingDimension.DIVIDEND_VALUE,
+        )
+
 
 class CompatibilityStatus(str, Enum):
     """What is known about one dimension."""
@@ -298,6 +320,13 @@ def apply_attestations(
       never allow;
     * an attestation for a dimension the assessment did not raise is a warning,
       since a claim nobody asked for usually means the config drifted.
+
+    ``LOCAL_CONFIGURATION`` evidence is refused on a vendor-owned dimension. It
+    means "settled by our own configuration, with no vendor side to disagree",
+    which is true of the rate and the dividend and false of everything the
+    vendor did inside its solver. Without this, an operator could write
+    ``source: LOCAL_CONFIGURATION`` against ``DAY_COUNT`` and the certification
+    ladder would treat a YAML edit as an observation of vendor behaviour.
     """
     by_dimension = {d.dimension: d for d in report.dimensions}
     resolved: list[PricingDimensionResult] = []
@@ -321,6 +350,15 @@ def apply_attestations(
             warnings.append(
                 f"REDUNDANT_ATTESTATION: {attestation.dimension.value} was "
                 f"already {current.status.value}"
+            )
+            continue
+        if (
+            attestation.dimension.vendor_owned
+            and attestation.evidence.source is EvidenceSource.LOCAL_CONFIGURATION
+        ):
+            hard_failures.append(
+                f"LOCAL_EVIDENCE_CANNOT_SETTLE_A_VENDOR_CONVENTION:"
+                f"{attestation.dimension.value}"
             )
             continue
         resolved.append(

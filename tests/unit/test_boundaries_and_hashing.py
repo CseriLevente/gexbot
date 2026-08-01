@@ -124,6 +124,52 @@ def test_a_string_valued_enum_field_is_coerced_rather_than_stored_raw():
     )
 
 
+def test_an_unimplemented_iv_source_cannot_be_constructed():
+    """The YAML loader refused it; direct construction did not.
+
+    An unimplemented source resolves through the vendor-default fallback, so the
+    operator prices against a different number than the one they selected.
+    """
+    from src.domain.iv import IVSource
+
+    with pytest.raises(ThetaDataConfigError, match=r"not implemented"):
+        ThetaDataConfig(iv_source=IVSource.TRADE_IV)
+
+
+def test_the_v2_1_3_mode_name_is_refused_on_the_programmatic_path_too():
+    """A config rebuilt from a stored ``as_dict`` went straight past the loader."""
+    with pytest.raises(ThetaDataConfigError, match=r"vendor_gamma_policy"):
+        ThetaDataConfig(pricing_mode="VENDOR_GAMMA_VALIDATION")
+
+
+def test_replace_cannot_leave_the_mode_disagreeing_with_the_iv_source():
+    """``__post_init__`` only *derives* when the field is None.
+
+    ``dataclasses.replace`` carries the resolved mode over, so the derivation
+    never re-runs. Today the unsupported-source guard catches this first, since
+    the only local IV source is unimplemented -- but the coherence check has to
+    catch it too, or the day a local solver lands the mismatch becomes silent.
+    """
+    import dataclasses
+
+    from src.domain.iv import IVSource
+
+    with pytest.raises(ThetaDataConfigError):
+        dataclasses.replace(ThetaDataConfig(), iv_source=IVSource.LOCALLY_SOLVED_MID_IV)
+
+
+def test_the_coherence_check_catches_a_local_iv_labelled_as_vendor():
+    """The direction that has no other guard once a local solver exists."""
+    from src.config.pipeline import IvGammaPricingMode, require_coherent_pricing_mode
+    from src.domain.iv import IVSource
+
+    with pytest.raises(ThetaDataConfigError, match=r"solved\s+locally"):
+        require_coherent_pricing_mode(
+            iv_source=IVSource.LOCALLY_SOLVED_MID_IV,
+            pricing_mode=IvGammaPricingMode.VENDOR_IV_LOCAL_GAMMA,
+        )
+
+
 def test_a_default_config_reaches_a_pipeline():
     from src.adapters.transport import FakeTransport
 
@@ -212,6 +258,33 @@ def test_an_unparseable_strike_still_refuses_to_produce_an_identity():
         contract_identity(
             symbol="SPXW", expiry="2026-03-20", strike="NaN", right="call"
         )
+
+
+@pytest.mark.parametrize("strike", [1e28, 1e30, 1e40])
+def test_an_absurdly_large_strike_still_produces_an_identity(strike):
+    """``canonical_id`` must not become a property that throws.
+
+    ``quantize`` raises ``InvalidOperation`` when an integral value needs more
+    digits than the decimal context allows, which for the first cut of v2.1.4
+    meant any strike at or above 1e28 crashed inside a set comprehension during
+    chain parsing. The ``f"{strike:.4f}"`` it replaced formatted these without
+    complaint, so a mis-scaled vendor value used to survive and must still.
+    """
+    assert contract(strike).canonical_id.count(":") == 3
+
+
+@pytest.mark.parametrize("strike", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_strike_is_refused_rather_than_spelled(strike):
+    """``OptionContract`` holds a raw float, so this is the last chance to stop it.
+
+    An identity containing ``NaN`` compares unequal to itself, so the contract
+    could never be deduplicated or matched -- the exact failure ``parse_strike``
+    was written to eliminate, reachable through the other entry point.
+    """
+    from src.domain.strikes import StrikeError
+
+    with pytest.raises(StrikeError, match=r"not finite"):
+        assert contract(strike).canonical_id
 
 
 # =============================================================================

@@ -310,10 +310,27 @@ result set reported a fully specified model.
 
 ### `pricing_compatibility`
 
-`compatible_fields` / `incompatible_fields` / `unknown_fields` are three
-distinct findings. "We checked and they differ" and "we cannot tell" have
-different remedies -- a config change and vendor documentation respectively.
-Both block compatibility; neither is silence.
+A list of `dimensions`, one per `PricingDimension`, each carrying a `status`, a
+machine-readable `code`, the two values, and an `evidence` fingerprint when one
+resolved it. `compatible` is **derived** from them and from `hard_failures`; it
+is not a field anybody sets.
+
+Three statuses, three remedies. `MISMATCHED` means "we checked and they differ"
+and needs a config change; `UNKNOWN` means "we cannot tell" and needs vendor
+documentation or a live comparison; `NOT_APPLICABLE` means the dimension does
+not arise in this configuration. The first two both block a calculation on a
+load-bearing dimension, and neither is silence.
+
+For convenience the serialised form also carries `load_bearing_unknowns` and
+`load_bearing_mismatches` as flat lists of dimension names.
+
+v2.1.3 wrote `compatible_fields` / `incompatible_fields` / `unknown_fields`:
+lists of *sentences*, with a settable `compatible` flag beside them. Which
+unknowns blocked was decided by searching those sentences for a field name, so
+rewording one changed what the report meant. Nothing emits those keys now.
+
+`dimension_detail` and `warnings` are prose, and are excluded from the replay
+hash wherever they appear -- see `warning_codes` below.
 
 ### `selected_timestamp_sources`
 

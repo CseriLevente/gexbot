@@ -33,6 +33,7 @@ from src.adapters.certification import (
     SpotProvenance,
     ValidationCheck,
     assess_readiness,
+    grade_claim,
     verify_capture,
 )
 from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
@@ -70,46 +71,7 @@ def resolved_pipeline(**overrides):
     return pipeline(**resolved_settings(**{**CAPTURE_SETTINGS, **overrides}))
 
 
-def observed_oi(manifest_hash: str = "deadbeefdeadbeef") -> OpenInterestProvenance:
-    return OpenInterestProvenance(
-        as_of=date(2026, 3, 16),
-        source="vendor_field",
-        evidence=ProvenanceEvidence(
-            raw_record_id="session-0001-bulk-snapshot",
-            field_path="open_interest",
-            manifest_hash=manifest_hash,
-        ),
-    )
-
-
-def planned_oi() -> OpenInterestProvenance:
-    """A date somebody typed in. Accepted; never called observed."""
-    return OpenInterestProvenance(as_of=date(2026, 3, 16), source="caller")
-
-
-def observed_spot(manifest_hash: str = "deadbeefdeadbeef") -> SpotProvenance:
-    return SpotProvenance(
-        source="vendor_index_snapshot",
-        timestamp=AS_OF - timedelta(milliseconds=200),
-        tolerance_seconds=1.0,
-        evidence=ProvenanceEvidence(
-            raw_record_id="session-0002-index-snapshot",
-            field_path="index_price",
-            manifest_hash=manifest_hash,
-        ),
-    )
-
-
-def readiness(**overrides):
-    payload = {
-        "pipeline": resolved_pipeline(),
-        "as_of": AS_OF,
-        "open_interest": observed_oi(),
-        "spot": observed_spot(),
-        "raw_store": InMemoryRawStore(),
-    }
-    payload.update(overrides)
-    return assess_readiness(**payload)
+RECORD_ID = "session-0001-bulk-snapshot"
 
 
 def captured(store: InMemoryRawStore | None = None) -> CaptureVerification:
@@ -119,7 +81,7 @@ def captured(store: InMemoryRawStore | None = None) -> CaptureVerification:
     store = store if store is not None else InMemoryRawStore()
     now = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
     record = store.put(
-        record_id="session-0001-bulk-snapshot",
+        record_id=RECORD_ID,
         endpoint="/v3/option/snapshot/greeks",
         query_params={"root": "SPXW"},
         payload="ms_of_day,implied_vol\n1,0.2\n",
@@ -133,6 +95,78 @@ def captured(store: InMemoryRawStore | None = None) -> CaptureVerification:
         payload_hashes=(record.payload_hash,),
     )
     return verify_capture(manifest, store)
+
+
+def evidence_from(capture: CaptureVerification, field: str) -> ProvenanceEvidence:
+    """Evidence that actually points at this capture.
+
+    Derived, not written down. A literal manifest hash here would be a claim
+    about a session the fixture never made -- which is the defect these tests
+    exist to catch, and which the first cut of them contained: ``observed_oi``
+    carried ``manifest_hash="deadbeefdeadbeef"`` while the capture produced
+    something else, and every assertion still passed.
+    """
+    return ProvenanceEvidence(
+        raw_record_id=capture.confirmed_record_ids[0],
+        field_path=field,
+        manifest_hash=capture.manifest_hash,
+    )
+
+
+def observed_oi(capture: CaptureVerification) -> OpenInterestProvenance:
+    return OpenInterestProvenance(
+        as_of=date(2026, 3, 16),
+        source="vendor_field",
+        evidence=evidence_from(capture, "open_interest"),
+    )
+
+
+def planned_oi() -> OpenInterestProvenance:
+    """A date somebody typed in. Accepted; never called observed."""
+    return OpenInterestProvenance(as_of=date(2026, 3, 16), source="caller")
+
+
+def observed_spot(capture: CaptureVerification) -> SpotProvenance:
+    return SpotProvenance(
+        source="vendor_index_snapshot",
+        timestamp=AS_OF - timedelta(milliseconds=200),
+        tolerance_seconds=1.0,
+        evidence=evidence_from(capture, "index_price"),
+    )
+
+
+def planned_spot() -> SpotProvenance:
+    return SpotProvenance(
+        source="vendor_index_snapshot",
+        timestamp=AS_OF - timedelta(milliseconds=200),
+        tolerance_seconds=1.0,
+    )
+
+
+def readiness(**overrides):
+    """Provenance follows the capture, because observation requires one.
+
+    With no capture there is nothing to have observed, so the default claims
+    nothing. With a capture, the evidence is derived from it rather than
+    asserted alongside it.
+    """
+    capture = overrides.get("capture")
+    # An unverified capture confirms no records, so there is still nothing that
+    # could have been observed.
+    usable = (
+        capture
+        if isinstance(capture, CaptureVerification) and capture.verified
+        else None
+    )
+    payload = {
+        "pipeline": resolved_pipeline(),
+        "as_of": AS_OF,
+        "open_interest": observed_oi(usable) if usable else planned_oi(),
+        "spot": observed_spot(usable) if usable else planned_spot(),
+        "raw_store": InMemoryRawStore(),
+    }
+    payload.update(overrides)
+    return assess_readiness(**payload)
 
 
 def validation_for(
@@ -504,7 +538,11 @@ def test_the_state_is_serialised():
     payload = readiness().as_dict()
     assert payload["state"] == "READY_FOR_RAW_CAPTURE_ONLY"
     assert payload["schema_version"] == "adapter-certification/2.1.4"
-    assert payload["provenance_grades"]["spot"] == "OBSERVED"
+    # No capture yet, so nothing can have been observed.
+    assert payload["provenance_grades"]["spot"] == "PLANNED"
+    assert readiness(capture=captured()).as_dict()["provenance_grades"]["spot"] == (
+        "OBSERVED"
+    )
 
 
 @pytest.mark.parametrize("state", list(CertificationState))
@@ -548,12 +586,142 @@ def test_a_tier_that_cannot_serve_the_mode_blocks():
 # =============================================================================
 
 
-def test_provenance_without_evidence_is_planned():
-    assert planned_oi().grade is ProvenanceGrade.PLANNED
+def test_provenance_without_evidence_claims_nothing():
+    assert not planned_oi().claims_observation
+    assert grade_claim(planned_oi(), capture=captured(), validated=False) == (
+        ProvenanceGrade.PLANNED,
+        "",
+    )
 
 
-def test_provenance_with_a_named_record_is_observed():
-    assert observed_oi().grade is ProvenanceGrade.OBSERVED
+def test_a_claim_is_observed_only_once_a_capture_confirms_the_record():
+    """The regression.
+
+    The first cut of v2.1.4 graded a claim OBSERVED for carrying three
+    non-empty strings. Nothing compared them against a capture, so evidence
+    naming a record that does not exist, in a session that never happened,
+    reached VALIDATED — and with it ADAPTER_CERTIFIED. Well-formed is not true.
+    """
+    capture = captured()
+    assert grade_claim(observed_oi(capture), capture=capture, validated=False) == (
+        ProvenanceGrade.OBSERVED,
+        "",
+    )
+
+
+def test_evidence_naming_another_session_is_refused():
+    capture = captured()
+    transplanted = OpenInterestProvenance(
+        as_of=date(2026, 3, 16),
+        source="vendor_field",
+        evidence=ProvenanceEvidence(
+            raw_record_id=RECORD_ID,
+            field_path="open_interest",
+            manifest_hash="0000000000000000",
+        ),
+    )
+    grade, complaint = grade_claim(transplanted, capture=capture, validated=True)
+    assert grade is ProvenanceGrade.PLANNED
+    assert "transplanted" in complaint
+
+    result = readiness(capture=capture, open_interest=transplanted)
+    assert any("manifest" in b for b in result.calculation_blockers)
+    assert not result.calculation_trusted
+
+
+def test_evidence_naming_an_unconfirmed_record_is_refused():
+    capture = captured()
+    invented = OpenInterestProvenance(
+        as_of=date(2026, 3, 16),
+        source="vendor_field",
+        evidence=ProvenanceEvidence(
+            raw_record_id="no-such-record",
+            field_path="open_interest",
+            manifest_hash=capture.manifest_hash,
+        ),
+    )
+    grade, complaint = grade_claim(invented, capture=capture, validated=True)
+    assert grade is ProvenanceGrade.PLANNED
+    assert "does not confirm" in complaint
+
+
+def test_evidence_without_a_capture_cannot_be_observed():
+    capture = captured()
+    grade, complaint = grade_claim(observed_oi(capture), capture=None, validated=True)
+    assert grade is ProvenanceGrade.PLANNED
+    assert "no verified capture" in complaint
+
+
+def test_a_validation_report_that_binds_to_nothing_upgrades_nothing():
+    """It read VALIDATED beside a blocker saying there was no capture to bind to."""
+    capture = captured()
+    result = readiness(
+        open_interest=observed_oi(capture),
+        spot=observed_spot(capture),
+        validation=AdapterValidationReport(
+            manifest_hash=capture.manifest_hash,
+            checks=(ValidationCheck(name="open_interest_as_of", passed=True),),
+        ),
+    )
+    assert dict(result.provenance_grades)["open_interest_as_of"] == "PLANNED"
+    assert any("no capture" in b for b in result.calculation_blockers)
+
+
+def test_local_evidence_cannot_settle_a_vendor_convention():
+    """A YAML edit is not an observation of what the vendor did.
+
+    ``LOCAL_CONFIGURATION`` means "both sides are ours", which is true of the
+    rate and the dividend and false of the vendor's day count. The first cut
+    accepted it everywhere, so writing seven attestations reached
+    ADAPTER_CERTIFIED with no comparison having been run.
+    """
+    local = pipeline(
+        **resolved_settings(
+            pricing_attestations=attestations(
+                source=EvidenceSource.LOCAL_CONFIGURATION
+            ),
+            **CAPTURE_SETTINGS,
+        )
+    )
+    report = local.pricing_compatibility
+    assert not report.compatible
+    assert any(
+        f.startswith("LOCAL_EVIDENCE_CANNOT_SETTLE_A_VENDOR_CONVENTION:")
+        for f in report.hard_failures
+    )
+
+    capture = captured()
+    result = readiness(
+        pipeline=local, capture=capture, validation=validation_for(capture)
+    )
+    assert result.state is not CertificationState.ADAPTER_CERTIFIED
+
+
+def test_a_duplicated_payload_cannot_satisfy_two_manifest_claims():
+    """Membership is too weak: one retry written under two ids passed both."""
+    from datetime import UTC, datetime
+
+    store = InMemoryRawStore()
+    now = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
+    for record_id in ("r1", "r2"):
+        store.put(
+            record_id=record_id,
+            endpoint="/v3/x",
+            query_params={},
+            payload="identical bytes",
+            request_started_at=now,
+            response_received_at=now,
+            http_status=200,
+        )
+    shared = store.records()[0].payload_hash
+    verification = verify_capture(
+        RawCaptureManifest(
+            session_id="s", record_ids=("r1", "r2"), payload_hashes=(shared, "b" * 64)
+        ),
+        store,
+    )
+    assert not verification.verified
+    assert "PAYLOAD_HASHES_DO_NOT_PAIR_WITH_RECORDS" in verification.failures
 
 
 def test_evidence_that_names_no_record_cannot_be_constructed():

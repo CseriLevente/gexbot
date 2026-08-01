@@ -10,9 +10,9 @@ The engine core imports this, so it stays stdlib-only.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, getcontext, localcontext
 
-__all__ = ["canonical_strike", "canonical_strike_of", "parse_strike"]
+__all__ = ["StrikeError", "canonical_strike", "canonical_strike_of", "parse_strike"]
 
 
 def parse_strike(value: str | float | None) -> tuple[Decimal | None, str | None]:
@@ -43,11 +43,35 @@ def parse_strike(value: str | float | None) -> tuple[Decimal | None, str | None]
     return parsed, None
 
 
+class StrikeError(ValueError):
+    """A strike that cannot be given a canonical spelling."""
+
+
 def canonical_strike(value: Decimal) -> str:
-    """One spelling per strike, so equivalent inputs share an identity."""
+    """One spelling per strike, so equivalent inputs share an identity.
+
+    Refuses a non-finite input rather than spelling it. ``Decimal("NaN")`` would
+    otherwise format as the identity fragment ``NaN``, and an identity
+    containing a NaN is exactly what ``parse_strike`` exists to prevent -- it
+    compares unequal to itself, so the contract can never be deduplicated or
+    matched.
+    """
+    if not value.is_finite():
+        raise StrikeError(f"strike {value} is not finite; it has no canonical form")
     normalised = value.normalize()
     if normalised == normalised.to_integral_value():
-        normalised = normalised.quantize(Decimal(1))
+        # ``quantize`` raises InvalidOperation when the result would need more
+        # digits than the context allows, which for an integral value means one
+        # digit per order of magnitude. Anything that large is not a strike, and
+        # the previous ``f"{strike:.4f}"`` formatted it without complaint --
+        # so a mis-scaled vendor value used to sail through and now must not
+        # turn ``canonical_id`` into a property that throws.
+        with localcontext() as ctx:
+            # ``adjusted()`` is the exponent of the most significant digit, so
+            # +2 covers every digit plus a guard. Finite by the check above, so
+            # it is an integer rather than one of the NaN/infinity markers.
+            ctx.prec = max(getcontext().prec, normalised.adjusted() + 2)
+            normalised = normalised.quantize(Decimal(1))
     return f"{normalised:f}"
 
 
@@ -67,5 +91,11 @@ def canonical_strike_of(value: float) -> str:
     round-trip lands a bit low, produced a "missing" contract and an
     "unexpected" one for the same instrument -- and the completeness measure
     reported a shortfall that did not exist.
+
+    Raises ``StrikeError`` on a non-finite float. ``OptionContract`` holds a
+    plain float that has not been through ``parse_strike``, so this is the last
+    point at which a NaN can be stopped from becoming an identity.
     """
+    if value != value or value in (float("inf"), float("-inf")):
+        raise StrikeError(f"strike {value!r} is not finite; it has no canonical form")
     return canonical_strike(Decimal(str(value)))

@@ -20,16 +20,18 @@ Both block certification when unverified. Neither is silently resolved.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from src.adapters.certification import (
     AdapterCertificationReadiness,
+    CaptureVerification,
     OpenInterestProvenance,
     ProvenanceEvidence,
     SpotProvenance,
     assess_readiness,
+    verify_capture,
 )
-from src.adapters.raw_store import InMemoryRawStore
+from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
 from src.adapters.transport import FakeTransport
 from src.config.pipeline import ThetaDataResearchPipeline
 from src.config.thetadata import parse_thetadata_config
@@ -40,8 +42,6 @@ AS_OF = eastern(2026, 3, 17, 11, 0)
 
 #: Raw capture is mandatory for capture readiness (§6).
 CAPTURE_SETTINGS = {"raw_capture_enabled": True, "raw_capture_path": "artifacts/raw"}
-
-MANIFEST_HASH = "deadbeefdeadbeef"
 
 
 def pipeline(**overrides):
@@ -71,9 +71,43 @@ def unresolved_pipeline(**overrides):
     )
 
 
-def observed(field_path: str, record: str) -> ProvenanceEvidence:
+def captured() -> CaptureVerification:
+    """A real capture, so provenance has something to have been observed from."""
+    store = InMemoryRawStore()
+    now = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
+    record = store.put(
+        record_id="session-0001-snapshot",
+        endpoint="/v3/option/snapshot/greeks",
+        query_params={"root": "SPXW"},
+        payload="ms_of_day,implied_vol\n1,0.2\n",
+        request_started_at=now,
+        response_received_at=now,
+        http_status=200,
+    )
+    return verify_capture(
+        RawCaptureManifest(
+            session_id="session",
+            record_ids=(record.record_id,),
+            payload_hashes=(record.payload_hash,),
+        ),
+        store,
+    )
+
+
+CAPTURE = captured()
+
+
+def observed(field_path: str) -> ProvenanceEvidence:
+    """Evidence derived from the capture, not asserted beside it.
+
+    The manifest hash was a literal in the first cut of these fixtures, which
+    meant it named a session that had never happened -- and every assertion
+    passed anyway, because nothing checked it.
+    """
     return ProvenanceEvidence(
-        raw_record_id=record, field_path=field_path, manifest_hash=MANIFEST_HASH
+        raw_record_id=CAPTURE.confirmed_record_ids[0],
+        field_path=field_path,
+        manifest_hash=CAPTURE.manifest_hash,
     )
 
 
@@ -81,7 +115,7 @@ def verified_oi() -> OpenInterestProvenance:
     return OpenInterestProvenance(
         as_of=date(2026, 3, 16),
         source="vendor_field",
-        evidence=observed("open_interest", "session-0001-snapshot"),
+        evidence=observed("open_interest"),
     )
 
 
@@ -90,7 +124,7 @@ def verified_spot() -> SpotProvenance:
         source="vendor_index_snapshot",
         timestamp=AS_OF - timedelta(milliseconds=200),
         tolerance_seconds=1.0,
-        evidence=observed("index_price", "session-0002-index"),
+        evidence=observed("index_price"),
     )
 
 
@@ -101,6 +135,7 @@ def readiness(**overrides) -> AdapterCertificationReadiness:
         "open_interest": verified_oi(),
         "spot": verified_spot(),
         "raw_store": InMemoryRawStore(),
+        "capture": CAPTURE,
     }
     payload.update(overrides)
     return assess_readiness(**payload)
@@ -162,7 +197,7 @@ def test_spot_skew_beyond_tolerance_blocks_certification():
             source="vendor_index_snapshot",
             timestamp=AS_OF - timedelta(seconds=90),
             tolerance_seconds=1.0,
-            evidence=observed("index_price", "session-0002-index"),
+            evidence=observed("index_price"),
         )
     )
     assert not result.ready
@@ -177,7 +212,7 @@ def test_spot_skew_within_tolerance_is_accepted():
             source="vendor_index_snapshot",
             timestamp=AS_OF - timedelta(milliseconds=500),
             tolerance_seconds=1.0,
-            evidence=observed("index_price", "session-0002-index"),
+            evidence=observed("index_price"),
         )
     ).ready
 

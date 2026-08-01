@@ -446,11 +446,17 @@ known-dividend underlying.
 
 ---
 
-## 24. Five undocumented vendor IV conventions - **UNKNOWN**
+## 24. Seven undocumented vendor IV conventions - **UNKNOWN**
 
-Reported as `unknown_fields`, never as compatible: the settlement instant the
-vendor used, its day count, its short-dated floor, which price it solved
-against, and its solver version.
+Each is a `PricingDimension` with status `UNKNOWN`, never compatible: the
+settlement instant the vendor used, its day count, its short-dated floor, which
+price it solved against, which underlying print it used and when it read it, and
+its solver version.
+
+All seven are **vendor-owned**, which decides what can settle them.
+`LOCAL_CONFIGURATION` evidence is refused on a vendor-owned dimension: there is
+nothing local to read, and accepting it would let a YAML edit stand in for an
+observation of vendor behaviour.
 
 **Consequence.** `VENDOR_IV_LOCAL_GAMMA` cannot claim model consistency. It can
 still be *selected*; it just cannot be described as verified.

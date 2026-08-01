@@ -327,6 +327,33 @@ def test_the_same_convention_and_value_is_compatible():
     ).compatible
 
 
+def test_a_zero_convention_with_a_non_zero_value_is_a_mismatch():
+    """The regression.
+
+    ``annual_dividend`` is forwarded to the vendor as a query parameter, so a
+    config declaring ZERO_DIVIDEND while sending 3.5 has the vendor solving its
+    IV under q=3.5 and the local model pricing under q=0.0. The first cut of
+    v2.1.4 returned BOTH_ZERO here without looking at either value, and recorded
+    the vendor's dividend as 0.0 -- the compatibility report agreeing that the
+    thing it exists to catch had not happened.
+    """
+    from src.config.compatibility import PricingDimension
+    from src.config.pipeline import DividendAssumption, check_dividend_compatibility
+
+    report = check_dividend_compatibility(
+        vendor=DividendAssumption(
+            convention=DividendConvention.ZERO_DIVIDEND, value=3.5
+        ),
+        local=DividendAssumption(
+            convention=DividendConvention.ZERO_DIVIDEND, value=0.0
+        ),
+    )
+    assert not report.compatible
+    assert PricingDimension.DIVIDEND_VALUE in report.load_bearing_mismatches
+    # And the vendor's actual figure reaches the audit trail.
+    assert any(d.vendor_value == 3.5 for d in report.dimensions)
+
+
 def test_an_explicit_zero_dividend_stays_valid():
     from src.config.pipeline import DividendAssumption, check_dividend_compatibility
 

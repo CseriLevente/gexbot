@@ -94,7 +94,7 @@ returned was indistinguishable from one computed under settled assumptions.
 
 ---
 
-## Two findings worth stating
+## Three findings worth stating
 
 **The `dataclasses.replace` bypass was hiding a real derivation bug — again.**
 Reclassifying `rate_units` and `dividend_convention` as vendor-owned (§11) is
@@ -114,6 +114,24 @@ are partially recoverable by comparison — does the greeks endpoint's
 `underlying_price` equal the index print, and does its clock match the quote
 instant — and the other six are not in the bytes at all. Recorded as
 OPEN_DECISIONS OD-35 rather than papered over.
+
+**573 captured payloads had been committed, and shipped in the first build of
+this archive.** Found by listing the zip rather than by any test. They were
+fixture bytes, not market data, but they were generated artefacts from test runs
+sitting in a release somebody would download.
+
+The root cause is the interesting part: the test fixtures set
+`raw_capture_path: artifacts/raw` — the same destination a real session uses.
+A test that captures where production captures contaminates the audit trail it
+is checking, and afterwards nothing distinguishes the two. The fixtures now
+capture into a per-session temporary directory, the shipped capture profile is
+redirected at `tmp_path` in the one test that loads it, `.gitignore` excludes
+`artifacts/`, and two release-integrity tests fail on a tracked or archived
+`.raw` so the next occurrence is caught by CI rather than by reading a listing.
+
+Worth noting against §10: `probe_raw_store` was already careful not to
+contaminate the capture namespace with its health-probe records. The tests were
+not held to the same standard as the code they were testing.
 
 ---
 
@@ -166,7 +184,7 @@ Every number below was produced on this machine, now.
 | `ruff check .` | clean |
 | `ruff format --check .` | 117 files already formatted |
 | `mypy src` | no issues in 58 source files |
-| `pytest` | 1876 tests, all passing |
+| `pytest` | 1878 tests, all passing |
 | `pytest -m integration` | 18 passing |
 | `pytest -m regression` | 46 passing |
 | `pytest -m replay` | 10 passing |
@@ -212,6 +230,9 @@ What was verified about the delivered file:
 - **Contains no credentials.** Configuration carries environment variable
   *names* only; credential-shaped strings appear solely in the redaction
   machinery and the tests that assert it works.
+- **Contains no captured payloads.** No `artifacts/` directory and no `.raw`
+  file, asserted by `test_no_captured_vendor_payload_is_tracked` and
+  `test_the_archive_carries_no_captured_payloads`.
 - **Contains no raw market data.** No capture has ever been taken.
 
 ---

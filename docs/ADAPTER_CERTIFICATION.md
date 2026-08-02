@@ -542,3 +542,69 @@ a filesystem location outside the source tree, and free space above a
 configurable minimum. `InMemoryRawStore` is `TEST_ONLY_VOLATILE` — a working
 store that forgets everything when the process exits — and stays fully supported
 for unit tests and offline fixtures.
+
+---
+
+## v2.1.8: bound to the operation, not only to the configuration
+
+v2.1.7 re-derived the chain from the bytes, which closed every payload mutation.
+It did not bind the inputs that are **not in the payload**. The rebuild built its
+recipe with `as_of=chain.as_of`, so the chain under test chose the instant it was
+tested against; shifting it by 0.1s, 0.5s, 1s or an hour shifted the rebuild too,
+and the two agreed.
+
+### The capture operation
+
+A session may run several fetches — a chain pull, a re-pull, a paginated sweep —
+and each fixes its own inputs. `CaptureOperationIdentity` records them:
+
+| Field | Why it is here |
+|---|---|
+| `requested_as_of` | What the caller asked for |
+| `effective_valuation_timestamp` | What Black-Scholes is actually priced against. Usually a different value, and the difference is the point of recording both |
+| `valuation_timestamp_rule` | Which of `INDEX_PRINT_TIMESTAMP`, `SYNCHRONIZED_MARKET_TIMESTAMP`, `CAPTURE_REQUEST_INSTANT` chose it |
+| `spot_synchronization_policy_fingerprint` | Tolerance and source, so a caller cannot widen the window for one calculation |
+| `open_interest_date_rule_fingerprint` | Which rule established the settlement date, where one has been |
+| `expected_universe_fingerprint` | What completeness is measured against |
+| pipeline / plan / request-spec / recipe / parser | The standing configuration v2.1.7 already stamped |
+
+The whole identity is hashed and the digest goes on every record.
+
+The split between *provisional* and *resolved* is deliberate. `begin_operation`
+stamps the requested instant, because no response has arrived yet;
+`resolve_operation` reads the effective instant out of the verified index print
+afterwards. A value stamped before the evidence existed would be an assertion,
+and the point is that the instant is derived.
+
+### Nothing that decides a number is accepted from the caller
+
+| Input | v2.1.7 | v2.1.8 |
+|---|---|---|
+| Valuation instant | `chain.as_of` | The index print in the verified capture |
+| Spot timestamp | A field on a caller-built `SpotProvenance` | The verified index record |
+| Skew tolerance | A field on the same object | `ThetaDataConfig.max_spot_skew_seconds` |
+| Settlement date | An `EvidenceKind` that authorized itself | A resolver that opens the record, or looks the rule up, or requires the derivation artefact |
+| Chain completeness | `snapshot.meta["chain_completeness_object"]` | A typed `ChainSnapshot.completeness` field, in the chain hash |
+| Expected universe | An argument to the calculation | Declared on the capture session, stamped, checked at replay |
+
+The completeness one had a measured cost: forging that metadata key moved a
+trusted confidence score from 52.0619 to 57.3394. Metadata may describe a
+calculation; it must not alter one, and `tests/unit/test_architecture.py` now
+fails the build when production GEX code reads calculation-affecting data from
+`meta`.
+
+### Every record is consumed, exactly once
+
+A replay that used *some* of a capture proved something about those bytes and
+nothing about the rest. `RecordConsumptionReport` compares what the manifest
+assigned against what normalization consumed, in order, and the digest goes into
+the receipt. An endpoint may answer more than once only where the capture plan
+declares why: `PAGINATION`, `BATCHED_EXPIRATIONS`, `RETRY` or
+`PARTITIONED_UNIVERSE`. No shipped plan declares any of them.
+
+### Documentation evidence is bound to its content
+
+A reference says where somebody looked. `DocumentationRule.document_content_hash`
+says what was there. A vendor rewriting a page without renaming it changes the
+evidence fingerprint and therefore the pipeline fingerprint, which is the only
+way a claim about vendor behaviour can go stale visibly rather than quietly.

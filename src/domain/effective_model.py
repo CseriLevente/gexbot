@@ -331,7 +331,7 @@ class EffectiveModelInputs:
         ):
             payload.pop(key, None)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def describe(self) -> str:
         return (

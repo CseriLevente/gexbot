@@ -252,7 +252,7 @@ def test_a_healthy_chain_reports_resolved_contracts():
 
 
 def test_the_engine_version_reflects_this_release():
-    assert MODEL_VERSION == "gex-engine/2.1.7"
+    assert MODEL_VERSION == "gex-engine/2.1.8"
 
 
 def test_the_engine_version_is_defined_once():
@@ -301,8 +301,8 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.7"
+    assert package["project"]["version"] == "2.1.8"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
-    assert "gex-engine/2.1.7" in text
-    assert "thetadata-v3-parser/2.1.7" in text
+    assert "gex-engine/2.1.8" in text
+    assert "thetadata-v3-parser/2.1.8" in text

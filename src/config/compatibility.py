@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import pathlib
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
@@ -164,18 +165,29 @@ class CompatibilityEvidence:
     source: EvidenceSource
     reference: str = ""
     observed_at: str = ""
+    #: SHA-256 of what the reference pointed at when it was read. Empty for a
+    #: reference this repository cannot open offline -- a URL, or a live
+    #: comparison, which is bound to a manifest instead.
+    #:
+    #: A reference says where somebody looked. The hash says what was there. A
+    #: vendor can rewrite a documentation page without changing its URL, and
+    #: until v2.1.8 that rewrite moved nothing: the convention it established
+    #: still resolved a load-bearing pricing dimension, and every fingerprint
+    #: downstream was identical.
+    document_content_hash: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "source": self.source.value,
             "reference": self.reference,
             "observed_at": self.observed_at,
+            "document_content_hash": self.document_content_hash,
         }
 
     @property
     def fingerprint(self) -> str:
         payload = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +328,8 @@ class VendorObservation:
     record_ids: tuple[str, ...] = ()
     manifest_hash: str = ""
     note: str = ""
+    #: Derived, never supplied. See ``document_content_hash`` below.
+    document_content_hash: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.dimension, PricingDimension):
@@ -349,6 +363,12 @@ class VendorObservation:
                 "the capture it was read from. Evidence of what the vendor did is "
                 "evidence about specific bytes."
             )
+        # Derived rather than accepted -- ``init=False`` above. A
+        # caller-supplied content hash is a claim about a document, which is
+        # precisely what the hash exists to stop being a claim.
+        object.__setattr__(
+            self, "document_content_hash", _referenced_content_hash(self)
+        )
 
     @property
     def observed_on(self) -> date:
@@ -368,6 +388,7 @@ class VendorObservation:
             reference=self.reference,
             # Canonical ISO, whatever spelling the file used.
             observed_at=self.observed_on.isoformat(),
+            document_content_hash=self.document_content_hash,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -380,6 +401,36 @@ class VendorObservation:
             "manifest_hash": self.manifest_hash,
             "note": self.note,
         }
+
+
+#: References this repository can open without a network. Anything else -- a URL
+#: above all -- is a pointer to something only the vendor controls, and the
+#: report says so rather than pretending to a hash it never computed.
+_UNHASHABLE_PREFIXES = ("http://", "https://")
+
+
+def _referenced_content_hash(observation: VendorObservation) -> str:
+    """SHA-256 of the document a documentation observation rests on.
+
+    Empty where there is nothing to hash: a live comparison is bound to a
+    manifest, a local configuration has no vendor document behind it, and a URL
+    cannot be read offline. Empty is the honest answer in each case, and the
+    certification report distinguishes it from a hash.
+    """
+    if observation.source is not EvidenceSource.VENDOR_DOCUMENTATION:
+        return ""
+    text = observation.reference.strip()
+    if not text or text.startswith(_UNHASHABLE_PREFIXES):
+        return ""
+    # A fragment names a section of a document, not a different document.
+    target = pathlib.Path(text.split("#", 1)[0])
+    if target.is_absolute() or ".." in target.parts:
+        return ""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    resolved = root / target
+    if not resolved.is_file():
+        return ""
+    return hashlib.sha256(resolved.read_bytes()).hexdigest()
 
 
 #: v2.1.4 name. The type is different -- it no longer carries a verdict -- but

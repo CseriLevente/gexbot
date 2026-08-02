@@ -1,5 +1,87 @@
 # Changelog
 
+## 2.1.8 - capture-operation and normalization-input binding
+
+v2.1.7 re-derived the chain from the raw bytes and compared the two. That closed
+every *payload* mutation. What it did not bind was the inputs that are **not in
+the payload**, and the sharpest of those is the instant:
+
+```python
+recipe = self.normalization_recipe(as_of=chain.as_of)
+rederived = self.rebuild_chain_from_capture(..., recipe=recipe)
+```
+
+Read it twice. The chain under test chose the timestamp it was tested against,
+so shifting `chain.as_of` shifted the rebuild with it and the two agreed. A
+tenth of a second is a real change in time-to-expiry on a 0DTE afternoon; an
+hour is a different market. The same shape ran through spot provenance (a
+caller-supplied timestamp *and* tolerance), the open-interest settlement date
+(an enum that authorized itself), chain completeness (an open metadata key that
+moved the confidence score) and record consumption (a replay that never checked
+it had used everything it was given).
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.7 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Nothing named the capture *operation* | A session may run several fetches; only the standing configuration was stamped, so per-fetch inputs were unbound | `CaptureOperationIdentity` -- both timestamps, the rule that chose one, the spot policy, the settlement rule, the expected universe -- stamped whole onto every record |
+| 2 | The replay took its valuation instant from the chain | The thing under test chose the input it was tested against; 0.1s, 0.5s, 1s and 1h shifts were all trusted | `resolve_operation` reads the instant out of the verified index print. The chain is never asked |
+| 3 | `SpotProvenance` was a caller argument | Its `timestamp` and `tolerance_seconds` were the two numbers the skew check compared, so a caller could claim 12:00 for an 11:00 print and be checked against its own claim | Both derived: the timestamp from the verified index record, the tolerance from `max_spot_skew_seconds`, which is now real configuration and enters the pipeline fingerprint |
+| 4 | `EvidenceKind` authorized a settlement date by existing | `VENDOR_FIELD` with `record_ids=("fake-record",)` and `AUTHORITATIVE_VENDOR_DOCUMENTATION` with `reference="lol"` both permitted a trusted calculation | Four resolvers in `evidence_resolvers.py`. The kind selects *which check runs*; supplying it does not pass the check |
+| 5 | Chain completeness travelled in `snapshot.meta` | A forged `chain_completeness_object` moved the confidence score from 52.0619 to 57.3394 with `trusted=True`; metadata was altering a calculation | A typed `ChainSnapshot.completeness` field, the full semantic payload in the chain hash, and an architecture test that fails when production GEX code reads calculation-affecting data from `meta` |
+| 6 | The expected universe was a calculation argument | The same capture could be scored `MEASURED_COMPLETE` against one universe and replayed `PARTIALLY_OBSERVED` against another | `ExpectedContractUniverse` declared on `capture_session`, its hash stamped on every record, checked -- not adopted -- at replay |
+| 7 | A replay never checked it consumed the whole capture | An extra quote response replayed from the first record, matched, and verified; the second sat in the store looking like evidence | `RecordConsumptionReport`: assigned == consumed, each exactly once, hashed into the receipt. A second response per endpoint needs a plan that declares pagination, batched expirations, retries or partitions |
+| 8 | Documentation evidence was a citation | A vendor can rewrite a page without renaming it, and the fingerprint would not move | `document_content_hash`, derived at construction and carried into the pipeline fingerprint |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | -- |
+| `EXPECTED_MODEL_FINGERPRINT` | `1b353ba18cefb0a2` | `79f3abe506978342` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `3af3ef9c...` | `128acd06...` | `VERSION_METADATA_ONLY` |
+
+Measured in two parts rather than asserted. Pinning `model_version` back to
+`gex-engine/2.1.7` and changing nothing else reproduces both v2.1.7 digests
+exactly, so the movement is the version string and not the arithmetic. Every
+GEX number, bucket, wall, node, void, zero-gamma root and confidence component
+in the reference case is unchanged.
+
+The three fingerprints that *did* change behaviourally --
+`pipeline_fingerprint`, `capture_plan.fingerprint` and
+`normalization_recipe.rules_fingerprint` -- are not frozen values. They are
+recomputed from configuration on every run and compared against what a capture
+was stamped with, which is the point of them.
+
+### Behavioural changes worth knowing
+
+* `compute_trusted_gex` no longer takes `spot_provenance`. It takes
+  `open_interest_provenance`, `open_interest_as_of_evidence` and
+  `expected_universe`, and derives the spot itself.
+* **An expected contract universe must be declared on `capture_session`.**
+  Supplying one only at calculation time is refused, and so is dropping one the
+  capture declared. A universe produced after the responses arrived can be
+  shaped to fit whatever arrived.
+* `max_spot_skew_seconds` is a `ThetaDataConfig` field (default `1.0`). It
+  enters the pipeline fingerprint, so widening it is a configuration change that
+  every previously stamped record disagrees with.
+* Documentation evidence for a settlement date now resolves through
+  `DOCUMENTATION_RULES`, which is **deliberately empty in production**. This
+  repository has read no ThetaData document establishing an open-interest
+  settlement convention (OD-26), and pre-populating the registry with a
+  plausible-looking entry would be the defect this closes.
+* `NormalizationRecipe.rules_fingerprint` now excludes
+  `expected_universe_fingerprint` alongside `as_of` and `open_interest_as_of`.
+  All three belong to one operation rather than to the standing configuration.
+* Captures written by v2.1.7 have no operation stamp and are refused rather than
+  given a timestamp this process invented.
+
 ## 2.1.7 - normalized-evidence binding
 
 v2.1.6 bound a trusted calculation to *verified raw records*. v2.1.7 binds it to

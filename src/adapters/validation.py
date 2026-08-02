@@ -60,11 +60,11 @@ __all__ = [
 ]
 
 #: Bumped when the *meaning* of a validation report changes.
-VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.7"
+VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.8"
 
 #: Bumped when the validator's own logic changes, so two reports that disagree
 #: can be told apart by which code produced them.
-VALIDATOR_VERSION = "adapter-validator/2.1.7"
+VALIDATOR_VERSION = "adapter-validator/2.1.8"
 
 #: Parser versions whose output this validator understands. A payload read by
 #: something else is not evidence this code can interpret.

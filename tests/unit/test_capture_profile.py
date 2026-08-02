@@ -196,3 +196,40 @@ def test_the_capture_profile_cannot_trade():
     config = loaded()
     assert config.profile.trading_enabled is False
     assert config.profile.broker == "none"
+
+
+def test_the_four_readiness_questions_stay_four_questions():
+    """v2.1.8 §11. The shipped profile is capture-ready and nothing more.
+
+    Four independent axes, asserted together so that weakening one to make a
+    fixture pass shows up here rather than in a release note nobody re-reads:
+
+    * *raw capture* -- may we spend a session collecting bytes?
+    * *trusted calculation* -- does a number from those bytes have a meaning?
+    * *analytical dataset* -- is the result fit to build on?
+    * *adapter certification* -- has the vendor's behaviour been observed?
+
+    v2.1.3 ran all four through one ladder, so an unresolved day-count
+    convention blocked the capture that would have resolved it.
+    """
+    from src.adapters.certification import (
+        ANALYTICAL_DATASET_REQUIREMENTS,
+        AnalyticalReadiness,
+        CertificationState,
+    )
+    from tests.certification_fixtures import readiness
+
+    result = readiness(pipeline=pipeline())
+
+    # Ready to capture.
+    assert result.ready, result.blockers
+    assert result.state is CertificationState.READY_FOR_RAW_CAPTURE_ONLY
+    # Not ready to be believed.
+    assert not result.calculation_trusted
+    assert result.calculation_blockers
+    # Not ready to be built on, and the requirements are written down rather
+    # than enforced -- which is the honest state and says so.
+    assert AnalyticalReadiness.NOT_ANALYTICALLY_READY.value == "NOT_ANALYTICALLY_READY"
+    assert len(ANALYTICAL_DATASET_REQUIREMENTS) == 5
+    # And certification is unreachable offline, by construction.
+    assert result.state is not CertificationState.ADAPTER_CERTIFIED

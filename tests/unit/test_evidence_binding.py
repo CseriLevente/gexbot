@@ -318,14 +318,14 @@ def test_the_manifest_carries_per_record_descriptors():
 
 def test_the_manifest_states_its_schema_version():
     _, manifest = build_capture()
-    assert manifest.schema_version == "raw-capture-manifest/2.1.7"
+    assert manifest.schema_version == "raw-capture-manifest/2.1.8"
     assert manifest.parser_version == PARSER_VERSION
 
 
 def test_an_old_schema_manifest_is_refused_rather_than_reinterpreted():
     pipeline = resolved_pipeline()
     store, manifest = build_capture(pipeline=pipeline)
-    stale = dataclasses.replace(manifest, schema_version="raw-capture-manifest/2.1.6")
+    stale = dataclasses.replace(manifest, schema_version="raw-capture-manifest/2.1.7")
     result = verified(stale, store, pipeline)
     assert not result.verified
     assert any("schema" in f.lower() for f in result.failures)

@@ -18,7 +18,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from src.domain.completeness import CompletenessStatus
+from src.domain.completeness import ChainCompleteness, CompletenessStatus
 from src.domain.iv import ImpliedVolQuote, IVQualityFlag, missing_iv
 from src.domain.timestamps import ContractTimestamps
 
@@ -317,6 +317,20 @@ class ChainSnapshot:
     expected_contract_count: int | None = None
     #: Whether ``expected_contract_count`` is a measurement or an absence.
     completeness_status: CompletenessStatus = CompletenessStatus.UNKNOWN
+    #: How complete this chain is, measured against an independent expectation.
+    #:
+    #: A **typed field** since v2.1.8, and that is the whole point. The engine
+    #: used to read ``meta["chain_completeness_object"]`` -- an arbitrary key in
+    #: an open dict -- and the confidence score depends on it. So writing one
+    #: key changed a trusted number without changing the normalized-chain hash:
+    #: a forged completeness object moved the score from 52.0619 to 57.3394 and
+    #: the result still verified.
+    #:
+    #: ``None`` means nothing measured it, which is different from a measurement
+    #: that found nothing.
+    completeness: ChainCompleteness | None = None
+    #: Descriptive provenance. **Nothing here may alter a calculation** --
+    #: ``tests/unit/test_architecture.py`` enforces that against the engine.
     meta: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

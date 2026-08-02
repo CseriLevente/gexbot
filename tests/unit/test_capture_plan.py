@@ -46,6 +46,9 @@ PIPELINE = "test-pipeline-fingerprint"
 #: rather than inventing a claim for it.
 TEST_REQUEST_SPEC = "test-request-spec"
 TEST_RECIPE = "test-normalization-recipe"
+TEST_OPERATION_ID = "op-test-0001"
+TEST_OPERATION_FINGERPRINT = "f" * 64
+TEST_RECIPE_HASH = "e" * 64
 
 
 def stamped_identity():
@@ -57,6 +60,16 @@ def stamped_identity():
         capture_plan_fingerprint=plan_for().fingerprint,
         request_spec_fingerprint=TEST_REQUEST_SPEC,
         normalization_recipe_fingerprint=TEST_RECIPE,
+        # Since v2.1.8 a record also says which *operation* issued it and what
+        # instant that operation priced against. Stand-in values again -- this
+        # fixture builds a store by hand -- but present, because an unstamped
+        # record is refused rather than given a claim this code invented.
+        operation_id=TEST_OPERATION_ID,
+        operation_fingerprint=TEST_OPERATION_FINGERPRINT,
+        normalization_recipe_hash=TEST_RECIPE_HASH,
+        requested_as_of=NOW,
+        effective_valuation_timestamp=NOW,
+        valuation_timestamp_rule="INDEX_PRINT_TIMESTAMP",
     )
 
 

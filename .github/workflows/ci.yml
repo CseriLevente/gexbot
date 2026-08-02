@@ -216,6 +216,12 @@ jobs:
       - name: Normalized-evidence binding -- the chain is re-derived
         run: python -m pytest tests/unit/test_normalized_evidence_binding.py -v
 
+      - name: Capture-operation binding -- the chain does not choose its own inputs
+        run: python -m pytest tests/unit/test_capture_operation_binding.py -v
+
+      - name: Settlement evidence is resolved, not declared
+        run: python -m pytest tests/unit/test_settlement_evidence_resolution.py -v
+
       - name: US Eastern comes from the IANA database
         run: python -m pytest tests/unit/test_sessions.py tests/unit/test_timestamp_boundary.py -v
 

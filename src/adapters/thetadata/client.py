@@ -1355,14 +1355,18 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
             else None
         ),
         completeness_status=completeness.status,
+        # A typed field since v2.1.8, so the engine can score against the
+        # identity measure without reaching into an open dict. It used to
+        # travel as ``meta["chain_completeness_object"]``, which meant one key
+        # moved the confidence score while the normalized-chain hash -- which
+        # did not cover ``meta`` -- stayed identical.
+        completeness=completeness,
         meta={
             **dict(inputs.meta),
             "duplicate_reports": [r.as_dict() for r in duplicate_reports],
+            # The wire form, for readers. Descriptive: the engine reads the
+            # typed field above, and an architecture test keeps it that way.
             "chain_completeness": completeness.as_dict(),
-            # The object itself, so the engine can score against the identity
-            # measure rather than rebuilding one from counts. Not serialised:
-            # as_dict() above is the wire form.
-            "chain_completeness_object": completeness,
             "parser_version": PARSER_VERSION,
             # Per source, not one chain-wide flag. See TimestampSource.
             "timestamp_localization": ledger.as_dict(),

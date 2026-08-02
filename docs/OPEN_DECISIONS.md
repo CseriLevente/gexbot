@@ -241,10 +241,24 @@ status is reported as `PARTIALLY_OBSERVED` — never `COMPLETE`.
 repository has verified. Inventing a URL and shipping it as though it were
 confirmed would be worse than reporting the limitation.
 
+**What v2.1.8 changed.** The universe is now a typed `ExpectedContractUniverse`
+declared on the *capture session*, and its hash is stamped on every record. A
+universe supplied only at calculation time is refused, and so is dropping one
+the capture declared.
+
+The reason is that the universe decides completeness, which feeds the confidence
+score, which decides whether a dataset is fit to build on. In v2.1.7 it was an
+argument to the calculation, so the same capture could be scored
+`MEASURED_COMPLETE` against one universe and replayed `PARTIALLY_OBSERVED`
+against another — two answers from the same bytes, and nothing in the receipt
+distinguished them. A universe produced after the responses arrived can be
+shaped to fit whatever arrived.
+
 **What would settle it.** A live account, one call to whatever list endpoint the
 subscription actually exposes, and its response shape recorded as a fixture.
-Then pass those identities as `expected_contract_ids` with
-`expected_source="contract_list"` and completeness becomes measurable.
+Then build an `ExpectedContractUniverse` from those identities, naming the
+records it was read from, pass it to `capture_session(expected_universe=...)`,
+and completeness becomes measurable.
 
 ---
 
@@ -502,11 +516,20 @@ still be *selected*; it just cannot be described as verified.
 
 ## 25. Spot synchronisation tolerance - **LOCAL POLICY, uncalibrated**
 
-**Current setting.** `SpotProvenance.tolerance_seconds = 1.0`.
+**Current setting.** `ThetaDataConfig.max_spot_skew_seconds = 1.0`.
 
 **Why this is a decision.** One second is a guess at how stale a spot print may
 be before pairing it with a chain stops being meaningful. It is a local policy,
 not a vendor fact, and it blocks certification when exceeded.
+
+**What v2.1.8 changed.** It is *configuration* rather than an argument. Until
+v2.1.7 it lived on a caller-built `SpotProvenance`, so a caller could grant one
+calculation a wider window than the session was configured for -- and the skew
+check is the only thing between a chain and an underlying it never saw.
+The value now enters the pipeline fingerprint, the spot synchronisation policy
+fingerprint and every stamped record, so widening it is a configuration change
+that a previously taken capture visibly disagrees with. The number is still a
+guess; it is now a guess made once, in the open.
 
 **What would settle it.** Measured round-trip and staleness distributions from a
 real session.
@@ -776,19 +799,44 @@ believing them to be Monday's is not a stale number, it is a different market.
 **Current behaviour (v2.1.7).** Two types. `OpenInterestValueObservation` says
 the vendor sent this number in this record; it carries no date, so the confusion
 cannot be expressed. `OpenInterestAsOfEvidence` says which session, and names
-the *kind* of thing being relied on:
+the *kind* of thing being relied on.
 
-| Kind | Permits a trusted GEX |
+**What v2.1.7 still got wrong.** The kind *was* the check. `EvidenceKind` had a
+`permits_trusted_calculation` property, the trusted path read it, and that was
+all. So both of these were trusted:
+
+```python
+OpenInterestAsOfEvidence(..., evidence_kind=EvidenceKind.VENDOR_FIELD,
+                         record_ids=("fake-record",))
+OpenInterestAsOfEvidence(..., evidence_kind=AUTHORITATIVE_VENDOR_DOCUMENTATION,
+                         reference="lol")
+```
+
+`VENDOR_FIELD` permits a trusted calculation, so that object did; the record was
+never opened. Documentation needed a non-empty `reference`, and `"lol"` is
+non-empty. Naming the kind of evidence you have is not the same as having it.
+
+**Current behaviour (v2.1.8).** Each kind has a *resolver*, in
+`src/adapters/evidence_resolvers.py`. The kind selects which check runs;
+supplying it does not pass the check:
+
+| Kind | What must actually happen |
 |---|---|
-| `VENDOR_FIELD` | yes — and must name the records it was read from |
-| `AUTHORITATIVE_VENDOR_DOCUMENTATION` | yes — and must carry a resolvable reference |
-| `DERIVED_FROM_VERIFIED_VENDOR_SCHEDULE` | yes |
-| `CALLER_ASSUMPTION` | **no** |
+| `VENDOR_FIELD` | The named record is opened and the settlement-date field re-read out of it. No ThetaData snapshot endpoint has one, so this resolves to a failure today — which is OD-26 stated as a check rather than as prose |
+| `AUTHORITATIVE_VENDOR_DOCUMENTATION` | The reference is an id looked up in `DOCUMENTATION_RULES`, and the registered rule carries a SHA-256 of the document, an effective period and a derivation version |
+| `DERIVED_FROM_VERIFIED_VENDOR_SCHEDULE` | A versioned `ScheduleDerivation` artefact, agreeing with the claimed date, resting on registered documentation |
+| `CALLER_ASSUMPTION` | Resolves — a caller really did state a date — and authorizes nothing |
 
-Supplying no evidence is treated as `CALLER_ASSUMPTION`: silence is not a vendor
-statement. A caller assumption permits a raw capture and a diagnostic GEX, and
-blocks a trusted calculation, calculation validation, adapter certification and
-any feature generation.
+The value's provenance and the date's evidence must also agree: an
+`OpenInterestProvenance` saying 2026-03-16 alongside evidence resolving to
+2026-03-13 is refused rather than silently preferring one.
+
+**`DOCUMENTATION_RULES` is empty in production.** This repository has read no
+ThetaData document establishing an open-interest settlement convention.
+Pre-populating the registry with a plausible-looking entry would be exactly the
+defect being closed, and
+`test_the_production_registry_holds_no_thetadata_settlement_rule` fails if one
+appears.
 
 **So the shipped configuration cannot produce a trusted number today**, and that
 is the honest position rather than a regression. See OD-26 for the vendor-side

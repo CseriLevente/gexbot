@@ -227,6 +227,94 @@ def test_engine_core_imports_on_a_bare_interpreter() -> None:
     assert "ok" in result.stdout
 
 
+# =============================================================================
+# The engine reads typed fields, not an open dictionary
+# =============================================================================
+
+#: Files that compute or score. Every value they consume must be a typed
+#: ``ChainSnapshot`` field, part of the engine configuration fingerprint, or an
+#: argument -- never a key in ``meta``.
+CALCULATING_MODULES = (
+    "gex/engine.py",
+    "gex/formulas.py",
+    "gex/pricing.py",
+    "gex/confidence.py",
+    "gex/zero_gamma.py",
+    "gex/walls.py",
+    "gex/universe.py",
+)
+
+#: Writing metadata *into* a result is not reading it out of an input. The
+#: engine's own output dict is assembled from ``snapshot.meta`` on purpose --
+#: provenance the adapter established travels with the number -- and that is a
+#: copy, not a decision.
+META_PASSTHROUGH_ALLOWED = ("snapshot.meta[key]", "key in snapshot.meta")
+
+
+def _meta_reads(source: str) -> list[str]:
+    """Lines where a module reads a value out of ``.meta``.
+
+    Textual on purpose. The rule is about a *shape* of access -- subscripting or
+    ``.get``-ing an open dict whose keys nobody declares -- and a reader
+    checking this by eye would look for exactly these strings.
+    """
+    found = []
+    for number, line in enumerate(source.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if any(allowed in stripped for allowed in META_PASSTHROUGH_ALLOWED):
+            continue
+        if ".meta.get(" in stripped or re.search(r"\.meta\[", stripped):
+            found.append(f"{number}: {stripped}")
+    return found
+
+
+def test_no_calculating_module_reads_an_input_from_chain_meta() -> None:
+    """The v2.1.7 defect, closed as a rule rather than one deleted line.
+
+    ``_resolve_completeness`` read ``snapshot.meta["chain_completeness_object"]``
+    and the confidence score depends on the result -- so writing one key in an
+    open dict moved a trusted number from 52.0619 to 57.3394, and the
+    normalized-chain hash, which does not cover ``meta``, stayed identical.
+
+    Deleting that line fixes the instance. This stops the next one: a
+    calculating module may not take a calculation input from a dictionary whose
+    contents nothing declares. Metadata may *describe* a calculation. It must
+    not alter one.
+    """
+    offenders = {}
+    for relative in CALCULATING_MODULES:
+        path = SRC / relative
+        if not path.exists():
+            continue
+        reads = _meta_reads(path.read_text(encoding="utf-8"))
+        if reads:
+            offenders[relative] = reads
+    assert not offenders, (
+        f"calculation-affecting reads from an open metadata dict: {offenders}. "
+        "Add a typed field to ChainSnapshot instead -- and remember to include "
+        "it in canonical_chain_payload, or it will not be bound to the capture."
+    )
+
+
+def test_the_meta_rule_would_catch_a_real_violation() -> None:
+    """Guard the guard: a check nobody has seen fire is not a check."""
+    assert _meta_reads('x = snapshot.meta.get("anything")')
+    assert _meta_reads("x = chain.meta['anything']")
+    # And it does not fire on the passthrough the engine legitimately does.
+    assert not _meta_reads("key: snapshot.meta[key] for key in KEYS")
+
+
+def test_the_typed_completeness_field_is_in_the_canonical_chain_hash() -> None:
+    """A typed field that the hash ignores is the same defect, relocated."""
+    source = (SRC / "domain" / "normalization.py").read_text(encoding="utf-8")
+    assert '"completeness": (' in source, (
+        "ChainSnapshot.completeness must enter canonical_chain_payload; "
+        "otherwise moving it out of meta only changed where it hides"
+    )
+
+
 BANNED_EXECUTION_NAMES = frozenset(
     {
         "placeOrder",

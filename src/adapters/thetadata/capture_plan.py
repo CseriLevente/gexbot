@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from src.adapters.thetadata.endpoints import Endpoint, Tier, tier_satisfies
@@ -27,11 +28,34 @@ from src.adapters.thetadata.endpoints import Endpoint, Tier, tier_satisfies
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.config.pipeline import IvGammaPricingMode, VendorGammaPolicy
 
-__all__ = ["CapturePlan", "capture_plan_for"]
+__all__ = ["CapturePlan", "MultipleRecordReason", "capture_plan_for"]
 
 #: Underlying sources that mean "read the vendor's index print". Anything else
 #: is either synthetic or supplied from outside, and needs no index request.
 VENDOR_INDEX_SOURCES = frozenset({"vendor_index_snapshot"})
+
+
+class MultipleRecordReason(str, Enum):
+    """Why one endpoint may legitimately appear more than once in a capture.
+
+    Four reasons, named, because "an endpoint answered twice" is otherwise
+    indistinguishable from a defect. v2.1.7 replayed the *first* record for an
+    endpoint and left any others unread, so a capture containing two quote
+    responses -- one stale, one current -- normalized from whichever arrived
+    first and the second sat in the store looking like evidence.
+
+    A plan that declares none of these is a plan under which a second response
+    for the same endpoint is unaccounted for, and that is the honest default.
+    """
+
+    #: The vendor returned the result across pages.
+    PAGINATION = "PAGINATION"
+    #: One request per expiration, batched into one operation.
+    BATCHED_EXPIRATIONS = "BATCHED_EXPIRATIONS"
+    #: A request was reissued after a failure. Both attempts are in the store.
+    RETRY = "RETRY"
+    #: The universe was split across requests -- by strike range, say.
+    PARTITIONED_UNIVERSE = "PARTITIONED_UNIVERSE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +72,10 @@ class CapturePlan:
     vendor_gamma_policy: str = ""
     underlying_price_source: str = ""
     tier: str = ""
+    #: ``(endpoint, MultipleRecordReason)`` pairs. Empty in every shipped
+    #: profile: a snapshot plan issues one request per endpoint, so a second
+    #: response is a duplicate nobody accounted for rather than a page two.
+    declared_multiple_records: tuple[tuple[str, str], ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -64,6 +92,11 @@ class CapturePlan:
                 "vendor_gamma_policy": self.vendor_gamma_policy,
                 "underlying_price_source": self.underlying_price_source,
                 "tier": self.tier,
+                # Whether an endpoint may answer twice changes which bytes a
+                # chain was built from, so it is part of the plan's identity.
+                "declared_multiple_records": sorted(
+                    list(entry) for entry in self.declared_multiple_records
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -72,6 +105,15 @@ class CapturePlan:
 
     def reason_for(self, endpoint: Endpoint) -> str:
         return dict(self.rationale).get(endpoint.value, "")
+
+    def permits_multiple_records(self, endpoint: str) -> bool:
+        """Whether this plan accounted for the endpoint answering more than once."""
+        return any(
+            declared == endpoint for declared, _ in self.declared_multiple_records
+        )
+
+    def multiple_record_reason(self, endpoint: str) -> str:
+        return dict(self.declared_multiple_records).get(endpoint, "")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +124,7 @@ class CapturePlan:
             "vendor_gamma_policy": self.vendor_gamma_policy,
             "underlying_price_source": self.underlying_price_source,
             "tier": self.tier,
+            "declared_multiple_records": dict(self.declared_multiple_records),
         }
 
 

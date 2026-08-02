@@ -75,9 +75,13 @@ def resolve_chain_completeness(
             expected_source=expected_universe.source,
         )
 
-    existing = snapshot.meta.get("chain_completeness_object")
-    if isinstance(existing, ChainCompleteness):
-        return existing
+    # The typed field, not ``meta``. Until v2.1.8 this read
+    # ``snapshot.meta["chain_completeness_object"]``, so one key in an open dict
+    # moved the confidence score -- and the normalized-chain hash, which did not
+    # cover ``meta``, stayed exactly the same. Metadata may describe a
+    # calculation; it must not alter one.
+    if snapshot.completeness is not None:
+        return snapshot.completeness
 
     # No independent universe. Reconstruct from what the snapshot declares, so
     # a synthetic chain that knows its own universe still measures, and a vendor

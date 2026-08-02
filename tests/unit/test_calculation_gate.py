@@ -146,11 +146,21 @@ def test_a_chain_from_another_pipeline_cannot_be_trusted():
 
 
 def test_a_chain_without_a_capture_manifest_cannot_be_trusted():
+    """No capture, no spot to derive, no trusted number.
+
+    Since v2.1.8 the spot provenance is read out of the verified index record
+    rather than supplied, so a manifest naming nothing fails before any of the
+    later checks -- which is the same refusal for a better reason.
+    """
+    from src.adapters.errors import ThetaDataProvenanceError
     from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
 
     pipeline = resolved_pipeline(raw_capture_enabled=False, raw_capture_path=None)
     chain = chain_for(pipeline)
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)capture"):
+    with pytest.raises(
+        (PipelineConsistencyError, ThetaDataProvenanceError),
+        match=r"(?i)capture|record",
+    ):
         pipeline.compute_trusted_gex(
             chain,
             manifest=RawCaptureManifest.disabled(),
@@ -268,7 +278,7 @@ def test_an_externally_supplied_spot_has_its_own_named_path():
 
 def test_an_externally_supplied_spot_cannot_be_trusted():
     from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
-    from tests.certification_fixtures import verified_oi, verified_spot
+    from tests.certification_fixtures import verified_oi
 
     pipeline = resolved_pipeline(underlying_price_source="configured_constant")
     store = InMemoryRawStore()
@@ -281,12 +291,19 @@ def test_an_externally_supplied_spot_cannot_be_trusted():
         capture_plan_fingerprint=pipeline.capture_plan.fingerprint,
         pipeline_fingerprint=pipeline.fingerprint(),
     )
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)spot|caller"):
+    # The index endpoint is not part of a ``configured_constant`` session, so
+    # there is no verified print to derive a spot from -- which is the honest
+    # reason this cannot be trusted, and a stronger one than a source label.
+    from src.adapters.errors import ThetaDataProvenanceError
+
+    with pytest.raises(
+        (PipelineConsistencyError, ThetaDataProvenanceError),
+        match=r"(?i)spot|caller|index",
+    ):
         pipeline.compute_trusted_gex(
             chain,
             manifest=manifest,
             store=store,
-            spot_provenance=verified_spot(store, manifest),
             open_interest_provenance=verified_oi(store, manifest),
         )
 

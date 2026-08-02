@@ -233,12 +233,12 @@ def test_human_prose_alone_does_not_change_the_hash():
 # =============================================================================
 
 
-def test_the_parser_version_is_2_1_7():
-    assert PARSER_VERSION == "thetadata-v3-parser/2.1.7"
+def test_the_parser_version_is_2_1_8():
+    assert PARSER_VERSION == "thetadata-v3-parser/2.1.8"
 
 
 def test_the_engine_version_is_2_1_5():
-    assert MODEL_VERSION == "gex-engine/2.1.7"
+    assert MODEL_VERSION == "gex-engine/2.1.8"
 
 
 def test_the_two_versions_stay_distinct():

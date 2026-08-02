@@ -288,7 +288,7 @@ def test_missing_credentials_prevent_capture_readiness(monkeypatch):
 def test_the_state_is_serialised():
     payload = readiness().as_dict()
     assert payload["state"] == "READY_FOR_RAW_CAPTURE_ONLY"
-    assert payload["schema_version"] == "adapter-certification/2.1.7"
+    assert payload["schema_version"] == "adapter-certification/2.1.8"
     assert payload["provenance_grades"]["spot"] == "PLANNED"
     observed = observed_readiness().as_dict()
     assert observed["provenance_grades"]["spot"] == "OBSERVED"

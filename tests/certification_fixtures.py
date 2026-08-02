@@ -289,18 +289,28 @@ class CapturedChain:
 
 
 def captured_chain(
-    pipeline: ThetaDataResearchPipeline | None = None, *, store: Any = None
+    pipeline: ThetaDataResearchPipeline | None = None,
+    *,
+    store: Any = None,
+    expected_universe: Any = None,
 ) -> CapturedChain:
     """Fetch a chain and keep the manifest of the responses that built it.
 
     The manifest is derived the same way ``_assemble`` derives the one it puts
     in ``chain.meta``, so the two agree by construction rather than by a fixture
     saying they do.
+
+    ``expected_universe`` is declared on the *session*, not on the calculation:
+    since v2.1.8 the universe a replay is measured against is the one the
+    capture operation was opened with.
     """
     built = pipeline if pipeline is not None else resolved_pipeline()
     raw_store = store if store is not None else durable_store()
     session = built.capture_session(
-        store=raw_store, session_id=f"fetch-{id(raw_store):x}", as_of=AS_OF
+        store=raw_store,
+        session_id=f"fetch-{id(raw_store):x}",
+        as_of=AS_OF,
+        expected_universe=expected_universe,
     )
     mark = session.mark()
     chain = built.fetch_chain(as_of=AS_OF, capture=session)
@@ -315,22 +325,65 @@ def captured_chain(
     )
 
 
+#: The id a fixture references. Registered against a document that really
+#: exists in this repository, so the content hash is a hash of real bytes rather
+#: than a plausible-looking constant.
+FIXTURE_OI_EVIDENCE_ID = "fixture-oi-settlement-convention"
+
+
+def register_fixture_documentation_rule():
+    """Put one registered rule in the registry, bound to a real document.
+
+    Since v2.1.8 a documentation *reference* authorizes nothing: the resolver
+    looks the id up in a registry and uses the rule it finds, so
+    ``reference="lol"`` -- which satisfied v2.1.7 -- resolves to nothing at all.
+    Registering is a deliberate act, and this is the one place a test performs
+    it.
+    """
+    import pathlib
+
+    from src.adapters.evidence_resolvers import (
+        DOCUMENTATION_RULES,
+        DocumentationRule,
+        content_hash_of,
+    )
+
+    if FIXTURE_OI_EVIDENCE_ID not in DOCUMENTATION_RULES:
+        DOCUMENTATION_RULES.register(
+            DocumentationRule(
+                evidence_id=FIXTURE_OI_EVIDENCE_ID,
+                document_reference="tests/fixtures/vendor_conventions.md",
+                document_content_hash=content_hash_of(
+                    pathlib.Path("tests/fixtures/vendor_conventions.md")
+                ),
+                rule_identifier="open_interest_settles_on_the_prior_session",
+                effective_from=date(2020, 1, 1),
+                derivation_version="fixture/1",
+                normalized_value="prior_session",
+                observed_on=date(2026, 8, 1),
+            )
+        )
+    return DOCUMENTATION_RULES.get(FIXTURE_OI_EVIDENCE_ID)
+
+
 def documented_oi_date(chain_date: date | None = None):
     """Settlement-date evidence strong enough for a trusted calculation.
 
     ``CALLER_ASSUMPTION`` -- the honest state of this repository today -- blocks
     a trusted GEX by design, so a fixture that wants to exercise the *rest* of
-    the trusted path has to state a stronger kind explicitly. Doing so here, in
-    one named function, keeps the concession visible: nothing in the production
-    configuration produces this, and OD-26 is still open.
+    the trusted path has to state a stronger kind explicitly, and since v2.1.8
+    has to register the document behind it. Doing both here, in one named
+    function, keeps the concession visible: nothing in the production
+    configuration registers a ThetaData settlement rule, and OD-26 is open.
     """
     from src.adapters.open_interest import EvidenceKind, OpenInterestAsOfEvidence
 
+    register_fixture_documentation_rule()
     return OpenInterestAsOfEvidence(
         as_of=date(2026, 3, 16),
         source="vendor_field",
         evidence_kind=EvidenceKind.AUTHORITATIVE_VENDOR_DOCUMENTATION,
-        reference="tests/fixtures/vendor_conventions.md",
+        reference=FIXTURE_OI_EVIDENCE_ID,
         chain_date=chain_date or AS_OF.date(),
     )
 
@@ -345,7 +398,6 @@ def trusted_evidence(taken: CapturedChain, **overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "manifest": taken.manifest,
         "store": taken.store,
-        "spot_provenance": verified_spot(taken.store, taken.manifest),
         "open_interest_provenance": verified_oi(taken.store, taken.manifest),
         "open_interest_as_of_evidence": documented_oi_date(),
     }
@@ -369,7 +421,13 @@ def context_for(taken: CapturedChain, **overrides: Any):
         "pipeline": taken.pipeline,
         "manifest": taken.manifest,
         "store": taken.store,
-        "spot": verified_spot(taken.store, taken.manifest),
+        # Derived, not supplied: since v2.1.8 the trusted path reads the spot's
+        # timestamp out of the verified index record and its tolerance out of
+        # the pipeline configuration. This mirrors that so a context built here
+        # says what a trusted calculation would say.
+        "spot": taken.pipeline.derive_spot_provenance(
+            manifest=taken.manifest, store=taken.store
+        ),
         "open_interest": verified_oi(taken.store, taken.manifest),
         "open_interest_as_of_evidence": documented_oi_date(),
     }

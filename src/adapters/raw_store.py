@@ -60,13 +60,13 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-PARSER_VERSION = "thetadata-v3-parser/2.1.7"
+PARSER_VERSION = "thetadata-v3-parser/2.1.8"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.7"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.8"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -162,6 +162,31 @@ class CaptureIdentity:
     normalization_recipe_fingerprint: str = ""
     #: Which transport produced the bytes. Never asserted by a caller.
     capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+    #: Which *operation* issued this record, and the whole of what that
+    #: operation fixed. v2.1.7 stamped the standing configuration and left the
+    #: per-operation inputs -- above all the valuation instant -- unbound, so
+    #: the chain under test could choose the timestamp it was checked against.
+    operation_id: str = ""
+    operation_fingerprint: str = ""
+    #: The full recipe hash for *this* operation, parameters included. The
+    #: ``normalization_recipe_fingerprint`` above is the rules alone.
+    normalization_recipe_hash: str = ""
+    requested_as_of: datetime | None = None
+    effective_valuation_timestamp: datetime | None = None
+    valuation_timestamp_rule: str = ""
+    #: The universe this operation expected, and the rule establishing the
+    #: open-interest settlement date. Both change what a chain *means* --
+    #: completeness, confidence, and the weight on every GEX term -- so both are
+    #: fixed by the operation rather than supplied at calculation time. v2.1.7
+    #: took the expected universe as an argument to the calculation, so one
+    #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
+    expected_universe_fingerprint: str = ""
+    open_interest_date_rule_fingerprint: str = ""
+
+    @property
+    def names_an_operation(self) -> bool:
+        """Whether this identity says which operation issued the record."""
+        return bool(self.operation_id and self.operation_fingerprint)
 
     @property
     def complete(self) -> bool:
@@ -173,6 +198,12 @@ class CaptureIdentity:
                 self.capture_plan_fingerprint,
                 self.request_spec_fingerprint,
                 self.normalization_recipe_fingerprint,
+                self.operation_id,
+                self.operation_fingerprint,
+                self.normalization_recipe_hash,
+                self.requested_as_of is not None,
+                self.effective_valuation_timestamp is not None,
+                self.valuation_timestamp_rule,
             )
         )
 
@@ -183,6 +214,22 @@ class CaptureIdentity:
             "capture_plan_fingerprint": self.capture_plan_fingerprint,
             "request_spec_fingerprint": self.request_spec_fingerprint,
             "normalization_recipe_fingerprint": self.normalization_recipe_fingerprint,
+            "operation_id": self.operation_id,
+            "operation_fingerprint": self.operation_fingerprint,
+            "normalization_recipe_hash": self.normalization_recipe_hash,
+            "requested_as_of": (
+                self.requested_as_of.isoformat() if self.requested_as_of else None
+            ),
+            "effective_valuation_timestamp": (
+                self.effective_valuation_timestamp.isoformat()
+                if self.effective_valuation_timestamp
+                else None
+            ),
+            "valuation_timestamp_rule": self.valuation_timestamp_rule,
+            "expected_universe_fingerprint": self.expected_universe_fingerprint,
+            "open_interest_date_rule_fingerprint": (
+                self.open_interest_date_rule_fingerprint
+            ),
         }
 
 
@@ -214,6 +261,21 @@ class RawResponseRecord:
     capture_plan_fingerprint: str = ""
     request_spec_fingerprint: str = ""
     normalization_recipe_fingerprint: str = ""
+    #: Which capture operation issued this record. A session may run several.
+    operation_id: str = ""
+    operation_fingerprint: str = ""
+    normalization_recipe_hash: str = ""
+    requested_as_of: datetime | None = None
+    effective_valuation_timestamp: datetime | None = None
+    valuation_timestamp_rule: str = ""
+    #: The universe this operation expected, and the rule establishing the
+    #: open-interest settlement date. Both change what a chain *means* --
+    #: completeness, confidence, and the weight on every GEX term -- so both are
+    #: fixed by the operation rather than supplied at calculation time. v2.1.7
+    #: took the expected universe as an argument to the calculation, so one
+    #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
+    expected_universe_fingerprint: str = ""
+    open_interest_date_rule_fingerprint: str = ""
 
     @property
     def capture_identity(self) -> CaptureIdentity:
@@ -224,6 +286,16 @@ class RawResponseRecord:
             request_spec_fingerprint=self.request_spec_fingerprint,
             normalization_recipe_fingerprint=self.normalization_recipe_fingerprint,
             capture_origin=self.capture_origin,
+            operation_id=self.operation_id,
+            operation_fingerprint=self.operation_fingerprint,
+            normalization_recipe_hash=self.normalization_recipe_hash,
+            requested_as_of=self.requested_as_of,
+            effective_valuation_timestamp=self.effective_valuation_timestamp,
+            valuation_timestamp_rule=self.valuation_timestamp_rule,
+            expected_universe_fingerprint=self.expected_universe_fingerprint,
+            open_interest_date_rule_fingerprint=(
+                self.open_interest_date_rule_fingerprint
+            ),
         )
 
     @property
@@ -248,12 +320,18 @@ class RawResponseRecord:
             "request_sequence": self.request_sequence,
             "capture_complete": self.capture_complete,
             "capture_origin": self.capture_origin.value,
-            "capture_session_id": self.capture_session_id,
-            "pipeline_fingerprint": self.pipeline_fingerprint,
-            "capture_plan_fingerprint": self.capture_plan_fingerprint,
-            "request_spec_fingerprint": self.request_spec_fingerprint,
-            "normalization_recipe_fingerprint": self.normalization_recipe_fingerprint,
+            **self.capture_identity.as_dict(),
         }
+
+
+def _moment_or_none(value: Any) -> datetime | None:
+    """An ISO timestamp read back from the index, or ``None``."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def payload_hash(payload: str) -> str:
@@ -694,6 +772,24 @@ class InMemoryRawStore:
             normalization_recipe_fingerprint=(
                 identity.normalization_recipe_fingerprint if identity else ""
             ),
+            operation_id=identity.operation_id if identity else "",
+            operation_fingerprint=identity.operation_fingerprint if identity else "",
+            normalization_recipe_hash=(
+                identity.normalization_recipe_hash if identity else ""
+            ),
+            requested_as_of=identity.requested_as_of if identity else None,
+            effective_valuation_timestamp=(
+                identity.effective_valuation_timestamp if identity else None
+            ),
+            valuation_timestamp_rule=(
+                identity.valuation_timestamp_rule if identity else ""
+            ),
+            expected_universe_fingerprint=(
+                identity.expected_universe_fingerprint if identity else ""
+            ),
+            open_interest_date_rule_fingerprint=(
+                identity.open_interest_date_rule_fingerprint if identity else ""
+            ),
         )
         self._records[record_id] = record
         self._payloads[record_id] = payload
@@ -799,6 +895,24 @@ class FileRawStore:
             ),
             normalization_recipe_fingerprint=(
                 identity.normalization_recipe_fingerprint if identity else ""
+            ),
+            operation_id=identity.operation_id if identity else "",
+            operation_fingerprint=identity.operation_fingerprint if identity else "",
+            normalization_recipe_hash=(
+                identity.normalization_recipe_hash if identity else ""
+            ),
+            requested_as_of=identity.requested_as_of if identity else None,
+            effective_valuation_timestamp=(
+                identity.effective_valuation_timestamp if identity else None
+            ),
+            valuation_timestamp_rule=(
+                identity.valuation_timestamp_rule if identity else ""
+            ),
+            expected_universe_fingerprint=(
+                identity.expected_universe_fingerprint if identity else ""
+            ),
+            open_interest_date_rule_fingerprint=(
+                identity.open_interest_date_rule_fingerprint if identity else ""
             ),
         )
         # Atomic write: temp file -> flush -> fsync -> rename. A crash midway
@@ -1071,6 +1185,20 @@ class FileRawStore:
                     normalization_recipe_fingerprint=data.get(
                         "normalization_recipe_fingerprint", ""
                     ),
+                    operation_id=data.get("operation_id", ""),
+                    operation_fingerprint=data.get("operation_fingerprint", ""),
+                    normalization_recipe_hash=data.get("normalization_recipe_hash", ""),
+                    requested_as_of=_moment_or_none(data.get("requested_as_of")),
+                    effective_valuation_timestamp=_moment_or_none(
+                        data.get("effective_valuation_timestamp")
+                    ),
+                    valuation_timestamp_rule=data.get("valuation_timestamp_rule", ""),
+                    expected_universe_fingerprint=data.get(
+                        "expected_universe_fingerprint", ""
+                    ),
+                    open_interest_date_rule_fingerprint=data.get(
+                        "open_interest_date_rule_fingerprint", ""
+                    ),
                 )
             )
         return tuple(out)
@@ -1121,6 +1249,24 @@ class NullRawStore:
             ),
             normalization_recipe_fingerprint=(
                 identity.normalization_recipe_fingerprint if identity else ""
+            ),
+            operation_id=identity.operation_id if identity else "",
+            operation_fingerprint=identity.operation_fingerprint if identity else "",
+            normalization_recipe_hash=(
+                identity.normalization_recipe_hash if identity else ""
+            ),
+            requested_as_of=identity.requested_as_of if identity else None,
+            effective_valuation_timestamp=(
+                identity.effective_valuation_timestamp if identity else None
+            ),
+            valuation_timestamp_rule=(
+                identity.valuation_timestamp_rule if identity else ""
+            ),
+            expected_universe_fingerprint=(
+                identity.expected_universe_fingerprint if identity else ""
+            ),
+            open_interest_date_rule_fingerprint=(
+                identity.open_interest_date_rule_fingerprint if identity else ""
             ),
         )
 
@@ -1320,6 +1466,23 @@ class CaptureSession:
     capture_plan_fingerprint: str = ""
     request_spec_fingerprint: str = ""
     normalization_recipe_fingerprint: str = ""
+    #: Which operation this session is currently issuing records for. A session
+    #: may run several -- a chain pull, a later re-pull, a paginated sweep --
+    #: and each fixes its own valuation instant.
+    operation_id: str = ""
+    operation_fingerprint: str = ""
+    normalization_recipe_hash: str = ""
+    requested_as_of: datetime | None = None
+    effective_valuation_timestamp: datetime | None = None
+    valuation_timestamp_rule: str = ""
+    #: The universe this operation expected, and the rule establishing the
+    #: open-interest settlement date. Both change what a chain *means* --
+    #: completeness, confidence, and the weight on every GEX term -- so both are
+    #: fixed by the operation rather than supplied at calculation time. v2.1.7
+    #: took the expected universe as an argument to the calculation, so one
+    #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
+    expected_universe_fingerprint: str = ""
+    open_interest_date_rule_fingerprint: str = ""
     _sequence: int = 0
 
     @property
@@ -1332,6 +1495,16 @@ class CaptureSession:
             request_spec_fingerprint=self.request_spec_fingerprint,
             normalization_recipe_fingerprint=self.normalization_recipe_fingerprint,
             capture_origin=self.capture_origin,
+            operation_id=self.operation_id,
+            operation_fingerprint=self.operation_fingerprint,
+            normalization_recipe_hash=self.normalization_recipe_hash,
+            requested_as_of=self.requested_as_of,
+            effective_valuation_timestamp=self.effective_valuation_timestamp,
+            valuation_timestamp_rule=self.valuation_timestamp_rule,
+            expected_universe_fingerprint=self.expected_universe_fingerprint,
+            open_interest_date_rule_fingerprint=(
+                self.open_interest_date_rule_fingerprint
+            ),
         )
 
     def next_sequence(self) -> int:
@@ -1434,6 +1607,21 @@ class ManifestRecord:
     capture_plan_fingerprint: str = ""
     request_spec_fingerprint: str = ""
     normalization_recipe_fingerprint: str = ""
+    #: Which capture operation issued this record. A session may run several.
+    operation_id: str = ""
+    operation_fingerprint: str = ""
+    normalization_recipe_hash: str = ""
+    requested_as_of: datetime | None = None
+    effective_valuation_timestamp: datetime | None = None
+    valuation_timestamp_rule: str = ""
+    #: The universe this operation expected, and the rule establishing the
+    #: open-interest settlement date. Both change what a chain *means* --
+    #: completeness, confidence, and the weight on every GEX term -- so both are
+    #: fixed by the operation rather than supplied at calculation time. v2.1.7
+    #: took the expected universe as an argument to the calculation, so one
+    #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
+    expected_universe_fingerprint: str = ""
+    open_interest_date_rule_fingerprint: str = ""
 
     @property
     def capture_identity(self) -> CaptureIdentity:
@@ -1444,6 +1632,16 @@ class ManifestRecord:
             request_spec_fingerprint=self.request_spec_fingerprint,
             normalization_recipe_fingerprint=self.normalization_recipe_fingerprint,
             capture_origin=self.capture_origin,
+            operation_id=self.operation_id,
+            operation_fingerprint=self.operation_fingerprint,
+            normalization_recipe_hash=self.normalization_recipe_hash,
+            requested_as_of=self.requested_as_of,
+            effective_valuation_timestamp=self.effective_valuation_timestamp,
+            valuation_timestamp_rule=self.valuation_timestamp_rule,
+            expected_universe_fingerprint=self.expected_universe_fingerprint,
+            open_interest_date_rule_fingerprint=(
+                self.open_interest_date_rule_fingerprint
+            ),
         )
 
     @classmethod
@@ -1468,6 +1666,16 @@ class ManifestRecord:
             capture_plan_fingerprint=record.capture_plan_fingerprint,
             request_spec_fingerprint=record.request_spec_fingerprint,
             normalization_recipe_fingerprint=record.normalization_recipe_fingerprint,
+            operation_id=record.operation_id,
+            operation_fingerprint=record.operation_fingerprint,
+            normalization_recipe_hash=record.normalization_recipe_hash,
+            requested_as_of=record.requested_as_of,
+            effective_valuation_timestamp=record.effective_valuation_timestamp,
+            valuation_timestamp_rule=record.valuation_timestamp_rule,
+            expected_universe_fingerprint=record.expected_universe_fingerprint,
+            open_interest_date_rule_fingerprint=(
+                record.open_interest_date_rule_fingerprint
+            ),
         )
 
     def semantic_payload(self) -> dict[str, Any]:

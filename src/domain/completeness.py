@@ -17,7 +17,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-__all__ = ["COMPLETENESS_WARNING_CODE", "CompletenessStatus"]
+__all__ = [
+    "COMPLETENESS_WARNING_CODE",
+    "ChainCompleteness",
+    "CompletenessStatus",
+    "ExpectedContractUniverse",
+]
 
 #: Emitted verbatim by the confidence model whenever completeness could not be
 #: measured. Deterministic so that a log scraper can match on it.
@@ -294,6 +299,40 @@ class ChainCompleteness:
     def _sample(self, identities: tuple[str, ...]) -> tuple[list[str], bool]:
         limit = self.IDENTITY_SAMPLE_LIMIT
         return list(identities[:limit]), len(identities) > limit
+
+    def semantic_payload(self) -> dict[str, Any]:
+        """Everything a calculation depends on, with no identity list truncated.
+
+        Distinct from ``as_dict`` on purpose. ``as_dict`` is for reports and
+        samples the identity lists at 100 entries, because a 5,000-contract
+        mismatch is a real possibility on a full SPX chain and a 5,000-entry
+        blob in every snapshot's metadata helps nobody.
+
+        A *hash* cannot sample. Two chains differing only in the 101st missing
+        identity are two different chains, and the confidence score reads the
+        counts those identities produce. So this returns the whole sets, sorted,
+        and it is what ``canonical_chain_payload`` covers.
+        """
+        return {
+            "status": self.status.value,
+            "expected_source": self.expected_source,
+            "independently_observed": self.independently_observed,
+            "expected_contract_ids": (
+                sorted(self.expected_contract_ids)
+                if self.expected_contract_ids is not None
+                else None
+            ),
+            "received_contract_ids": sorted(self.received_contract_ids),
+            "matched_identities": sorted(self._expected & self._received),
+            "missing_expected_identities": list(self.missing_expected_identities),
+            "unexpected_received_identities": list(self.unexpected_received_identities),
+            "identity_completeness_ratio": self.identity_completeness_ratio,
+            "received_quote_count": self.received_quote_count,
+            "received_oi_count": self.received_oi_count,
+            "received_iv_count": self.received_iv_count,
+            "received_greeks_count": self.received_greeks_count,
+            "missing_by_source": dict(sorted(self.missing_by_source.items())),
+        }
 
     def as_dict(self) -> dict[str, Any]:
         missing, missing_truncated = self._sample(self.missing_expected_identities)

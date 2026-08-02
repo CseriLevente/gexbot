@@ -203,6 +203,11 @@ Rules that are easy to break by accident and expensive to discover later:
 - no credential literals — literal-shaped rather than keyword-shaped, because
   reading a credential from the environment necessarily mentions the word
   "password"
+- **no calculation-affecting read from `snapshot.meta`** (v2.1.8) — AST-based,
+  over the modules that compute. `meta` is an open dictionary a caller can write
+  anything into, and a forged `chain_completeness_object` moved a *trusted*
+  confidence score from 52.0619 to 57.3394. Anything that changes a number is a
+  typed field; `meta` may describe a calculation and must not alter one
 
 ### Coverage
 
@@ -223,14 +228,16 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.7` | `pyproject.toml` | anything ships |
-| Parser version | `thetadata-v3-parser/2.1.7` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
-| Engine version | `gex-engine/2.1.7` | `src/domain/model_spec.py` | the numerics change |
-| Manifest schema | `raw-capture-manifest/2.1.7` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
-| Certification schema | `adapter-certification/2.1.7` | `src/adapters/certification.py` | what a readiness verdict means changes |
-| Validation schema | `adapter-validation/2.1.7` | `src/adapters/validation.py` | what a validation report means changes |
-| Normalization schema | `normalized-chain/2.1.7` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
-| Request-spec schema | `thetadata-request-spec/2.1.7` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
+| Package version | `2.1.8` | `pyproject.toml` | anything ships |
+| Parser version | `thetadata-v3-parser/2.1.8` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
+| Engine version | `gex-engine/2.1.8` | `src/domain/model_spec.py` | the numerics change |
+| Manifest schema | `raw-capture-manifest/2.1.8` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
+| Certification schema | `adapter-certification/2.1.8` | `src/adapters/certification.py` | what a readiness verdict means changes |
+| Validation schema | `adapter-validation/2.1.8` | `src/adapters/validation.py` | what a validation report means changes |
+| Normalization schema | `normalized-chain/2.1.8` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
+| Request-spec schema | `thetadata-request-spec/2.1.8` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
+| Capture-operation schema | `capture-operation/2.1.8` | `src/adapters/capture_operation.py` | what one capture operation fixes changes |
+| Expected-universe schema | `expected-universe/2.1.8` | `src/domain/expected_universe.py` | what a universe hash covers changes |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

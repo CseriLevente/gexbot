@@ -305,6 +305,24 @@ class FakeTransport:
         return [call.timeout_seconds for call in self.calls]
 
 
+@dataclass(frozen=True, slots=True)
+class ConsumedRecord:
+    """One stored record, as normalization actually consumed it."""
+
+    record_id: str
+    endpoint: str
+    serve_order: int
+    parameters: tuple[tuple[str, str], ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "record_id": self.record_id,
+            "endpoint": self.endpoint,
+            "serve_order": self.serve_order,
+            "parameters": dict(self.parameters),
+        }
+
+
 class StoredPayloadTransport:
     """Answers from a verified capture instead of from the vendor.
 
@@ -329,12 +347,28 @@ class StoredPayloadTransport:
     #: say what they are.
     capture_origin = "OFFLINE_FIXTURE"
 
-    def __init__(self, responses: Mapping[str, list[str]]) -> None:
+    def __init__(
+        self,
+        responses: Mapping[str, list[str]],
+        *,
+        record_ids: Mapping[str, list[str]] | None = None,
+    ) -> None:
         self._queues = {
             endpoint: list(bodies) for endpoint, bodies in responses.items()
         }
+        self._record_ids = {
+            endpoint: list(ids) for endpoint, ids in (record_ids or {}).items()
+        }
         self._served: dict[str, int] = {}
         self.calls: list[RecordedCall] = []
+        #: Which stored records normalization actually consumed, in order, with
+        #: the parameters each was served against. v2.1.7 replayed a capture and
+        #: never asked whether the replay used *all* of it -- so a capture with
+        #: one extra quote response replayed from the first, matched the
+        #: original, and verified. Bytes nobody consumed are bytes nobody
+        #: checked, sitting inside a manifest that claims they produced the
+        #: number.
+        self.consumed: list[ConsumedRecord] = []
 
     @classmethod
     def from_capture(cls, *, manifest: Any, store: Any) -> StoredPayloadTransport:
@@ -344,19 +378,28 @@ class StoredPayloadTransport:
         order responses arrived in is part of what the session did.
         """
         records = {record.record_id: record for record in store.records()}
-        by_endpoint: dict[str, list[tuple[int, str]]] = {}
+        by_endpoint: dict[str, list[tuple[int, str, str]]] = {}
         for entry in manifest.records:
             record = records.get(entry.record_id)
             if record is None:
                 continue
             by_endpoint.setdefault(record.endpoint, []).append(
-                (record.request_sequence, store.get_payload(entry.record_id))
+                (
+                    record.request_sequence,
+                    store.get_payload(entry.record_id),
+                    entry.record_id,
+                )
             )
+        ordered = {endpoint: sorted(items) for endpoint, items in by_endpoint.items()}
         return cls(
             {
-                endpoint: [payload for _, payload in sorted(items)]
-                for endpoint, items in by_endpoint.items()
-            }
+                endpoint: [payload for _, payload, _ in items]
+                for endpoint, items in ordered.items()
+            },
+            record_ids={
+                endpoint: [record_id for _, _, record_id in items]
+                for endpoint, items in ordered.items()
+            },
         )
 
     def get(
@@ -380,6 +423,17 @@ class StoredPayloadTransport:
                     "capture produced."
                 )
             self._served[endpoint] = index + 1
+            served_ids = self._record_ids.get(endpoint, [])
+            self.consumed.append(
+                ConsumedRecord(
+                    record_id=(served_ids[index] if index < len(served_ids) else ""),
+                    endpoint=endpoint,
+                    serve_order=len(self.consumed),
+                    parameters=tuple(
+                        sorted((str(k), str(v)) for k, v in params.items())
+                    ),
+                )
+            )
             return HttpResponse(
                 status_code=200, text=bodies[index], url=url, request_id="replay"
             )

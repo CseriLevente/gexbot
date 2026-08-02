@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.7.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.8.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,27 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.7.zip
+sha256sum gex-bot-v2.1.8.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.7.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.8.zip -Algorithm SHA256
+```
+
+### The digest must describe the file that was uploaded
+
+`git archive` output goes out **as-is**. Do not re-zip it, do not place it in a
+development directory and archive that, and do not let a transfer tool wrap it.
+
+The reason is narrow and it matters: a wrapper is a different file with a
+different digest, so the SHA-256 in the release notes would describe something
+nobody downloaded. A recipient checking the hash of what they actually received
+would get a mismatch and have no way to tell an innocent re-wrap from a
+substituted artefact. Verify the digest against the uploaded file, after upload:
+
+```powershell
+Get-FileHash .\gex-bot-v2.1.8.zip -Algorithm SHA256   # the file being sent
 ```
 
 ---

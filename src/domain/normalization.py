@@ -53,6 +53,7 @@ __all__ = [
     "NORMALIZATION_SCHEMA_VERSION",
     "NormalizationRecipe",
     "NormalizedChainReceipt",
+    "RecordConsumptionReport",
     "canonical_chain_hash",
     "canonical_chain_payload",
 ]
@@ -60,7 +61,7 @@ __all__ = [
 #: Bumped when the *meaning* of a normalized-chain hash changes -- a new field
 #: covered, a different rendering. A receipt taken under older rules must not be
 #: compared against one taken under newer ones and read as a mismatch of data.
-NORMALIZATION_SCHEMA_VERSION = "normalized-chain/2.1.7"
+NORMALIZATION_SCHEMA_VERSION = "normalized-chain/2.1.8"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,14 +141,22 @@ class NormalizationRecipe:
         the clock moved, which is a check that tests the wrong thing.
 
         The per-fetch parameters are not thereby unverified: ``as_of`` is on the
-        chain and is hashed by ``canonical_chain_hash``, and the settlement date
-        has its own evidence type.
+        chain and is hashed by ``canonical_chain_hash``, the settlement date has
+        its own evidence type, and the expected universe is stamped on the
+        records in its own right and checked by ``resolve_operation``. All three
+        are excluded here for the same reason -- they belong to one operation,
+        not to the configuration a record is verified against.
         """
         payload = json.dumps(
             {
                 key: value
                 for key, value in self.semantic_payload().items()
-                if key not in ("as_of", "open_interest_as_of")
+                if key
+                not in (
+                    "as_of",
+                    "open_interest_as_of",
+                    "expected_universe_fingerprint",
+                )
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -159,6 +168,116 @@ class NormalizationRecipe:
             **self.semantic_payload(),
             "recipe_hash": self.recipe_hash,
             "rules_fingerprint": self.rules_fingerprint,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RecordConsumptionReport:
+    """Which stored records normalization consumed, against which it was given.
+
+    v2.1.7 replayed a capture and never asked whether the replay used *all* of
+    it. A capture with one extra quote response replayed from the first, matched
+    the original chain, and verified -- so a manifest could claim bytes that
+    produced nothing, and a verified capture could contain a response nobody had
+    ever parsed.
+
+    Assigned and consumed must be the same set, each record exactly once. The
+    only exception is a capture plan that explicitly declares why an endpoint
+    has several: pagination, batched expirations, retained retries, or requested
+    partitions. Anything else is a duplicate nobody accounted for.
+    """
+
+    assigned_record_ids: tuple[str, ...] = ()
+    consumed_record_ids: tuple[str, ...] = ()
+    #: ``(record_id, endpoint, serve_order)`` in the order normalization asked.
+    serve_order: tuple[tuple[str, str, int], ...] = ()
+    #: Endpoints the capture plan allows to appear more than once, and why.
+    declared_multiples: tuple[tuple[str, str], ...] = ()
+    #: ``(record_id, endpoint)`` for everything the manifest assigned, so an
+    #: endpoint answering twice can be recognised as such rather than surfacing
+    #: only as an unconsumed record id.
+    assigned_endpoints: tuple[tuple[str, str], ...] = ()
+    schema_version: str = NORMALIZATION_SCHEMA_VERSION
+
+    @property
+    def unconsumed(self) -> tuple[str, ...]:
+        """Assigned but never parsed. Bytes nobody checked."""
+        return tuple(
+            sorted(set(self.assigned_record_ids) - set(self.consumed_record_ids))
+        )
+
+    @property
+    def unassigned(self) -> tuple[str, ...]:
+        """Consumed but not in the manifest. Should be impossible; checked anyway."""
+        return tuple(
+            sorted(set(self.consumed_record_ids) - set(self.assigned_record_ids))
+        )
+
+    @property
+    def repeated(self) -> tuple[str, ...]:
+        seen: dict[str, int] = {}
+        for record_id in self.consumed_record_ids:
+            seen[record_id] = seen.get(record_id, 0) + 1
+        return tuple(sorted(r for r, n in seen.items() if n > 1))
+
+    @property
+    def undeclared_multiples(self) -> tuple[str, ...]:
+        """Endpoints that answered twice under a plan expecting one answer.
+
+        Reported separately from ``unconsumed`` because it is a different fault
+        and has a different fix. An unconsumed record means the replay skipped
+        bytes; two records for one endpoint means the *capture* holds a response
+        the plan cannot account for, and the question is which of them the chain
+        was built from. Naming it here means the report says "the plan declares
+        no pagination for this endpoint" rather than leaving a reader to infer
+        it from a record id.
+        """
+        counts: dict[str, int] = {}
+        for _, endpoint in self.assigned_endpoints:
+            counts[endpoint] = counts.get(endpoint, 0) + 1
+        declared = {endpoint for endpoint, _ in self.declared_multiples}
+        return tuple(
+            sorted(e for e, n in counts.items() if n > 1 and e not in declared)
+        )
+
+    @property
+    def exact(self) -> bool:
+        """Every assigned record consumed, exactly once, and nothing else."""
+        return not (
+            self.unconsumed
+            or self.unassigned
+            or self.repeated
+            or self.undeclared_multiples
+        )
+
+    def semantic_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "assigned_record_ids": sorted(self.assigned_record_ids),
+            "consumed_record_ids": list(self.consumed_record_ids),
+            "serve_order": [list(entry) for entry in self.serve_order],
+            "declared_multiples": [list(entry) for entry in self.declared_multiples],
+            "assigned_endpoints": sorted(
+                list(entry) for entry in self.assigned_endpoints
+            ),
+        }
+
+    @property
+    def consumption_hash(self) -> str:
+        payload = json.dumps(
+            self.semantic_payload(), sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.semantic_payload(),
+            "consumption_hash": self.consumption_hash,
+            "exact": self.exact,
+            "unconsumed": list(self.unconsumed),
+            "unassigned": list(self.unassigned),
+            "repeated": list(self.repeated),
+            "undeclared_multiples": list(self.undeclared_multiples),
         }
 
 
@@ -176,6 +295,15 @@ class NormalizedChainReceipt:
     normalized_chain_hash: str
     contract_count: int
     parser_version: str
+    #: The whole of what one capture operation fixed, including the instant
+    #: every gamma was priced against.
+    operation_fingerprint: str = ""
+    #: Which records the re-derivation actually consumed. A receipt that named
+    #: a manifest without saying whether all of it was used would let a capture
+    #: carry bytes nobody parsed.
+    consumption_hash: str = ""
+    #: The independently observed universe completeness was measured against.
+    expected_universe_hash: str | None = None
     schema_version: str = NORMALIZATION_SCHEMA_VERSION
 
     def matches(self, other: NormalizedChainReceipt) -> bool:
@@ -187,6 +315,9 @@ class NormalizedChainReceipt:
             and self.normalized_chain_hash == other.normalized_chain_hash
             and self.contract_count == other.contract_count
             and self.parser_version == other.parser_version
+            and self.operation_fingerprint == other.operation_fingerprint
+            and self.consumption_hash == other.consumption_hash
+            and self.expected_universe_hash == other.expected_universe_hash
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -197,6 +328,9 @@ class NormalizedChainReceipt:
             "normalized_chain_hash": self.normalized_chain_hash,
             "contract_count": self.contract_count,
             "parser_version": self.parser_version,
+            "operation_fingerprint": self.operation_fingerprint,
+            "consumption_hash": self.consumption_hash,
+            "expected_universe_hash": self.expected_universe_hash,
         }
 
 
@@ -307,6 +441,15 @@ def canonical_chain_payload(chain: Any) -> dict[str, Any]:
         "expected_contract_count": chain.expected_contract_count,
         "completeness_status": getattr(
             chain.completeness_status, "value", str(chain.completeness_status)
+        ),
+        # The whole completeness measure, untruncated. It drives the confidence
+        # score, and until v2.1.8 it travelled in ``meta`` -- which this hash
+        # does not cover -- so a forged completeness object moved a trusted
+        # score from 52.0619 to 57.3394 while the chain hashed identically.
+        "completeness": (
+            chain.completeness.semantic_payload()
+            if chain.completeness is not None
+            else None
         ),
         "effective_model_fingerprint": _effective_model_fingerprint(chain),
         "quotes": sorted(

@@ -47,6 +47,7 @@ from src.config.thetadata import (
     ThetaDataConfigError,
     ThetaDataRuntime,
 )
+from src.domain.digests import short_id
 from src.domain.iv import IVSource
 from src.domain.model_spec import (
     DividendSource,
@@ -774,7 +775,7 @@ def _chain_fingerprint(chain: Any) -> str:
         separators=(",", ":"),
         default=str,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _open_interest_as_of(chain: Any) -> Any:
@@ -1141,6 +1142,8 @@ class ThetaDataResearchPipeline:
         as_of: datetime,
         capture_origin: Any = None,
         open_interest_as_of: date | None = None,
+        expected_universe: Any = None,
+        open_interest_date_rule_fingerprint: str | None = None,
     ) -> Any:
         """A capture session stamped with this pipeline's identity.
 
@@ -1154,7 +1157,18 @@ class ThetaDataResearchPipeline:
         from src.adapters.thetadata.client import capture_origin_of
 
         recipe = self.normalization_recipe(
-            as_of=as_of, open_interest_as_of=open_interest_as_of
+            as_of=as_of,
+            open_interest_as_of=open_interest_as_of,
+            expected_universe_fingerprint=(
+                expected_universe.universe_hash if expected_universe else None
+            ),
+        )
+        operation = self.begin_operation(
+            requested_as_of=as_of,
+            session_id=session_id,
+            open_interest_as_of=open_interest_as_of,
+            expected_universe=expected_universe,
+            open_interest_date_rule_fingerprint=open_interest_date_rule_fingerprint,
         )
         return CaptureSession(
             store=store,
@@ -1172,6 +1186,25 @@ class ThetaDataResearchPipeline:
             # full recipe hash would bind the record to one market
             # instant, and verification would have to guess it back.
             normalization_recipe_fingerprint=recipe.rules_fingerprint,
+            # The operation. This is what carries the per-fetch inputs -- above
+            # all the instant every gamma is priced against, which v2.1.7 left
+            # unbound so the chain under test could choose it.
+            operation_id=operation.operation_id,
+            operation_fingerprint=operation.operation_fingerprint,
+            normalization_recipe_hash=recipe.recipe_hash,
+            requested_as_of=operation.requested_as_of,
+            effective_valuation_timestamp=operation.effective_valuation_timestamp,
+            valuation_timestamp_rule=operation.valuation_timestamp_rule.value,
+            # The universe and the settlement rule this operation was opened
+            # under. Stamped rather than passed at calculation time, so a replay
+            # is measured against the universe the capture expected instead of
+            # whichever one the caller happens to hold.
+            expected_universe_fingerprint=(
+                expected_universe.universe_hash if expected_universe else ""
+            ),
+            open_interest_date_rule_fingerprint=(
+                open_interest_date_rule_fingerprint or ""
+            ),
         )
 
     def _capture_index_spot(
@@ -1251,6 +1284,293 @@ class ThetaDataResearchPipeline:
 
     # -- binding a normalized chain to the bytes behind it --------------------
 
+    # -- the capture operation ------------------------------------------------
+
+    @property
+    def valuation_timestamp_rule(self) -> Any:
+        """Which instant this session prices against, and where it comes from.
+
+        Under ``vendor_index_snapshot`` the answer is the clock the index print
+        carried: it is in the verified bytes, and it is the instant the
+        underlying every gamma rests on was actually observed. Anything else
+        falls back to the capture request instant, which is a fact about this
+        process rather than about the market and does not support a trusted
+        calculation on its own.
+        """
+        from src.adapters.capture_operation import ValuationTimestampRule
+
+        if self.config.underlying_price_source == "vendor_index_snapshot":
+            return ValuationTimestampRule.INDEX_PRINT_TIMESTAMP
+        return ValuationTimestampRule.CAPTURE_REQUEST_INSTANT
+
+    @property
+    def spot_synchronization_policy(self) -> dict[str, Any]:
+        """The tolerance a spot print must meet, and where it came from.
+
+        Configuration, not an argument. v2.1.7 let a caller construct a
+        ``SpotProvenance`` with any ``tolerance_seconds`` it liked and hand it to
+        the trusted path, so one calculation could be granted a wider window
+        than the pipeline was configured for -- and the skew check is the only
+        thing standing between a chain and an underlying it never saw.
+        """
+        return {
+            "max_spot_skew_seconds": self.config.max_spot_skew_seconds,
+            "underlying_price_source": self.config.underlying_price_source,
+            "valuation_timestamp_rule": self.valuation_timestamp_rule.value,
+        }
+
+    @property
+    def spot_synchronization_policy_fingerprint(self) -> str:
+        from src.domain.digests import digest_of
+
+        return digest_of(self.spot_synchronization_policy)
+
+    @property
+    def documentation_evidence_fingerprints(self) -> dict[str, str]:
+        """Every document this pipeline's conventions rest on, by content.
+
+        A pricing dimension resolved by vendor documentation is a load-bearing
+        answer sourced from a page the vendor controls. Until v2.1.8 the
+        reference travelled into the fingerprint and the *content* did not, so a
+        rewritten page changed nothing anywhere: the same fingerprint described
+        two different claims about how gamma should be priced.
+
+        Keyed by reference and sorted, so the mapping is stable and a reader of
+        the audit trail can see which documents were relied on and check them.
+        """
+        return {
+            observation.reference: observation.document_content_hash
+            for observation in sorted(
+                self.config.pricing_attestations, key=lambda o: o.reference
+            )
+            if observation.document_content_hash
+        }
+
+    def begin_operation(
+        self,
+        *,
+        requested_as_of: datetime,
+        session_id: str,
+        open_interest_as_of: date | None = None,
+        expected_universe: Any = None,
+        open_interest_date_rule_fingerprint: str | None = None,
+    ) -> Any:
+        """Fix everything one capture operation decides, before it runs.
+
+        The *provisional* identity: ``effective_valuation_timestamp`` equals the
+        requested instant, because no response has arrived yet and the rule that
+        will select it is recorded rather than guessed at. This is what every
+        record of the operation carries.
+
+        ``resolve_operation`` produces the settled identity afterwards, reading
+        the effective instant out of the verified bytes. The split is deliberate
+        -- a value stamped before the evidence exists would be an assertion, and
+        the whole point is that the instant is *derived*.
+        """
+        from src.adapters.capture_operation import (
+            CaptureOperationIdentity,
+            new_operation_id,
+        )
+
+        recipe = self.normalization_recipe(
+            as_of=requested_as_of,
+            open_interest_as_of=open_interest_as_of,
+            expected_universe_fingerprint=(
+                expected_universe.universe_hash if expected_universe else None
+            ),
+        )
+        return CaptureOperationIdentity(
+            operation_id=new_operation_id(as_of=requested_as_of),
+            session_id=session_id,
+            pipeline_fingerprint=self.fingerprint(),
+            capture_plan_fingerprint=self.capture_plan.fingerprint,
+            request_spec_fingerprint=recipe.request_spec_fingerprint,
+            normalization_recipe_hash=recipe.recipe_hash,
+            requested_as_of=requested_as_of,
+            effective_valuation_timestamp=requested_as_of,
+            valuation_timestamp_rule=self.valuation_timestamp_rule,
+            spot_synchronization_policy_fingerprint=(
+                self.spot_synchronization_policy_fingerprint
+            ),
+            open_interest_date_rule_fingerprint=open_interest_date_rule_fingerprint,
+            expected_universe_fingerprint=(
+                expected_universe.universe_hash if expected_universe else None
+            ),
+            parser_version=PARSER_VERSION,
+        )
+
+    def resolve_operation(
+        self, *, manifest: Any, store: Any, expected_universe: Any = None
+    ) -> Any:
+        """The settled operation identity, with the instant read from evidence.
+
+        Reconstructed from what the records were stamped with, then completed by
+        reading the index print out of the verified bytes. **Nothing here comes
+        from the chain being checked** -- that is the defect this closes. v2.1.7
+        rebuilt with ``as_of=chain.as_of``, so the chain under test chose the
+        timestamp it was tested against and a shifted one shifted the rebuild
+        with it.
+
+        ``expected_universe`` is checked against the stamp rather than adopted
+        from it. A universe supplied at calculation time decides completeness,
+        the confidence score and whether a dataset is fit to build on, and in
+        v2.1.7 it was an argument -- so the same capture could be scored
+        ``MEASURED_COMPLETE`` against one universe and replayed
+        ``PARTIALLY_OBSERVED`` against another. Two answers from the same bytes.
+        """
+        from src.adapters.capture_operation import (
+            CaptureOperationIdentity,
+            ValuationTimestampRule,
+        )
+
+        stamped = self._stamped_operation(manifest)
+        self._require_captured_universe(stamped, expected_universe)
+        rule = ValuationTimestampRule(stamped["valuation_timestamp_rule"])
+        effective = stamped["effective_valuation_timestamp"]
+        if rule is ValuationTimestampRule.INDEX_PRINT_TIMESTAMP:
+            effective = self._index_print_instant(manifest=manifest, store=store)
+
+        return CaptureOperationIdentity(
+            operation_id=stamped["operation_id"],
+            session_id=manifest.session_id,
+            pipeline_fingerprint=stamped["pipeline_fingerprint"],
+            capture_plan_fingerprint=stamped["capture_plan_fingerprint"],
+            request_spec_fingerprint=stamped["request_spec_fingerprint"],
+            normalization_recipe_hash=stamped["normalization_recipe_hash"],
+            requested_as_of=stamped["requested_as_of"],
+            effective_valuation_timestamp=effective,
+            valuation_timestamp_rule=rule,
+            spot_synchronization_policy_fingerprint=stamped[
+                "spot_synchronization_policy_fingerprint"
+            ],
+            open_interest_date_rule_fingerprint=stamped[
+                "open_interest_date_rule_fingerprint"
+            ],
+            expected_universe_fingerprint=stamped["expected_universe_fingerprint"],
+            parser_version=stamped["parser_version"],
+        )
+
+    @staticmethod
+    def _require_captured_universe(
+        stamped: dict[str, Any], expected_universe: Any
+    ) -> None:
+        """The universe a replay measures against must be the captured one."""
+        captured = stamped["expected_universe_fingerprint"]
+        supplied = (
+            expected_universe.universe_hash if expected_universe is not None else None
+        )
+        if captured == supplied:
+            return
+        if captured is None:
+            raise PipelineConsistencyError(
+                "an expected contract universe was supplied at calculation time, "
+                "and this capture operation declared none. Whether a chain is "
+                "complete is decided against the universe the capture expected; "
+                "one produced afterwards can be shaped to whatever arrived, "
+                f"which is what {expected_universe.display_id!r} would be doing "
+                "here. Declare it on capture_session()."
+            )
+        if supplied is None:
+            raise PipelineConsistencyError(
+                f"this capture operation was opened against expected universe "
+                f"{short_id(captured)}... and none was supplied for the "
+                "calculation. Dropping it would report a chain as complete by "
+                "having nothing to be incomplete against."
+            )
+        raise PipelineConsistencyError(
+            f"this capture operation expected universe {short_id(captured)}... "
+            f"and the calculation supplied {short_id(supplied)}.... The same "
+            "bytes would be MEASURED_COMPLETE against one and "
+            "PARTIALLY_OBSERVED against the other."
+        )
+
+    def _stamped_operation(self, manifest: Any) -> dict[str, Any]:
+        """What every record of this manifest agrees it was captured under.
+
+        Refuses a manifest whose records disagree. Two operations in one
+        manifest is not one operation, and picking a majority would be inventing
+        a session that did not happen.
+        """
+        if not manifest.records:
+            raise PipelineConsistencyError(
+                "the manifest names no records, so there is no operation to resolve"
+            )
+        stamps = {r.operation_fingerprint for r in manifest.records}
+        if len(stamps) != 1 or not stamps.pop():
+            raise PipelineConsistencyError(
+                "the records of this manifest were captured under "
+                f"{len({r.operation_fingerprint for r in manifest.records})} "
+                "different operations, or under none. A chain re-derived from a "
+                "mixture of operations was not produced by any of them."
+            )
+        first = manifest.records[0]
+        if first.requested_as_of is None:
+            raise PipelineConsistencyError(
+                f"record {first.record_id!r} carries no requested capture "
+                "instant, so the valuation timestamp it was captured for cannot "
+                "be recovered. Captures written before v2.1.8 are refused rather "
+                "than given a timestamp this process invented."
+            )
+        return {
+            "operation_id": first.operation_id,
+            "pipeline_fingerprint": first.pipeline_fingerprint,
+            "capture_plan_fingerprint": first.capture_plan_fingerprint,
+            "request_spec_fingerprint": first.request_spec_fingerprint,
+            "normalization_recipe_hash": first.normalization_recipe_hash,
+            "requested_as_of": first.requested_as_of,
+            "effective_valuation_timestamp": (
+                first.effective_valuation_timestamp or first.requested_as_of
+            ),
+            "valuation_timestamp_rule": (
+                first.valuation_timestamp_rule or self.valuation_timestamp_rule.value
+            ),
+            "spot_synchronization_policy_fingerprint": (
+                self.spot_synchronization_policy_fingerprint
+            ),
+            "open_interest_date_rule_fingerprint": (
+                first.open_interest_date_rule_fingerprint or None
+            ),
+            "expected_universe_fingerprint": (
+                first.expected_universe_fingerprint or None
+            ),
+            "parser_version": first.parser_version,
+        }
+
+    def _index_print_instant(self, *, manifest: Any, store: Any) -> datetime:
+        """The clock the captured index snapshot carried.
+
+        Read out of the stored bytes through the ordinary parser, so the instant
+        every gamma is priced against is one the vendor sent rather than one a
+        caller supplied.
+        """
+        from src.adapters.transport import StoredPayloadTransport
+        from src.config.thetadata import ThetaDataRuntime
+
+        replay = ThetaDataRuntime.from_config(
+            _replace(self.config, raw_capture_enabled=False, raw_capture_path=None),
+            symbol=self.runtime.default_chain_request.symbol,
+            transport=StoredPayloadTransport.from_capture(
+                manifest=manifest, store=store
+            ),
+        )
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
+
+        record = replay.client.fetch_index_snapshot(
+            symbol=replay.default_chain_request.symbol,
+            # Only a freshness reference for the fetch. The instant this method
+            # returns is the one the *payload* carried.
+            as_of=_datetime.now(_UTC),
+        )
+        if record is None or record.timestamp is None:
+            raise PipelineConsistencyError(
+                "the captured index snapshot carries no clock, so the instant "
+                "this chain was priced against cannot be derived from the "
+                "evidence. A trusted calculation cannot rest on a timestamp "
+                "nobody can point at."
+            )
+        return record.timestamp
+
     def request_spec(self) -> Any:
         """What this session would send to each endpoint of its plan.
 
@@ -1301,10 +1621,21 @@ class ThetaDataResearchPipeline:
             expected_universe_fingerprint=expected_universe_fingerprint,
         )
 
-    def rebuild_chain_from_capture(
-        self, *, manifest: Any, store: Any, recipe: Any
-    ) -> ChainSnapshot:
-        """Normalize the stored payloads again, under a stated recipe.
+    def rebuild_from_capture(
+        self,
+        *,
+        manifest: Any,
+        store: Any,
+        recipe: Any,
+        operation: Any = None,
+        expected_universe: Any = None,
+    ) -> tuple[ChainSnapshot, Any]:
+        """Normalize the stored payloads again, and say which ones were used.
+
+        Returns the chain *and* the consumption report, because the two answer
+        different questions and only one of them is a chain: v2.1.7 replayed a
+        capture without ever asking whether the replay used all of it, so a
+        capture carrying an extra unread response verified.
 
         Replays the capture through the ordinary fetch path with a transport
         that answers from the store. That is deliberate: a separate rebuilder
@@ -1329,26 +1660,74 @@ class ThetaDataResearchPipeline:
                 "the original and read as tampering."
             )
 
+        transport = StoredPayloadTransport.from_capture(manifest=manifest, store=store)
         replay = ThetaDataRuntime.from_config(
             # Capture is off for the rebuild. The evidence already exists; a
             # rebuild that wrote more of it would be appending to the audit
             # trail it is checking.
             _replace(self.config, raw_capture_enabled=False, raw_capture_path=None),
             symbol=self.runtime.default_chain_request.symbol,
-            transport=StoredPayloadTransport.from_capture(
-                manifest=manifest, store=store
-            ),
+            transport=transport,
         )
         spot, spot_timestamp = self._replayed_spot(
             runtime=replay, recipe=recipe, manifest=manifest, store=store
         )
-        return replay.fetch_chain(
-            as_of=recipe.as_of,
+        # The valuation instant comes from the *operation*, which resolved it
+        # from the verified index print. v2.1.7 used ``recipe.as_of``, and the
+        # recipe was built with ``as_of=chain.as_of`` -- so the chain being
+        # checked chose the timestamp it was checked against, and shifting it
+        # shifted the rebuild too.
+        as_of = (
+            operation.effective_valuation_timestamp
+            if operation is not None
+            else recipe.as_of
+        )
+        chain = replay.fetch_chain(
+            as_of=as_of,
             spot=spot,
             spot_timestamp=spot_timestamp,
             open_interest_as_of=recipe.open_interest_as_of,
             risk_free_rate=recipe.risk_free_rate or 0.0,
             dividend_yield=recipe.dividend_yield or 0.0,
+            expected_contract_ids=(
+                tuple(sorted(expected_universe.identities))
+                if expected_universe is not None
+                else None
+            ),
+            expected_source=(
+                expected_universe.source if expected_universe is not None else "none"
+            ),
+        )
+        return chain, self._consumption_report(manifest=manifest, transport=transport)
+
+    def rebuild_chain_from_capture(self, **kwargs: Any) -> ChainSnapshot:
+        """Just the chain, for callers that do not need the accounting."""
+        chain, _ = self.rebuild_from_capture(**kwargs)
+        return chain
+
+    def _consumption_report(self, *, manifest: Any, transport: Any) -> Any:
+        """Which records normalization consumed, against which it was given.
+
+        Returned alongside the chain rather than stashed on the pipeline: the
+        pipeline is frozen on purpose -- ``validate_integrity`` exists because
+        v2.1.4 let a caller replace its derived reports -- so a rebuild cannot
+        leave state behind for a later call to pick up.
+        """
+        from src.domain.normalization import RecordConsumptionReport
+
+        consumed = list(getattr(transport, "consumed", ()))
+        plan = self.capture_plan
+        return RecordConsumptionReport(
+            assigned_record_ids=tuple(sorted(r.record_id for r in manifest.records)),
+            consumed_record_ids=tuple(entry.record_id for entry in consumed),
+            serve_order=tuple(
+                (entry.record_id, entry.endpoint, entry.serve_order)
+                for entry in consumed
+            ),
+            declared_multiples=tuple(sorted(plan.declared_multiple_records)),
+            assigned_endpoints=tuple(
+                sorted((r.record_id, r.endpoint) for r in manifest.records)
+            ),
         )
 
     def _replayed_spot(
@@ -1378,9 +1757,16 @@ class ThetaDataResearchPipeline:
         return record.spot, record.timestamp
 
     def normalized_chain_receipt(
-        self, chain: ChainSnapshot, *, manifest: Any, recipe: Any
+        self,
+        chain: ChainSnapshot,
+        *,
+        manifest: Any,
+        recipe: Any,
+        operation: Any = None,
+        consumption: Any = None,
+        expected_universe: Any = None,
     ) -> Any:
-        """Name a chain by the evidence and the rules that produced it."""
+        """Name a chain by the evidence, the rules and the operation."""
         from src.domain.normalization import (
             NormalizedChainReceipt,
             canonical_chain_hash,
@@ -1392,6 +1778,17 @@ class ThetaDataResearchPipeline:
             normalized_chain_hash=canonical_chain_hash(chain),
             contract_count=len(chain.quotes),
             parser_version=PARSER_VERSION,
+            operation_fingerprint=(
+                operation.operation_fingerprint if operation is not None else ""
+            ),
+            consumption_hash=(
+                consumption.consumption_hash if consumption is not None else ""
+            ),
+            expected_universe_hash=(
+                expected_universe.universe_hash
+                if expected_universe is not None
+                else None
+            ),
         )
 
     # -- the two calculations ------------------------------------------------
@@ -1429,9 +1826,9 @@ class ThetaDataResearchPipeline:
         manifest: Any,
         store: Any,
         validation_report: Any = None,
-        spot_provenance: Any = None,
         open_interest_provenance: Any = None,
         open_interest_as_of_evidence: Any = None,
+        expected_universe: Any = None,
     ) -> Any:
         """Compute only when this call has itself derived the authority to.
 
@@ -1459,6 +1856,13 @@ class ThetaDataResearchPipeline:
         runs the verification, the validation re-derivation, the compatibility
         derivation and the chain rebuild itself, in that order, before computing.
 
+        **And no spot provenance.** v2.1.7 accepted a caller-built
+        ``SpotProvenance`` carrying a timestamp and a tolerance, and checked the
+        chain against *those* -- so a caller could claim 12:00 for a print the
+        vendor stamped 11:00, set ``chain.as_of`` to match, and be trusted. Both
+        are now derived: the timestamp from the verified index record, the
+        tolerance from the pipeline configuration.
+
         The returned snapshot carries the ``VerifiedCalculationContext`` this
         call produced. It remains a serialisable *report* of what was checked.
         """
@@ -1467,6 +1871,8 @@ class ThetaDataResearchPipeline:
         self.validate_integrity()
         _require_a_chain(chain, mode="trusted")
 
+        # Derived here, from the bytes, before anything else looks at it.
+        spot_provenance = self.derive_spot_provenance(manifest=manifest, store=store)
         context = build_verified_calculation_context(
             pipeline=self,
             manifest=manifest,
@@ -1477,7 +1883,11 @@ class ThetaDataResearchPipeline:
             open_interest_as_of_evidence=open_interest_as_of_evidence,
         )
         receipt = self._rederivation_refusals(
-            chain, manifest=manifest, store=store, context=context
+            chain,
+            manifest=manifest,
+            store=store,
+            context=context,
+            expected_universe=expected_universe,
         )
         refusals = [*self._context_refusals(chain, context), *receipt]
         if refusals:
@@ -1485,6 +1895,11 @@ class ThetaDataResearchPipeline:
                 "the evidence does not authorize a trusted calculation for this "
                 "chain: " + "; ".join(refusals)
             )
+        # After the refusals, which report a mismatched universe or an
+        # unresolvable operation as a reason rather than as a raw exception.
+        operation = self.resolve_operation(
+            manifest=manifest, store=store, expected_universe=expected_universe
+        )
         blockers = self.calculation_blockers(
             chain, report=context.effective_pricing_compatibility
         )
@@ -1508,14 +1923,69 @@ class ThetaDataResearchPipeline:
                 chain,
                 manifest=manifest,
                 recipe=self.normalization_recipe(
-                    as_of=chain.as_of,
+                    # The operation's instant, not the chain's. They are equal
+                    # by the time this runs -- the refusal above checked -- and
+                    # taking it from the operation says which one is the source.
+                    as_of=operation.effective_valuation_timestamp,
                     open_interest_as_of=_open_interest_as_of(chain),
+                    expected_universe_fingerprint=(
+                        expected_universe.universe_hash
+                        if expected_universe is not None
+                        else None
+                    ),
                 ),
+                operation=operation,
+                consumption=self.rebuild_from_capture(
+                    manifest=manifest,
+                    store=store,
+                    recipe=self.normalization_recipe(
+                        as_of=operation.effective_valuation_timestamp,
+                        open_interest_as_of=_open_interest_as_of(chain),
+                    ),
+                    operation=operation,
+                    expected_universe=expected_universe,
+                )[1],
+                expected_universe=expected_universe,
             ).as_dict(),
+            capture_operation=operation.as_dict(),
+        )
+
+    def derive_spot_provenance(self, *, manifest: Any, store: Any) -> Any:
+        """The underlying, its clock and its tolerance -- all from evidence.
+
+        Nothing here is a parameter. v2.1.7 took a ``SpotProvenance`` from the
+        caller and compared the chain against it, which made the two load-bearing
+        numbers -- the print's timestamp and the allowed skew -- assertions.
+        Claiming 12:00 for a print the vendor stamped 11:00, and setting
+        ``chain.as_of`` to match, produced a trusted result.
+        """
+        from src.adapters.certification import SpotProvenance, SpotSource
+        from src.adapters.thetadata.endpoints import Endpoint
+        from src.adapters.validation import AdapterValidator
+
+        observation = AdapterValidator.observe_field(
+            manifest=manifest,
+            store=store,
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT,
+            field_path="index_price",
+        )
+        return SpotProvenance(
+            source=SpotSource.VENDOR_INDEX_SNAPSHOT,
+            timestamp=observation.source_timestamp,
+            # Configuration, so it is in the pipeline fingerprint and every
+            # record stamped under it.
+            tolerance_seconds=self.config.max_spot_skew_seconds,
+            observation=observation,
         )
 
     def _rederivation_refusals(
-        self, chain: ChainSnapshot, *, manifest: Any, store: Any, context: Any
+        self,
+        chain: ChainSnapshot,
+        *,
+        manifest: Any,
+        store: Any,
+        context: Any,
+        expected_universe: Any = None,
     ) -> tuple[str, ...]:
         """Whether this chain is the one those raw records normalize to.
 
@@ -1536,12 +2006,42 @@ class ThetaDataResearchPipeline:
             # chain against bytes nobody has vouched for. The capture failure is
             # reported by ``_context_refusals``; this is not a second one.
             return ()
+
+        # The operation, resolved from the records and the verified index print.
+        # **Not from the chain.** v2.1.7 built the recipe with
+        # ``as_of=chain.as_of``, so the chain under test chose the instant it was
+        # tested against and any shift shifted the rebuild with it.
+        try:
+            operation = self.resolve_operation(
+                manifest=manifest, store=store, expected_universe=expected_universe
+            )
+        except PipelineConsistencyError as error:
+            return (f"the capture operation could not be resolved: {error}",)
+
+        valuation = operation.effective_valuation_timestamp
+        if chain.as_of != valuation:
+            return (
+                f"the chain is stamped {chain.as_of.isoformat()} but the capture "
+                f"operation priced against {valuation.isoformat()}, selected by "
+                f"{operation.valuation_timestamp_rule.value}. Time to expiry is "
+                "measured from that instant and drives every gamma, so the two "
+                "cannot differ.",
+            )
+
         recipe = self.normalization_recipe(
-            as_of=chain.as_of, open_interest_as_of=_open_interest_as_of(chain)
+            as_of=valuation,
+            open_interest_as_of=_open_interest_as_of(chain),
+            expected_universe_fingerprint=(
+                expected_universe.universe_hash if expected_universe else None
+            ),
         )
         try:
-            rederived = self.rebuild_chain_from_capture(
-                manifest=manifest, store=store, recipe=recipe
+            rederived, consumption = self.rebuild_from_capture(
+                manifest=manifest,
+                store=store,
+                recipe=recipe,
+                operation=operation,
+                expected_universe=expected_universe,
             )
         except PipelineConsistencyError as error:
             return (f"the chain could not be re-derived from its capture: {error}",)
@@ -1551,12 +2051,27 @@ class ThetaDataResearchPipeline:
                 f"{type(error).__name__}: {error}",
             )
 
+        # Every record assigned to this operation, consumed exactly once. A
+        # capture carrying a response nobody parsed is a capture claiming bytes
+        # that produced nothing -- v2.1.7 replayed the first quote response and
+        # never noticed the second.
+        if not consumption.exact:
+            return (
+                f"the re-derivation did not consume the capture exactly: "
+                f"{list(consumption.unconsumed)} were never parsed, "
+                f"{list(consumption.repeated)} were parsed more than once, "
+                f"{list(consumption.unassigned)} are not in the manifest, and "
+                f"{list(consumption.undeclared_multiples)} answered more than "
+                "once under a capture plan that declares no pagination, batched "
+                "expirations, retained retries or partitions for them",
+            )
+
         supplied, rebuilt = canonical_chain_hash(chain), canonical_chain_hash(rederived)
         if supplied == rebuilt:
             return ()
         return (
-            f"the supplied chain hashes to {supplied[:16]}... and the chain "
-            f"re-derived from its raw records hashes to {rebuilt[:16]}...; "
+            f"the supplied chain hashes to {short_id(supplied)}... and the chain "
+            f"re-derived from its raw records hashes to {short_id(rebuilt)}...; "
             f"{_first_field_difference(chain, rederived)}",
         )
 
@@ -1814,12 +2329,20 @@ class ThetaDataResearchPipeline:
                 "tier_capability": self.subscription_capability.as_dict()
                 if self.subscription_capability is not None
                 else None,
+                # Content, not citations. A vendor documentation page that
+                # resolves a load-bearing pricing dimension is an input to every
+                # number this pipeline produces, and rewriting it has to move
+                # this digest. Redundant with ``config.as_dict()`` since the
+                # hashes travel on the observations -- named separately because
+                # a requirement nobody can find is one that gets refactored away.
+                "documentation_evidence": self.documentation_evidence_fingerprints,
+                "spot_synchronization_policy": self.spot_synchronization_policy,
             },
             sort_keys=True,
             separators=(",", ":"),
             default=str,
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def as_dict(self) -> dict[str, Any]:
         return {

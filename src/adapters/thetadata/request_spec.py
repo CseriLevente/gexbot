@@ -36,7 +36,7 @@ __all__ = [
 
 #: Bumped when the *meaning* of a request spec changes, so a stamp taken under
 #: older rules cannot be silently compared against one taken under newer ones.
-REQUEST_SPEC_SCHEMA_VERSION = "thetadata-request-spec/2.1.7"
+REQUEST_SPEC_SCHEMA_VERSION = "thetadata-request-spec/2.1.8"
 
 #: Endpoints that accept the server-side filters. The index snapshot takes the
 #: symbol and nothing else, and sending it a strike range would be a request the

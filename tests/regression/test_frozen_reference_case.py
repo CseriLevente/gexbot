@@ -273,8 +273,30 @@ EXPECTED_COMPONENT_SCORES = {
 #      March session. Every total, bucket, per-strike value, wall, void, root
 #      and confidence component below is a hand-typed literal and all of them
 #      held.
+#  10. 3af3ef9c -> 128acd06, from v2.1.8. Classification:
+#      VERSION_METADATA_ONLY *and* REPRESENTATIONAL, which is why this one
+#      needs two measurements rather than one.
+#
+#      Two changes could reach this digest. The engine version moved,
+#      gex-engine/2.1.7 -> 2.1.8, as it does every release. And every
+#      internal fingerprint widened from sixteen hex characters to the full
+#      sixty-four -- the same SHA-256, more of it -- which shows up inside
+#      this payload because ``meta.model_fingerprint`` is part of it.
+#
+#      Measured separately. Pinning ``model_version`` back to 2.1.7 gives
+#      a1ff18f0..., not the v2.1.7 digest, so the version string is not the
+#      whole of the move. And the model fingerprint under that pin is
+#      ``1b353ba18cefb0a2cc8b4afd...``: character for character the v2.1.7
+#      value with forty-eight more characters after it. Same input, same
+#      hash, longer rendering. The config fingerprint behaves identically --
+#      ``ded3172bfee2682f`` -> ``ded3172bfee2682f7986dd9b...``.
+#
+#      So the two moves are: a version string, and a digest getting longer.
+#      Neither is an input to any calculation. Every total, bucket,
+#      per-strike value, wall, void, root and confidence component below is
+#      a hand-typed literal, and all of them held.
 EXPECTED_OUTPUT_HASH = (
-    "3af3ef9c77944577211e28d68b634e19690b8dae4ea51541d9269f13fa879293"
+    "128acd06a9a00e12d7e19ff60eef55c3635bd7a9920b6a18ac8aa1db3dcb1e04"
 )
 # v2.1.3: 8b5b7454ba7c5500 -> ded3172bfee2682f. Classification: BEHAVIORAL.
 #
@@ -287,7 +309,29 @@ EXPECTED_OUTPUT_HASH = (
 #
 # The fingerprint is *supposed* to move when the configuration does; a
 # config change that left it fixed would be the defect.
-EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
+# v2.1.8: ded3172bfee2682f -> ded3172bfee2682f7986dd9b7b65f2b582d216736da7c795
+# c030554ac6b763b9. Classification: REPRESENTATIONAL.
+#
+# The configuration did not change. The digest is the same SHA-256 rendered in
+# full rather than truncated to sixteen characters -- the old value is a literal
+# prefix of the new one, which is the check that distinguishes this from a
+# content change. Truncation was fine while a fingerprint was a description; it
+# stopped being fine once captures started being refused on fingerprint
+# inequality.
+EXPECTED_CONFIG_FINGERPRINT = (
+    "ded3172bfee2682f7986dd9b7b65f2b582d216736da7c795c030554ac6b763b9"
+)
+# v2.1.8: 1b353ba18cefb0a2 -> 79f3abe506978342c52b31481f16f7ff61ac6f4824b5
+# 86d4d7020a37a4e73d83. Classification: VERSION_METADATA_ONLY and
+# REPRESENTATIONAL, measured apart.
+#
+# Pin ``model_version`` back to gex-engine/2.1.7 and the fingerprint becomes
+# ``1b353ba18cefb0a2cc8b4afd120124b9d17c39be2491998e5da2a738f7173912`` -- the
+# v2.1.7 value with forty-eight more characters after it. So the widening is a
+# rendering change and the remaining move is the version string. Rate, dividend,
+# IV source, expiration rule, time floor, day count, underlying price source and
+# pricing model are all untouched.
+#
 # v2.1.7: faf0a9f595f2a93a -> 1b353ba18cefb0a2.
 # Classification: VERSION_METADATA_ONLY.
 #
@@ -336,7 +380,9 @@ EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
 # floor, day count or pricing model changed. The fingerprint is *supposed* to
 # move when the engine version does -- an engine change that left it fixed would
 # be undetectable in replay, which is the whole point of including it.
-EXPECTED_MODEL_FINGERPRINT = "1b353ba18cefb0a2"
+EXPECTED_MODEL_FINGERPRINT = (
+    "79f3abe506978342c52b31481f16f7ff61ac6f4824b586d4d7020a37a4e73d83"
+)
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

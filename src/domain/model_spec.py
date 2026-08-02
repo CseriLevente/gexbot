@@ -28,7 +28,7 @@ from src.domain.iv import IVSource
 # 2.1.0: an explicitly configured zero rate or dividend is now honoured rather
 # than falling through to the snapshot value. That genuinely changes numbers for
 # any config that relied on the old behaviour, so the version moves with it.
-MODEL_VERSION = "gex-engine/2.1.7"
+MODEL_VERSION = "gex-engine/2.1.8"
 
 SECONDS_PER_DAY = 86_400.0
 
@@ -245,11 +245,18 @@ class ModelSpec:
         """Stable 16-hex-char digest of the assumption set.
 
         Sorted-key JSON so the digest depends on values, not on field order or
-        dict iteration. Truncated for readability -- collision resistance is not
-        a security property here, it is a "did the assumptions change" check.
+        dict iteration.
+
+        Full SHA-256 since v2.1.8. It was truncated to sixteen characters on the
+        reasoning that collision resistance was not the point -- this answers
+        "did the assumptions change?" -- and that was right while the digest was
+        a description. It is now a *binding*: a capture whose stamped model
+        fingerprint differs from this one is refused, which is an equality check
+        deciding whether a number may be called trusted. Use
+        ``src.domain.digests.short_id`` where a human has to read one.
         """
         payload = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def describe(self) -> str:
         return (

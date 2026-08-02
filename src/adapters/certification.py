@@ -101,7 +101,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.7"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.8"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -1050,8 +1050,28 @@ def build_verified_calculation_context(
             chain_date=open_interest.chain_date,
             evidence_kind=EvidenceKind.CALLER_ASSUMPTION,
         )
-    if evidence is not None and not evidence.permits_trusted_calculation:
-        failures.append(f"OPEN_INTEREST_AS_OF:{evidence.blocker}")
+    # Resolved, not classified. v2.1.7 asked the *enum* whether evidence
+    # permitted a trusted calculation, so ``VENDOR_FIELD`` with
+    # ``record_ids=("fake-record",)`` did, and
+    # ``AUTHORITATIVE_VENDOR_DOCUMENTATION`` with ``reference="lol"`` did. The
+    # kind now selects which check runs; supplying it does not pass the check.
+    if evidence is not None:
+        from src.adapters.evidence_resolvers import resolve_settlement_date
+
+        resolved = resolve_settlement_date(evidence, manifest=manifest, store=store)
+        if not resolved.established:
+            failures.append(f"OPEN_INTEREST_AS_OF:{resolved.failure}")
+        elif not resolved.permits_trusted_calculation:
+            failures.append(f"OPEN_INTEREST_AS_OF:{evidence.blocker}")
+        elif open_interest is not None and open_interest.as_of != resolved.as_of:
+            # The value's provenance and the date's evidence have to agree. Two
+            # settlement dates in one calculation is not a milder version of
+            # one; it is two different markets, averaged by accident.
+            failures.append(
+                f"OPEN_INTEREST_AS_OF:the open-interest provenance says "
+                f"{open_interest.as_of} and the settlement evidence resolves "
+                f"to {resolved.as_of}"
+            )
 
     context = VerifiedCalculationContext(
         pipeline_fingerprint=pipeline.fingerprint(),

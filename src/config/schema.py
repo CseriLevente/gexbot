@@ -626,7 +626,7 @@ TOP_LEVEL_KEYS = {
 
 def fingerprint_of(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def parse_config(raw: dict[str, Any], *, source_path: str = "<memory>") -> LoadedConfig:

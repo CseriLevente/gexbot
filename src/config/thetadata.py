@@ -156,6 +156,20 @@ class ThetaDataConfig:
     min_time_to_expiry_minutes: float = 60.0
     underlying_price_source: str = "vendor_index_snapshot"
     expiration_rule: str = "root_specific_settlement"
+    #: How far the spot print may be from the chain instant before the pairing
+    #: stops being meaningful.
+    #:
+    #: **Configuration, not an argument.** v2.1.7 read this off a caller-built
+    #: ``SpotProvenance``, so one calculation could be granted a wider window
+    #: than the session was configured for -- and the skew check is the only
+    #: thing between a chain and an underlying it never saw. Living here means
+    #: it enters the pipeline fingerprint, the capture-operation identity and
+    #: the normalization recipe, so widening it is a configuration change that
+    #: every stamped record disagrees with.
+    #:
+    #: One second: the index snapshot and the chain are separate reads issued
+    #: back to back, and anything slower than that is a stall worth noticing.
+    max_spot_skew_seconds: float = 1.0
     #: When true, an incompatible pricing configuration raises instead of
     #: proceeding with a warning.
     fail_on_incompatible_pricing: bool = False
@@ -415,6 +429,7 @@ class ThetaDataConfig:
             "min_time_to_expiry_minutes": self.min_time_to_expiry_minutes,
             "underlying_price_source": self.underlying_price_source,
             "expiration_rule": self.expiration_rule,
+            "max_spot_skew_seconds": self.max_spot_skew_seconds,
             "fail_on_incompatible_pricing": self.fail_on_incompatible_pricing,
         }
 
@@ -449,7 +464,7 @@ class VendorParameterSet:
         payload = json.dumps(
             self.sent_vendor_parameters, sort_keys=True, separators=(",", ":")
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -530,6 +545,7 @@ ALLOWED_KEYS = frozenset(
         "min_time_to_expiry_minutes",
         "underlying_price_source",
         "expiration_rule",
+        "max_spot_skew_seconds",
         "fail_on_incompatible_pricing",
         "stock_price_source",
     }
@@ -998,6 +1014,12 @@ def parse_thetadata_config(raw: Any, *, path: str = "thetadata") -> ThetaDataCon
         ),
         underlying_price_source=underlying_price_source or "vendor_index_snapshot",
         expiration_rule=expiration_rule or "root_specific_settlement",
+        # Bounded above at a minute: a spot print a minute from the chain is not
+        # a synchronisation tolerance, it is a different market state, and a
+        # configuration that asks for one is a mistake worth refusing at load.
+        max_spot_skew_seconds=float(
+            number("max_spot_skew_seconds", 1.0, low=0.0, high=60.0) or 1.0
+        ),
         fail_on_incompatible_pricing=fail_on_incompatible,
     )
 

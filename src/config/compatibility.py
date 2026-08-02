@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 
@@ -38,6 +39,7 @@ __all__ = [
     "VendorObservation",
     "apply_attestations",
     "compare_observation",
+    "derive_post_capture_compatibility",
 ]
 
 
@@ -253,6 +255,41 @@ def _normalise(value: object | None) -> Any:
     return str(value)
 
 
+#: How far ahead of today an observation may be dated before it is a typo
+#: rather than a timezone. Generous by a day either way; a year is not.
+OBSERVATION_FUTURE_TOLERANCE_DAYS = 2
+
+
+def _parse_observed_on(raw: object, dimension: PricingDimension) -> date:
+    """Read ``observed_at`` as a real calendar date, or refuse the observation.
+
+    Four different refusals because they are four different mistakes: nothing
+    was written, what was written is not a date, it is a date that does not
+    exist, or it is a date that has not happened.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise AttestationError(
+            f"{dimension.value}: observed_at is empty. Vendor conventions "
+            "change; an answer with no date cannot be known to still hold."
+        )
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as error:
+        raise AttestationError(
+            f"{dimension.value}: observed_at {text!r} is not an ISO date "
+            f"(YYYY-MM-DD): {error}"
+        ) from error
+    ahead = (parsed - datetime.now(UTC).date()).days
+    if ahead > OBSERVATION_FUTURE_TOLERANCE_DAYS:
+        raise AttestationError(
+            f"{dimension.value}: observed_at {text} is {ahead} days in the "
+            "future. An observation that has not happened cannot be evidence "
+            "of what the vendor does."
+        )
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class VendorObservation:
     """What the vendor's convention was observed to be. Not what follows from it.
@@ -305,11 +342,7 @@ class VendorObservation:
                 "an unreferenced observation cannot be checked by anyone reading "
                 "the certification report."
             )
-        if not self.observed_at.strip():
-            raise AttestationError(
-                f"{self.dimension.value}: observed_at is empty. Vendor conventions "
-                "change; an answer with no date cannot be known to still hold."
-            )
+        _parse_observed_on(self.observed_at, self.dimension)
         if self.source is EvidenceSource.LIVE_COMPARISON and not self.manifest_hash:
             raise AttestationError(
                 f"{self.dimension.value}: a LIVE_COMPARISON observation must name "
@@ -318,17 +351,30 @@ class VendorObservation:
             )
 
     @property
+    def observed_on(self) -> date:
+        """When this was observed, as a date rather than as characters.
+
+        v2.1.5 stored ``observed_at`` as whatever string the file carried and
+        never read it, so ``"not-a-date"`` and ``"2026-02-30"`` loaded happily
+        and a reader deciding whether a convention was still current had
+        nothing to decide with. Validated at construction; parsed here.
+        """
+        return _parse_observed_on(self.observed_at, self.dimension)
+
+    @property
     def evidence(self) -> CompatibilityEvidence:
         return CompatibilityEvidence(
             source=self.source,
             reference=self.reference,
-            observed_at=self.observed_at,
+            # Canonical ISO, whatever spelling the file used.
+            observed_at=self.observed_on.isoformat(),
         )
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "dimension": self.dimension.value,
             "observed_value": _normalise(self.observed_value),
+            "observed_on": self.observed_on.isoformat(),
             "evidence": self.evidence.as_dict(),
             "record_ids": list(self.record_ids),
             "manifest_hash": self.manifest_hash,
@@ -688,3 +734,156 @@ class PricingCompatibilityReport:
                 d.dimension.value: d.detail for d in self.dimensions if d.detail
             },
         }
+
+
+# =============================================================================
+# Post-capture -- what the bytes showed, folded into what gates the calculation
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class PostCaptureCompatibilityReport(PricingCompatibilityReport):
+    """The static assessment, revised by what a verified capture observed.
+
+    ``AdapterValidator`` built ``VendorObservation`` objects out of the captured
+    payloads and nothing consumed them. The report ``compute_trusted_gex``
+    consulted was the one derived from configuration alone, so a capture that
+    observed the vendor's underlying source left the gate reading ``UNKNOWN``,
+    and -- worse -- a *disagreement* found in the bytes could not block
+    anything.
+
+    The provenance travels with the verdict: which capture, which validator,
+    and which records each revision rests on. A revised status whose evidence
+    cannot be named is not an improvement on an unrevised one.
+    """
+
+    manifest_hash: str = ""
+    validator_version: str = ""
+    #: Per dimension, the records the live observation was read from.
+    observed_record_ids: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: Per dimension, what the status was before the capture spoke.
+    base_statuses: tuple[tuple[str, str], ...] = ()
+    #: Dimensions a live observation was rejected for, and why.
+    rejected_observations: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        # Named explicitly rather than through zero-argument ``super()``:
+        # ``slots=True`` rebuilds the class object, which leaves the implicit
+        # ``__class__`` cell pointing at the discarded one.
+        return {
+            **PricingCompatibilityReport.as_dict(self),
+            "manifest_hash": self.manifest_hash,
+            "validator_version": self.validator_version,
+            "observed_record_ids": {
+                dimension: list(ids) for dimension, ids in self.observed_record_ids
+            },
+            "base_status": dict(self.base_statuses),
+            "rejected_observations": list(self.rejected_observations),
+        }
+
+
+def derive_post_capture_compatibility(
+    base_report: PricingCompatibilityReport,
+    validation_report: Any,
+    model_spec: Any,
+    manifest: Any,
+) -> PostCaptureCompatibilityReport:
+    """Fold a capture's verified observations into the static assessment.
+
+    Two rules, and the asymmetry between them is the point:
+
+    * a live **mismatch** overrides anything, including a documented match. What
+      the vendor did beats what its documentation said it would do;
+    * a live **match** only fills an ``UNKNOWN``. Letting one agree with a
+      dimension already measured as disagreeing would launder the disagreement,
+      which is the one thing evidence must never do.
+
+    An observation is used only when it belongs to *this* manifest and the
+    records behind it are in *this* capture. Both are checked here rather than
+    trusted from the report, because a validation report is a document and a
+    document can be moved between captures.
+    """
+    if validation_report is None or manifest is None:
+        return PostCaptureCompatibilityReport(
+            dimensions=base_report.dimensions,
+            hard_failures=base_report.hard_failures,
+            warnings=base_report.warnings,
+            base_statuses=_statuses(base_report),
+        )
+
+    by_dimension = {d.dimension: d for d in base_report.dimensions}
+    observations = {
+        observation.dimension: observation
+        for observation in getattr(validation_report, "pricing_observations", ())
+    }
+    captured = set(getattr(manifest, "record_ids", ()))
+    manifest_hash = getattr(manifest, "manifest_hash", "")
+
+    revised: dict[PricingDimension, PricingDimensionResult] = {}
+    sources: list[tuple[str, tuple[str, ...]]] = []
+    rejected: list[str] = []
+
+    for check in getattr(validation_report, "checks", ()):
+        dimension = getattr(check, "dimension", None)
+        if dimension is None:
+            continue
+        observation = observations.get(dimension)
+        if observation is None:
+            continue
+        if observation.manifest_hash != manifest_hash:
+            rejected.append(
+                f"{dimension.value}: the observation was read from capture "
+                f"{observation.manifest_hash[:16]!r}, not this one"
+            )
+            continue
+        records = tuple(sorted(set(check.record_ids) | set(observation.record_ids)))
+        if not records or not set(records) <= captured:
+            # A named record this capture does not hold is not weak evidence,
+            # it is evidence about something else.
+            rejected.append(
+                f"{dimension.value}: names records {sorted(set(records) - captured)} "
+                "which this capture does not contain"
+            )
+            continue
+
+        outcome = compare_observation(observation, model_spec)
+        current = by_dimension.get(dimension)
+        if current is not None and not _supersedes(current, outcome):
+            rejected.append(
+                f"{dimension.value}: a live {outcome.status.value} does not "
+                f"override an established {current.status.value}"
+            )
+            continue
+
+        revised[dimension] = outcome
+        sources.append((dimension.value, records))
+
+    merged = base_report.merged_with(
+        PricingCompatibilityReport(dimensions=tuple(revised.values()))
+    )
+    return PostCaptureCompatibilityReport(
+        dimensions=merged.dimensions,
+        hard_failures=merged.hard_failures,
+        warnings=merged.warnings,
+        manifest_hash=manifest_hash,
+        validator_version=getattr(validation_report, "validator_version", ""),
+        observed_record_ids=tuple(sorted(sources)),
+        base_statuses=_statuses(base_report),
+        rejected_observations=tuple(sorted(rejected)),
+    )
+
+
+def _supersedes(
+    current: PricingDimensionResult, observed: PricingDimensionResult
+) -> bool:
+    """May a live finding replace what the static assessment concluded?"""
+    if observed.status is CompatibilityStatus.MISMATCHED:
+        # What the vendor did beats what its documentation said it would do.
+        return True
+    # A live agreement fills a gap; it never overturns a measured disagreement,
+    # which would be laundering it.
+    return current.status is CompatibilityStatus.UNKNOWN
+
+
+def _statuses(report: PricingCompatibilityReport) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((d.dimension.value, d.status.value) for d in report.dimensions))

@@ -234,8 +234,29 @@ EXPECTED_COMPONENT_SCORES = {
 #      Each was checked by searching the serialised payload. No GEX number
 #      moved: across the whole of v2.1.5 exactly two assertions in this file
 #      changed, both driven by the one version string.
+#   8. 568d2c2d -> bd668a62, from v2.1.6. Classification:
+#      VERSION_METADATA_ONLY, and this time measured directly rather than by
+#      elimination: recomputing this reference case with ``model_version``
+#      pinned back to ``gex-engine/2.1.5``, and *nothing else* reverted,
+#      reproduces 568d2c2d... exactly -- and reproduces d3d45859 for the
+#      model fingerprint at the same time. The version string is therefore
+#      the whole of both moves, with no residue to attribute elsewhere.
+#
+#      That check is stronger than the search used for (6) and (7), because
+#      it does not depend on knowing which v2.1.6 changes to look for. For
+#      the record, none of them appear in this payload anyway: the reference
+#      case is built from the synthetic chain and computed by
+#      ``compute_gex_snapshot`` directly, so it has no capture manifest, no
+#      capture origin, no evidence context, no post-capture compatibility
+#      report and no vendor timestamp -- the parser version is absent for
+#      the same reason it was in (6) and (7).
+#
+#      No GEX number moved: every total, bucket, per-strike value, wall,
+#      void, root and confidence component is asserted individually below,
+#      and across the whole of v2.1.6 exactly two assertions in this file
+#      changed -- this digest and the model fingerprint.
 EXPECTED_OUTPUT_HASH = (
-    "568d2c2d39507fa6779d998754eac6c98b0465f0793d68ad1a6982117671b494"
+    "bd668a626632abadd4aa0dec4ee9b19689ed3b16ebb43db6ea7862de2de58586"
 )
 # v2.1.3: 8b5b7454ba7c5500 -> ded3172bfee2682f. Classification: BEHAVIORAL.
 #
@@ -249,6 +270,15 @@ EXPECTED_OUTPUT_HASH = (
 # The fingerprint is *supposed* to move when the configuration does; a
 # config change that left it fixed would be the defect.
 EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
+# v2.1.6: d3d458592b6f87e0 -> faf0a9f595f2a93a.
+# Classification: VERSION_METADATA_ONLY.
+#
+# The only input that changed is ``model_version``, gex-engine/2.1.5 ->
+# 2.1.6. Measured: pinning it back reproduces d3d458592b6f87e0. Rate,
+# dividend, IV source, expiration rule, time floor, day count, underlying
+# price source and pricing model are all untouched -- v2.1.6 changed what
+# authorizes a calculation, not what one computes.
+#
 # v2.1.5: 70b3afda56f505e7 -> d3d458592b6f87e0.
 # Classification: VERSION_METADATA_ONLY.
 #
@@ -279,7 +309,7 @@ EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
 # floor, day count or pricing model changed. The fingerprint is *supposed* to
 # move when the engine version does -- an engine change that left it fixed would
 # be undetectable in replay, which is the whole point of including it.
-EXPECTED_MODEL_FINGERPRINT = "d3d458592b6f87e0"
+EXPECTED_MODEL_FINGERPRINT = "faf0a9f595f2a93a"
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

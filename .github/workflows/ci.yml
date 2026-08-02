@@ -194,6 +194,15 @@ jobs:
       - name: Provenance linkage and versions
         run: python -m pytest tests/unit/test_provenance_linkage.py -v
 
+      - name: Evidence binding -- a chain cannot authorize itself
+        run: python -m pytest tests/unit/test_evidence_binding.py -v
+
+      - name: Post-capture compatibility and chain-level coverage
+        run: python -m pytest tests/unit/test_post_capture_compatibility.py -v
+
+      - name: One vendor timestamp interpretation
+        run: python -m pytest tests/unit/test_vendor_timestamps.py -v
+
       - name: Current-GEX eligibility
         run: python -m pytest tests/unit/test_gex_eligibility.py -v
 

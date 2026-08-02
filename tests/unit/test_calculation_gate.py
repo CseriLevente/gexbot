@@ -28,6 +28,8 @@ from src.config.pipeline import CalculationMode, PipelineConsistencyError
 from tests.certification_fixtures import (
     AS_OF,
     FIXTURE_INDEX_PRICE,
+    captured_chain,
+    context_for,
     resolved_pipeline,
     unresolved_pipeline,
 )
@@ -36,6 +38,17 @@ from tests.certification_fixtures import (
 def chain_for(pipeline):
     """A chain fetched through the pipeline, so it carries the provenance."""
     return pipeline.fetch_chain(as_of=AS_OF)
+
+
+def evidence(pipeline):
+    """A chain and the verified context that authorizes it, from one fetch.
+
+    v2.1.6 requires the context, and it has to be derived from the same capture
+    the chain came from -- so the tests below fail for the reason they name
+    rather than because two unrelated captures were compared.
+    """
+    taken = captured_chain(pipeline)
+    return taken.chain, context_for(taken)
 
 
 # =============================================================================
@@ -61,9 +74,9 @@ def test_capture_and_compute_no_longer_exists_as_an_ambiguous_verb():
 def test_an_incompatible_pipeline_cannot_run_a_trusted_calculation():
     """The regression."""
     pipeline = unresolved_pipeline()
-    chain = chain_for(pipeline)
+    chain, context = evidence(pipeline)
     with pytest.raises(PipelineConsistencyError, match=r"(?i)unknown|unresolved"):
-        pipeline.compute_trusted_gex(chain)
+        pipeline.compute_trusted_gex(chain, context=context)
 
 
 def test_an_incompatible_pipeline_can_still_run_a_diagnostic():
@@ -100,15 +113,17 @@ def test_a_diagnostic_emits_a_deterministic_warning_code():
 def test_a_diagnostic_result_cannot_be_passed_back_as_trusted_input():
     """Untrusted output is untrusted for good; nothing downstream re-blesses it."""
     pipeline = unresolved_pipeline()
-    snapshot = pipeline.compute_diagnostic_gex(chain_for(pipeline))
+    chain, context = evidence(pipeline)
+    snapshot = pipeline.compute_diagnostic_gex(chain)
     with pytest.raises(PipelineConsistencyError, match=r"(?i)diagnostic"):
-        pipeline.compute_trusted_gex(snapshot)  # type: ignore[arg-type]
+        pipeline.compute_trusted_gex(snapshot, context=context)  # type: ignore[arg-type]
 
 
 def test_a_resolved_pipeline_can_run_a_trusted_calculation():
     """The gate must leave a path through it, or it is only a refusal."""
     pipeline = resolved_pipeline()
-    snapshot = pipeline.compute_trusted_gex(chain_for(pipeline))
+    chain, context = evidence(pipeline)
+    snapshot = pipeline.compute_trusted_gex(chain, context=context)
     assert snapshot.meta["trusted"] is True
     assert snapshot.meta["calculation_mode"] == CalculationMode.TRUSTED.value
 
@@ -117,22 +132,32 @@ def test_a_chain_without_a_pipeline_fingerprint_cannot_be_trusted():
     from src.synthetic.chains import build_synthetic_chain
 
     pipeline = resolved_pipeline()
+    _, context = evidence(pipeline)
     with pytest.raises(PipelineConsistencyError, match=r"(?i)fingerprint"):
-        pipeline.compute_trusted_gex(build_synthetic_chain())
+        pipeline.compute_trusted_gex(build_synthetic_chain(), context=context)
 
 
 def test_a_chain_from_another_pipeline_cannot_be_trusted():
-    other = resolved_pipeline(rate_value=3.1)
-    chain = chain_for(other)
+    chain, _ = evidence(resolved_pipeline(rate_value=3.1))
+    mine = resolved_pipeline()
+    _, context = evidence(mine)
     with pytest.raises(PipelineConsistencyError, match=r"(?i)fingerprint"):
-        resolved_pipeline().compute_trusted_gex(chain)
+        mine.compute_trusted_gex(chain, context=context)
 
 
 def test_a_chain_without_a_capture_manifest_cannot_be_trusted():
+    from src.adapters.certification import build_verified_calculation_context
+    from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
+
     pipeline = resolved_pipeline(raw_capture_enabled=False, raw_capture_path=None)
     chain = chain_for(pipeline)
+    context = build_verified_calculation_context(
+        pipeline=pipeline,
+        manifest=RawCaptureManifest.disabled(),
+        store=InMemoryRawStore(),
+    )
     with pytest.raises(PipelineConsistencyError, match=r"(?i)capture"):
-        pipeline.compute_trusted_gex(chain)
+        pipeline.compute_trusted_gex(chain, context=context)
 
 
 def test_a_diagnostic_still_runs_without_a_capture():
@@ -167,8 +192,9 @@ def test_the_capture_profile_cannot_silently_compute_a_trusted_gex(tmp_path):
     pipeline = ThetaDataResearchPipeline.from_loaded_config(
         redirected, transport=vendor_transport()
     )
+    chain, context = evidence(pipeline)
     with pytest.raises(PipelineConsistencyError):
-        pipeline.compute_trusted_gex(chain_for(pipeline))
+        pipeline.compute_trusted_gex(chain, context=context)
 
 
 # =============================================================================
@@ -243,10 +269,34 @@ def test_an_externally_supplied_spot_has_its_own_named_path():
 
 
 def test_an_externally_supplied_spot_cannot_be_trusted():
+    from src.adapters.certification import build_verified_calculation_context
+    from src.adapters.raw_store import (
+        CaptureSession,
+        InMemoryRawStore,
+        RawCaptureManifest,
+    )
+    from tests.certification_fixtures import verified_oi, verified_spot
+
     pipeline = resolved_pipeline(underlying_price_source="configured_constant")
-    chain = pipeline.fetch_chain_with_external_spot(as_of=AS_OF, spot=4999.5)
+    store = InMemoryRawStore()
+    session = CaptureSession(store=store, session_id="external")
+    chain = pipeline.fetch_chain_with_external_spot(
+        as_of=AS_OF, spot=4999.5, capture=session
+    )
+    manifest = RawCaptureManifest.from_session(
+        session,
+        capture_plan_fingerprint=pipeline.capture_plan.fingerprint,
+        pipeline_fingerprint=pipeline.fingerprint(),
+    )
+    context = build_verified_calculation_context(
+        pipeline=pipeline,
+        manifest=manifest,
+        store=store,
+        spot=verified_spot(store, manifest),
+        open_interest=verified_oi(store, manifest),
+    )
     with pytest.raises(PipelineConsistencyError, match=r"(?i)spot|caller"):
-        pipeline.compute_trusted_gex(chain)
+        pipeline.compute_trusted_gex(chain, context=context)
 
 
 # =============================================================================

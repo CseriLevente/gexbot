@@ -1,0 +1,585 @@
+"""A chain cannot authorize its own calculation.
+
+v2.1.5 gated `compute_trusted_gex` on facts it read out of `chain.meta`: the
+pipeline fingerprint, the raw-capture manifest, the spot provenance. All three
+are metadata written into the snapshot by the code that produced it, and a
+snapshot is not a witness to its own provenance -- `ChainSnapshot.with_meta`
+is public, and a synthetic chain with the right keys satisfied every check.
+
+The manifest was checked the same way: `verify_capture` confirmed that the
+records a manifest *named* were in the store, and took the manifest's own
+`pipeline_fingerprint`, `capture_plan_fingerprint`, `parser_version` and
+`session_id` on trust. An empty fingerprint meant "no claim to check" rather
+than "unverifiable".
+
+v2.1.6 moves the authorization out of the snapshot: `compute_trusted_gex`
+requires a `VerifiedCalculationContext`, which only
+`build_verified_calculation_context` can produce, and which recomputes every
+verification from the manifest and the store.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from src.adapters.certification import (
+    AdapterValidator,
+    build_verified_calculation_context,
+    verify_capture,
+)
+from src.adapters.errors import ThetaDataCertificationError
+from src.adapters.raw_store import PARSER_VERSION, InMemoryRawStore
+from src.config.pipeline import PipelineConsistencyError
+from tests.certification_fixtures import (
+    AS_OF,
+    build_capture,
+    captured_chain,
+    durable_store,
+    plan_for,
+    resolved_pipeline,
+    verified_oi,
+    verified_spot,
+)
+
+
+def context_for(taken, **overrides):
+    """The context that authorizes the chain ``taken`` actually produced.
+
+    Built from one fetch, so the chain and the manifest describe the same
+    responses. Deriving them separately would make every test here pass for the
+    uninteresting reason that two captures never share a hash.
+    """
+    payload = {
+        "pipeline": taken.pipeline,
+        "manifest": taken.manifest,
+        "store": taken.store,
+        "spot": verified_spot(taken.store, taken.manifest),
+        "open_interest": verified_oi(taken.store, taken.manifest),
+    }
+    payload.update(overrides)
+    return build_verified_calculation_context(**payload)
+
+
+# =============================================================================
+# §1 -- trusted calculation requires an independently verified context
+# =============================================================================
+
+
+def test_trusted_gex_requires_a_verified_calculation_context():
+    """The signature itself: there is no context-free trusted calculation."""
+    import inspect
+
+    from src.config.pipeline import ThetaDataResearchPipeline
+
+    signature = inspect.signature(ThetaDataResearchPipeline.compute_trusted_gex)
+    assert "context" in signature.parameters
+    assert signature.parameters["context"].default is inspect.Parameter.empty
+
+
+def test_a_forged_chain_cannot_authorize_itself():
+    """The regression.
+
+    Every key v2.1.5 read out of ``chain.meta`` to decide trust, written into a
+    synthetic chain that has never been near a capture.
+    """
+    from src.synthetic.chains import build_synthetic_chain
+
+    taken = captured_chain()
+    pipeline = taken.pipeline
+    forged = dataclasses.replace(
+        build_synthetic_chain(),
+        as_of=AS_OF,
+        meta={
+            "pipeline": {
+                "pipeline_fingerprint": pipeline.fingerprint(),
+                "engine_fingerprint": pipeline.engine_config.fingerprint(),
+                "capture_plan_fingerprint": pipeline.capture_plan.fingerprint,
+            },
+            # The real manifest, copied wholesale. Every v2.1.5 gate read
+            # exactly this, and was satisfied by it.
+            "raw_capture_manifest": taken.manifest.as_dict(),
+            "spot_provenance": {
+                "source": "vendor_index_snapshot",
+                "timestamp": AS_OF.isoformat(),
+                "observation": {"record_id": "anything"},
+            },
+            "open_interest_as_of": "2026-03-16",
+        },
+    )
+    with pytest.raises(PipelineConsistencyError):
+        pipeline.compute_trusted_gex(forged, context=context_for(taken))
+
+
+def test_a_context_from_another_pipeline_is_refused():
+    taken = captured_chain()
+    other = captured_chain(resolved_pipeline(rate_value=3.1))
+    with pytest.raises(PipelineConsistencyError, match=r"(?i)pipeline"):
+        taken.pipeline.compute_trusted_gex(taken.chain, context=context_for(other))
+
+
+def test_a_context_for_another_capture_is_refused():
+    pipeline = resolved_pipeline()
+    taken = captured_chain(pipeline)
+    other = captured_chain(pipeline)
+    with pytest.raises(PipelineConsistencyError, match=r"(?i)manifest"):
+        pipeline.compute_trusted_gex(taken.chain, context=context_for(other))
+
+
+def test_the_context_cannot_be_hand_built():
+    """Only the builder produces one, and it recomputes everything."""
+    from src.adapters.certification import VerifiedCalculationContext
+
+    taken = captured_chain()
+    real = context_for(taken)
+    forged = dataclasses.replace(real, context_hash="whatever-i-like")
+    with pytest.raises(PipelineConsistencyError, match=r"(?i)context"):
+        taken.pipeline.compute_trusted_gex(taken.chain, context=forged)
+    assert isinstance(real, VerifiedCalculationContext)
+
+
+def test_the_builder_refuses_a_precomputed_verification():
+    import inspect
+
+    parameters = set(inspect.signature(build_verified_calculation_context).parameters)
+    assert "capture_verification" not in parameters
+    assert {"pipeline", "manifest", "store"} <= parameters
+
+
+def test_a_resolved_pipeline_with_real_evidence_can_compute():
+    """The gate must leave a path through it."""
+    taken = captured_chain()
+    snapshot = taken.pipeline.compute_trusted_gex(
+        taken.chain, context=context_for(taken)
+    )
+    assert snapshot.meta["trusted"] is True
+    assert snapshot.meta["evidence_context_hash"]
+
+
+def test_a_diagnostic_still_needs_no_context():
+    taken = captured_chain()
+    snapshot = taken.pipeline.compute_diagnostic_gex(taken.chain)
+    assert snapshot.meta["trusted"] is False
+
+
+# =============================================================================
+# §2 -- every material manifest field is bound to the store
+# =============================================================================
+
+
+def verified(manifest, store, pipeline=None):
+    built = pipeline if pipeline is not None else resolved_pipeline()
+    return verify_capture(
+        manifest,
+        store,
+        plan=plan_for(built),
+        expected_pipeline_fingerprint=built.fingerprint(),
+    )
+
+
+def test_a_manifest_naming_another_pipeline_does_not_verify():
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    tampered = dataclasses.replace(manifest, pipeline_fingerprint="0" * 16)
+    assert not verified(tampered, store, pipeline).verified
+
+
+def test_an_empty_pipeline_fingerprint_does_not_verify():
+    """An absent claim is unverifiable, not exempt."""
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    tampered = dataclasses.replace(manifest, pipeline_fingerprint="")
+    result = verified(tampered, store, pipeline)
+    assert not result.verified
+    assert any("pipeline_fingerprint" in f for f in result.failures)
+
+
+def test_an_empty_capture_plan_fingerprint_does_not_verify():
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    tampered = dataclasses.replace(manifest, capture_plan_fingerprint="")
+    result = verified(tampered, store, pipeline)
+    assert not result.verified
+    assert any("capture_plan_fingerprint" in f for f in result.failures)
+
+
+def test_a_wrong_parser_version_does_not_verify():
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    tampered = dataclasses.replace(manifest, parser_version="thetadata-v3-parser/1.0.0")
+    result = verified(tampered, store, pipeline)
+    assert not result.verified
+    assert any("parser" in f.lower() for f in result.failures)
+
+
+def test_a_wrong_session_id_does_not_verify():
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    tampered = dataclasses.replace(manifest, session_id="not-this-session")
+    result = verified(tampered, store, pipeline)
+    assert not result.verified
+    assert any("session" in f.lower() for f in result.failures)
+
+
+def test_an_incorrect_request_parameter_hash_does_not_verify():
+    """The parameters that produced a response are part of what it is."""
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    records = list(manifest.records)
+    records[0] = dataclasses.replace(records[0], parameter_hash="0" * 16)
+    tampered = dataclasses.replace(manifest, records=tuple(records))
+    result = verified(tampered, store, pipeline)
+    assert not result.verified
+    assert any("parameter" in f.lower() for f in result.failures)
+
+
+def test_a_payload_hash_bound_to_the_wrong_record_does_not_verify():
+    """v2.1.5 compared the hash *sets*, so two records could swap payloads."""
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    records = list(manifest.records)
+    first, second = records[0], records[1]
+    records[0] = dataclasses.replace(first, payload_hash=second.payload_hash)
+    records[1] = dataclasses.replace(second, payload_hash=first.payload_hash)
+    tampered = dataclasses.replace(manifest, records=tuple(records))
+    assert not verified(tampered, store, pipeline).verified
+
+
+def test_a_duplicate_record_id_does_not_verify():
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    records = list(manifest.records)
+    records[1] = dataclasses.replace(records[1], record_id=records[0].record_id)
+    tampered = dataclasses.replace(manifest, records=tuple(records))
+    assert not verified(tampered, store, pipeline).verified
+
+
+def test_a_non_2xx_record_cannot_verify_as_a_successful_capture():
+    """An error body is not evidence about the market."""
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline, http_status=503)
+    result = verified(manifest, store, pipeline)
+    assert not result.verified
+    assert any("status" in f.lower() for f in result.failures)
+
+
+# =============================================================================
+# §3 -- the manifest hash binds per-record semantics
+# =============================================================================
+
+
+def mutated_hash(manifest, **changes):
+    records = list(manifest.records)
+    records[0] = dataclasses.replace(records[0], **changes)
+    return dataclasses.replace(manifest, records=tuple(records)).manifest_hash
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"request_id": "a-different-request"},
+        {"request_sequence": 99},
+        {"http_status": 201},
+        {"parameter_hash": "f" * 16},
+        {"payload_hash": "f" * 64},
+        {"endpoint": "/v3/option/snapshot/quote/other"},
+        {"vendor_schema_version": "v9"},
+        {"request_started_at": datetime(2020, 1, 1, tzinfo=UTC)},
+        {"response_received_at": datetime(2020, 1, 1, tzinfo=UTC)},
+    ],
+)
+def test_mutating_any_audit_relevant_field_moves_the_manifest_hash(change):
+    _, manifest = build_capture()
+    assert mutated_hash(manifest, **change) != manifest.manifest_hash
+
+
+def test_the_manifest_carries_per_record_descriptors():
+    from src.adapters.raw_store import ManifestRecord
+
+    _, manifest = build_capture()
+    assert manifest.records
+    assert all(isinstance(r, ManifestRecord) for r in manifest.records)
+
+
+def test_the_manifest_states_its_schema_version():
+    _, manifest = build_capture()
+    assert manifest.schema_version == "raw-capture-manifest/2.1.6"
+    assert manifest.parser_version == PARSER_VERSION
+
+
+def test_an_old_schema_manifest_is_refused_rather_than_reinterpreted():
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    stale = dataclasses.replace(manifest, schema_version="raw-capture-manifest/2.1.5")
+    result = verified(stale, store, pipeline)
+    assert not result.verified
+    assert any("schema" in f.lower() for f in result.failures)
+
+
+# =============================================================================
+# §4 -- paid capture needs durable storage
+# =============================================================================
+
+
+def test_an_in_memory_store_is_volatile():
+    from src.adapters.raw_store import StoreDurability
+
+    assert InMemoryRawStore().durability is StoreDurability.TEST_ONLY_VOLATILE
+    assert not InMemoryRawStore().durable
+
+
+def test_a_file_store_is_durable(tmp_path):
+    from src.adapters.raw_store import FileRawStore, StoreDurability
+
+    store = FileRawStore(tmp_path / "raw")
+    assert store.durability is StoreDurability.DURABLE_APPEND_ONLY
+    assert store.durable
+
+
+def test_an_in_memory_store_cannot_be_capture_ready():
+    """The regression. A paid session's only copy cannot live in a process."""
+    from tests.certification_fixtures import readiness
+
+    result = readiness(raw_store=InMemoryRawStore())
+    assert not result.ready
+    assert any("durable" in b.lower() for b in result.blockers)
+
+
+def test_a_durable_store_can_be_capture_ready(tmp_path):
+    from tests.certification_fixtures import readiness
+
+    assert readiness(raw_store=durable_store(tmp_path)).ready
+
+
+def test_readiness_requires_free_space(tmp_path, monkeypatch):
+    import shutil
+
+    from tests.certification_fixtures import readiness
+
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(1, 1, 1024)
+    )
+    result = readiness(raw_store=durable_store(tmp_path))
+    assert not result.ready
+    assert any("space" in b.lower() for b in result.blockers)
+
+
+def test_the_probe_does_not_enter_the_capture_index(tmp_path):
+    from src.adapters.raw_store import FileRawStore, probe_raw_store
+
+    store = FileRawStore(tmp_path / "raw")
+    probe_raw_store(store)
+    assert store.records() == ()
+    assert store.next_request_sequence() == 1
+
+
+# =============================================================================
+# §10 -- capture origin is derived, not asserted
+# =============================================================================
+
+
+def test_an_offline_fixture_capture_is_labelled_as_one():
+    from src.adapters.raw_store import CaptureOrigin
+
+    _, manifest = build_capture()
+    assert manifest.capture_origin is CaptureOrigin.OFFLINE_FIXTURE
+    assert all(
+        r.capture_origin is CaptureOrigin.OFFLINE_FIXTURE for r in manifest.records
+    )
+
+
+def test_the_origin_is_in_the_manifest_hash():
+    from src.adapters.raw_store import CaptureOrigin
+
+    _, manifest = build_capture()
+    relabelled = dataclasses.replace(
+        manifest, capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE
+    )
+    assert relabelled.manifest_hash != manifest.manifest_hash
+
+
+def test_an_offline_fixture_never_reads_as_a_live_capture():
+    store, manifest = build_capture()
+    report = AdapterValidator.validate(
+        manifest=manifest, store=store, pipeline=resolved_pipeline()
+    )
+    assert report.live_capture is False
+
+
+def test_an_offline_fixture_cannot_reach_certified():
+    from src.adapters.certification import CertificationState
+    from tests.certification_fixtures import readiness
+
+    store, manifest = build_capture()
+    result = readiness(
+        manifest=manifest,
+        raw_store=store,
+        validation=AdapterValidator.validate(
+            manifest=manifest, store=store, pipeline=resolved_pipeline()
+        ),
+    )
+    assert result.state is not CertificationState.ADAPTER_CERTIFIED
+
+
+# =============================================================================
+# §9 -- raw metadata integrity
+# =============================================================================
+
+
+def base_metadata(**overrides):
+    payload = {
+        "record_id": "r1",
+        "endpoint": "/v3/option/snapshot/quote",
+        "payload_hash": "0" * 64,
+        "byte_length": 12,
+        "payload_location": "memory://r1",
+        "parser_version": PARSER_VERSION,
+        "request_started_at": "2026-03-17T15:00:00+00:00",
+        "response_received_at": "2026-03-17T15:00:01+00:00",
+        "capture_complete": True,
+        "query_params": {"root": "SPXW"},
+        "http_status": 200,
+        "request_id": "req-1",
+        "request_sequence": 1,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_well_formed_metadata_validates():
+    from src.adapters.raw_store import validate_metadata
+
+    assert validate_metadata(base_metadata()) == (None, "")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("query_params", "not-a-mapping"),
+        ("http_status", "200"),
+        ("request_id", 7),
+        ("request_sequence", -1),
+        ("request_sequence", "1"),
+        ("parser_version", "somebody-elses/1"),
+        ("payload_location", ""),
+        ("vendor_schema_version", 3),
+        ("request_started_at", "2026-03-17T15:00:00"),
+        ("response_received_at", "2026-03-17T14:00:00+00:00"),
+    ],
+)
+def test_malformed_metadata_is_rejected(field, value):
+    from src.adapters.raw_store import validate_metadata
+
+    status, detail = validate_metadata(base_metadata(**{field: value}))
+    assert status is not None, (field, value, detail)
+
+
+# =============================================================================
+# §8 -- typed provenance values
+# =============================================================================
+
+
+def test_a_datetime_as_an_open_interest_date_is_refused():
+    from src.adapters.certification import OpenInterestProvenance
+    from src.adapters.errors import ThetaDataProvenanceError
+
+    with pytest.raises(ThetaDataProvenanceError, match=r"(?i)date"):
+        OpenInterestProvenance(
+            as_of=datetime(2026, 3, 16, tzinfo=UTC), source="vendor_field"
+        )
+
+
+def test_a_datetime_as_a_chain_date_is_refused():
+    from src.adapters.certification import OpenInterestProvenance
+    from src.adapters.errors import ThetaDataProvenanceError
+
+    with pytest.raises(ThetaDataProvenanceError, match=r"(?i)date"):
+        OpenInterestProvenance(
+            as_of=datetime(2026, 3, 16, tzinfo=UTC).date(),
+            source="vendor_field",
+            chain_date=datetime(2026, 3, 17, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize("value", ["2026-03-17T11:00:00+00:00", 1773000000, 3.5])
+def test_a_non_datetime_spot_timestamp_is_refused(value):
+    from src.adapters.certification import SpotProvenance, SpotSource
+    from src.adapters.errors import ThetaDataProvenanceError
+
+    with pytest.raises(ThetaDataProvenanceError):
+        SpotProvenance(source=SpotSource.VENDOR_INDEX_SNAPSHOT, timestamp=value)
+
+
+@pytest.mark.parametrize(
+    "observed_at", ["", "not-a-date", "2026-02-30", "2999-01-01", "17/03/2026"]
+)
+def test_an_invalid_observed_at_fails_configuration(observed_at):
+    from src.config.thetadata import ThetaDataConfigError, parse_thetadata_config
+
+    with pytest.raises(ThetaDataConfigError, match=r"(?i)observed_at|date"):
+        parse_thetadata_config(
+            {
+                "pricing_attestations": [
+                    {
+                        "dimension": "DAY_COUNT",
+                        "source": "VENDOR_DOCUMENTATION",
+                        "reference": "tests/fixtures/vendor_conventions.md",
+                        "observed_at": observed_at,
+                        "vendor_value": "ACT/365F",
+                    }
+                ]
+            }
+        )
+
+
+def test_a_valid_observed_at_is_stored_as_a_date():
+    from datetime import date
+
+    from src.config.thetadata import parse_thetadata_config
+
+    built = parse_thetadata_config(
+        {
+            "pricing_attestations": [
+                {
+                    "dimension": "DAY_COUNT",
+                    "source": "VENDOR_DOCUMENTATION",
+                    "reference": "tests/fixtures/vendor_conventions.md",
+                    "observed_at": "2026-08-01",
+                    "vendor_value": "ACT/365F",
+                }
+            ]
+        }
+    )
+    assert built.pricing_attestations[0].observed_on == date(2026, 8, 1)
+
+
+def test_no_public_provenance_path_leaks_an_untyped_error():
+    """Every refusal is catchable with the adapter's own base class."""
+    from src.adapters.certification import OpenInterestProvenance, SpotProvenance
+    from src.adapters.errors import ThetaDataError
+
+    for build in (
+        lambda: OpenInterestProvenance(as_of="2026-03-16", source="vendor_field"),
+        lambda: SpotProvenance(source="made_up", timestamp=AS_OF),
+        lambda: SpotProvenance(source="vendor_index_snapshot", timestamp="now"),
+    ):
+        with pytest.raises(ThetaDataError):
+            build()
+
+
+def test_a_spot_timestamp_far_in_the_future_is_refused():
+    from src.adapters.certification import SpotProvenance, SpotSource
+    from src.adapters.errors import ThetaDataProvenanceError
+
+    with pytest.raises(ThetaDataProvenanceError, match=r"(?i)future"):
+        SpotProvenance(
+            source=SpotSource.VENDOR_INDEX_SNAPSHOT,
+            timestamp=datetime.now(UTC) + timedelta(days=3),
+        )
+
+
+def test_capture_verification_refuses_a_non_manifest():
+    with pytest.raises(ThetaDataCertificationError):
+        verify_capture(object(), InMemoryRawStore(), plan=plan_for())  # type: ignore[arg-type]

@@ -1,7 +1,7 @@
-# Release procedure
+﻿# Release procedure
 
-Status: `IMPLEMENTED` — the archive step, the integrity checks, and the CI job
-that runs them all exist and pass. `NOT_VALIDATED_WITH_LIVE_THETADATA` —
+Status: `IMPLEMENTED` â€” the archive step, the integrity checks, and the CI job
+that runs them all exist and pass. `NOT_VALIDATED_WITH_LIVE_THETADATA` â€”
 no release has been cut against a live ThetaData subscription.
 
 This repository is a **research engine**. A release publishes analysis code and
@@ -48,7 +48,7 @@ in a commit that says why:
 python -m pip freeze --exclude-editable | sort > requirements-lock.txt
 ```
 
-Both ends of every range are bounded — including `build-system.requires` — so a
+Both ends of every range are bounded â€” including `build-system.requires` â€” so a
 future upstream release cannot change the produced artefact without a commit
 here. `tests/unit/test_release_integrity.py` enforces this.
 
@@ -109,29 +109,29 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.5.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.6.zip HEAD
 ```
 
 The archive is:
 
-- **content-complete** — `pyproject.toml`, `requirements-lock.txt`, `src/`,
+- **content-complete** â€” `pyproject.toml`, `requirements-lock.txt`, `src/`,
   `tests/`, `docs/`, `config/`;
-- **noise-free** — no `.venv/`, no `__pycache__/`, no `.pytest_cache/`;
-- **reproducible** — two archives of the same commit are byte-identical, because
+- **noise-free** â€” no `.venv/`, no `__pycache__/`, no `.pytest_cache/`;
+- **reproducible** â€” two archives of the same commit are byte-identical, because
   `git archive` derives its timestamps from the commit rather than the clock;
-- **credential-free** — no tracked file contains anything shaped like a secret,
+- **credential-free** â€” no tracked file contains anything shaped like a secret,
   and no `.env`, `.pem` or `.key` is tracked.
 
 Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.5.zip
+sha256sum gex-bot-v2.1.6.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.5.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.6.zip -Algorithm SHA256
 ```
 
 ---
@@ -140,7 +140,7 @@ Get-FileHash gex-bot-v2.1.5.zip -Algorithm SHA256
 
 - [ ] `git status --porcelain` was empty at the archived commit
 - [ ] all five verification commands passed
-- [ ] coverage ≥ 90%
+- [ ] coverage â‰Ą 90%
 - [ ] `docs/CHANGELOG.md` describes the release
 - [ ] `docs/OPEN_DECISIONS.md` lists every unresolved ambiguity
 - [ ] no documentation claims live-vendor validation that has not happened

@@ -367,7 +367,7 @@ not a policy switch. See [OPEN_DECISIONS.md](OPEN_DECISIONS.md) OD-35.
 | Method | Runs when | Marks the result |
 |---|---|---|
 | `compute_diagnostic_gex(chain)` | always | `trusted=False`, `DIAGNOSTIC_UNTRUSTED`, every blocker listed, both fingerprints |
-| `compute_trusted_gex(chain)` | only when nothing is outstanding | `trusted=True`, `TRUSTED` |
+| `compute_trusted_gex(chain, context=...)` | only when nothing is outstanding | `trusted=True`, `TRUSTED`, the evidence context hash |
 
 `compute_trusted_gex` refuses unless the pricing report has no load-bearing
 unknowns, no mismatches and no hard failures; the chain carries this pipeline's
@@ -376,3 +376,78 @@ spot is a vendor index observation read back from a stored payload; and the
 capture holds every endpoint the plan requires.
 
 A diagnostic result cannot be fed back as trusted input. Untrusted is permanent.
+
+## v2.1.6: who is allowed to say so
+
+Every check above read `chain.meta`. `ChainSnapshot` is a public dataclass, so a
+synthetic chain carrying the right keys satisfied all of them:
+
+```python
+dataclasses.replace(
+    build_synthetic_chain(),
+    meta={"pipeline": {...}, "raw_capture_manifest": {...}, "spot_provenance": {...}},
+)
+```
+
+A snapshot cannot be a witness to its own provenance. Authorization now comes
+from a separate object:
+
+```python
+context = build_verified_calculation_context(
+    pipeline=pipeline,
+    manifest=manifest,
+    store=store,
+    validation=validation,       # optional; re-derived and compared if present
+    spot=spot_provenance,
+    open_interest=open_interest_provenance,
+)
+snapshot = pipeline.compute_trusted_gex(chain, context=context)
+```
+
+The builder takes no verdict. There is no `capture_verification` parameter and
+no compatibility report parameter, because a caller who could pass either could
+pass a passing one. It runs `verify_capture` itself, re-derives the validation
+report and compares it, folds the verified observations into an *effective*
+pricing-compatibility report, and grades the provenance claims against the
+stored bytes.
+
+`compute_trusted_gex` then checks that the context:
+
+| Binding | Refuses when |
+|---|---|
+| context hash | the object has been edited since it was verified |
+| pipeline fingerprint | the context was built for a different configuration |
+| capture plan | the capture was taken against a different plan |
+| parser version | the evidence was read by different code |
+| chain fingerprint | the chain came from a different pipeline |
+| manifest hash | the verified bytes are not the bytes behind this number |
+| capture verification | the manifest does not match its store |
+| effective compatibility | a load-bearing dimension is unknown or mismatched |
+| spot and OI provenance | the evidence is about a different session -- including that `chain.spot` equals the verified index print |
+
+The manifest inside `chain.meta` is still worth having. It is a description of
+where to look, and it is not evidence.
+
+### What a capture must now prove about itself
+
+`verify_capture(manifest, store, plan=..., expected_pipeline_fingerprint=...)`
+binds each `ManifestRecord` to the stored record of the same id: payload hash,
+endpoint, parameter hash, request id, sequence, status, parser version, vendor
+schema version, capture origin and both clocks. It also requires a supported
+manifest schema and parser version, a non-empty pipeline and capture-plan
+fingerprint that both match, record ids that belong to the named session, unique
+ids and sequences, a successful HTTP status, a complete capture, tz-aware
+timestamps and a response no earlier than its request.
+
+**An empty fingerprint is a failure, not a skip.** That is the v2.1.5 hole:
+`if manifest.capture_plan_fingerprint and ...` meant a manifest that claimed
+nothing was checked against nothing.
+
+### Paid capture needs somewhere the evidence survives
+
+`READY_FOR_RAW_CAPTURE_ONLY` additionally requires a `DURABLE_APPEND_ONLY`
+store: a clean integrity scan, a successful write and byte-identical read-back,
+a filesystem location outside the source tree, and free space above a
+configurable minimum. `InMemoryRawStore` is `TEST_ONLY_VOLATILE` — a working
+store that forgets everything when the process exits — and stays fully supported
+for unit tests and offline fixtures.

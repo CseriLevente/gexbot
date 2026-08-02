@@ -82,6 +82,7 @@ __all__ = [
 ]
 from src.adapters.raw_store import (
     PARSER_VERSION,
+    CaptureOrigin,
     CaptureSession,
     NullRawStore,
     RawResponseStore,
@@ -115,7 +116,9 @@ from src.domain.contracts import (
 from src.domain.iv import IVSource, build_iv_quote
 from src.domain.strikes import canonical_strike, parse_strike
 from src.domain.timestamps import ContractTimestamps
-from src.gex.sessions import EASTERN, to_eastern
+from src.domain.vendor_time import AmbiguityPolicy
+from src.domain.vendor_time import parse_vendor_timestamp as parse_vendor_instant
+from src.gex.sessions import to_eastern
 
 #: ``(symbol, expiry, canonical strike, right)``. The strike is the exact
 #: decimal spelling, not a float -- see ``parse_strike``.
@@ -768,6 +771,28 @@ VENDOR_TIMEZONE_ASSUMPTION_STATUS = (
 )
 
 
+def capture_origin_of(transport: Any) -> CaptureOrigin:
+    """Which kind of capture a transport produces.
+
+    Read off the transport rather than declared by the caller. v2.1.5 set
+    ``live_capture = False`` as a constant on the validation report -- correct
+    then, and it would have stayed correct-looking through the first real
+    session, because nothing derived it from anything.
+
+    A transport that does not say is ``UNKNOWN_ORIGIN``, which is never
+    treated as live.
+    """
+    from src.adapters.raw_store import CaptureOrigin
+
+    declared = getattr(transport, "capture_origin", None)
+    if declared is None:
+        return CaptureOrigin.UNKNOWN_ORIGIN
+    try:
+        return CaptureOrigin(declared)
+    except ValueError:
+        return CaptureOrigin.UNKNOWN_ORIGIN
+
+
 def parse_vendor_timestamp(
     value: str | None,
     *,
@@ -788,26 +813,35 @@ def parse_vendor_timestamp(
     and 01:30 on the fall-back Sunday happens twice. Off by default because
     neither window overlaps a US index-option session, so enforcing it on
     ordinary market data would add failure modes without preventing an error.
+
+    Delegates to ``src.domain.vendor_time``, which is the single interpretation
+    shared with the validator, the field observer and replay. v2.1.5 had this
+    localising to Eastern while the validator read the same string as UTC, so
+    one payload had two instants depending on which module was looking.
     """
-    if not value:
-        return None, False
-    text = value.strip()
-    if not text:
-        return None, False
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None, False
-
-    if parsed.tzinfo is not None:
-        return to_eastern(parsed), False
-
     if strict_dst:
-        _reject_impossible_eastern_wall_clock(parsed, fold=fold)
-    localised = parsed.replace(tzinfo=EASTERN)
-    if fold is not None:
-        localised = localised.replace(fold=fold)
-    return localised, True
+        parsed_naive = _naive_or_none(value)
+        if parsed_naive is not None:
+            _reject_impossible_eastern_wall_clock(parsed_naive, fold=fold)
+
+    observed = parse_vendor_instant(
+        value,
+        ambiguity=AmbiguityPolicy.LATER if fold == 1 else AmbiguityPolicy.EARLIER,
+    )
+    if observed is None:
+        return None, False
+    return to_eastern(observed.normalized_utc), observed.localization_applied
+
+
+def _naive_or_none(value: str | None) -> datetime | None:
+    """The naive reading, for the strict-DST check that predates the parser."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is None else None
 
 
 def _reject_impossible_eastern_wall_clock(naive: datetime, *, fold: int | None) -> None:
@@ -1376,6 +1410,17 @@ class ThetaDataClient:
         self.raw_store: RawResponseStore = raw_store or NullRawStore()
         # Injected so tests are deterministic and the client stays clock-free.
         self._clock = clock or (lambda: datetime.now().astimezone())
+
+    @property
+    def transport(self) -> HttpTransport:
+        """The transport in use. Read-only, and read by capture-origin.
+
+        Public because a capture has to be labelled by what actually fetched
+        it: ``capture_origin_of(client.transport)`` is the only thing that
+        decides whether a session counts as live, and it must not depend on
+        reaching into a private attribute.
+        """
+        return self._transport
 
     @property
     def tier(self) -> Tier:

@@ -1,5 +1,83 @@
 # Changelog
 
+## 2.1.6 - evidence binding and capture readiness
+
+v2.1.5 made the evidence derived. v2.1.6 makes the *authorization* independent
+of the thing being authorized.
+
+The pattern this release removes, stated once: **a snapshot was a witness to its
+own provenance.** `compute_trusted_gex` decided trust by reading `chain.meta` --
+the pipeline fingerprint, the raw-capture manifest, the spot provenance. All
+three are metadata the producing code writes into the snapshot, and
+`ChainSnapshot` is a public dataclass, so:
+
+```python
+dataclasses.replace(
+    build_synthetic_chain(),
+    meta={"pipeline": {...}, "raw_capture_manifest": {...}, "spot_provenance": {...}},
+)
+```
+
+satisfied every gate. The chain had never been near a capture.
+
+Trust now requires a `VerifiedCalculationContext`, which only
+`build_verified_calculation_context` produces and which re-derives every
+verification from the manifest and the raw store. The manifest inside
+`chain.meta` remains useful -- it says which bytes to go and look at -- and on
+its own it authorizes nothing.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.5 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Trust was decided from `chain.meta` | A synthetic chain with the right keys computed a trusted GEX | `compute_trusted_gex(chain, context=...)` requires independently verified evidence; nine bindings checked, including that the chain's spot equals the verified index print |
+| 2 | An empty fingerprint meant "no claim to check" | A manifest that said nothing about its pipeline verified against any pipeline | `verify_capture(..., expected_pipeline_fingerprint=...)`; empty is a failure, not a skip |
+| 3 | Only payload hashes were checked, as a *set* | Two records could swap payload hashes undetected | `ManifestRecord` per record; every field bound to its own record id and to the store |
+| 4 | The manifest hash covered four sorted lists | Mutating a request id, sequence, status or clock left the digest unchanged | The hash covers sorted per-record semantic descriptors |
+| 5 | `InMemoryRawStore` could be capture-ready | A paid session's only copy of the evidence would not survive the process | `StoreDurability`; readiness also requires clean integrity, a write/read probe, a location outside the source tree, free space and append-only behaviour |
+| 6 | Validated observations never reached the gate | A capture could observe the vendor's underlying source and the report still read `UNKNOWN` -- and a *disagreement* could not block anything | `derive_post_capture_compatibility`; a live mismatch overrides a documented match, a live match only fills an unknown |
+| 7 | Chain conventions were read from row zero | One agreeing contract characterised every strike | Every row of every relevant record, with `ChainCoverage`: rows, records, matches, mismatches, missing, non-finite, coverage ratio, distinct values, maximum deviation |
+| 8 | Two timestamp interpretations | The adapter localised a naive vendor string to Eastern while the validator read it as UTC -- four hours apart, in the module whose job is to catch disagreements | `src/domain/vendor_time.py`, used by normalization, observation, validation, spot sync and replay |
+| 9 | `live_capture` was a hardcoded `False` | Correct then, and it would have stayed correct-looking through the first real session | `CaptureOrigin` stamped by the transport onto each record, in the manifest hash; `live_capture` is derived |
+| 10 | Provenance leaked untyped errors | `SpotProvenance(timestamp="...")` raised `AttributeError` from a provenance constructor | Exact types required; `datetime` is refused where a `date` belongs; `observed_at` is parsed as a real ISO date and stored as `observed_on` |
+| 11 | The health probe wrote into the capture namespace | Checking an append-only store permanently added to it | A sibling health directory plus a scratch write in the capture root; neither enters the index or consumes a request sequence |
+| 12 | `validate_metadata` checked presence, not type | A string HTTP status or a negative sequence loaded | Types, ranges, tz-awareness, ordering and parser support all checked |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | -- |
+| `EXPECTED_MODEL_FINGERPRINT` | `d3d458592b6f87e0` | `faf0a9f595f2a93a` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `568d2c2d...` | `bd668a62...` | `VERSION_METADATA_ONLY` |
+
+**No GEX number changed**, and this time it was measured rather than argued:
+recomputing the reference case with `model_version` pinned back to
+`gex-engine/2.1.5`, and nothing else reverted, reproduces both v2.1.5 digests
+exactly. The version string is the whole of both moves.
+
+### Behavioural changes worth knowing
+
+* `compute_trusted_gex(chain)` no longer exists. It is
+  `compute_trusted_gex(chain, context=build_verified_calculation_context(...))`.
+* `verify_capture` requires `expected_pipeline_fingerprint` and a `plan`.
+  Omitting either produces a failed verification rather than a passing one.
+* Manifests written by v2.1.5 are **refused**, not reinterpreted: the schema
+  version is checked and the old parallel arrays cannot express the per-record
+  binding this release verifies.
+* `InMemoryRawStore` stays fully supported for unit tests and offline fixtures.
+  It cannot reach `READY_FOR_RAW_CAPTURE_ONLY`.
+* The ambiguous hour of the autumn DST transition is resolved by a recorded
+  `ambiguity_resolution`, not by `datetime.fold`. `src/gex/sessions.USEastern` is
+  hand-written -- there is no `tzdata` wheel on every machine this runs on -- and
+  it deliberately ignores `fold`. See OPEN_DECISIONS OD-2.
+
 ## 2.1.5 - evidence integrity and calculation trust
 
 v2.1.4 made the evidence typed. v2.1.5 makes it *derived*.

@@ -34,8 +34,14 @@ from src.adapters.thetadata.endpoints import Endpoint
 NOW = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
 
 
+#: What ``store_with`` claims produced its capture. Any non-empty value will
+#: do; v2.1.6 refuses an *empty* fingerprint, because "no claim" is not the same
+#: as "nothing to check".
+PIPELINE = "test-pipeline-fingerprint"
+
+
 def store_with(*endpoints: Endpoint) -> tuple[InMemoryRawStore, RawCaptureManifest]:
-    from src.adapters.raw_store import build_record_id
+    from src.adapters.raw_store import ManifestRecord, build_record_id
 
     store = InMemoryRawStore()
     records = []
@@ -61,11 +67,25 @@ def store_with(*endpoints: Endpoint) -> tuple[InMemoryRawStore, RawCaptureManife
         )
     manifest = RawCaptureManifest(
         session_id="s",
-        record_ids=tuple(sorted(r.record_id for r in records)),
-        payload_hashes=tuple(sorted(r.payload_hash for r in records)),
-        endpoint_records={r.endpoint: (r.record_id,) for r in records},
+        # Derived from the records, per record. The endpoint map is a property
+        # of the descriptors now, so it cannot disagree with them.
+        records=tuple(ManifestRecord.of(record) for record in records),
+        capture_plan_fingerprint=plan_for().fingerprint,
+        pipeline_fingerprint=PIPELINE,
     )
     return store, manifest
+
+
+def verified(manifest, store, **overrides):
+    """Verify against a named plan and a named pipeline. Both are required."""
+    from src.adapters.certification import verify_capture
+
+    payload = {
+        "plan": plan_for(),
+        "expected_pipeline_fingerprint": PIPELINE,
+    }
+    payload.update(overrides)
+    return verify_capture(manifest, store, **payload)
 
 
 # =============================================================================
@@ -123,45 +143,44 @@ def test_the_plan_has_a_fingerprint_that_moves_with_its_contents():
 
 def test_one_record_is_not_a_complete_capture():
     """The regression. A single quote snapshot verified in v2.1.4."""
-    from src.adapters.certification import verify_capture
 
     store, manifest = store_with(Endpoint.OPTION_QUOTE_SNAPSHOT)
-    verification = verify_capture(manifest, store, plan=plan_for())
+    verification = verified(manifest, store)
     assert not verification.verified
     assert any("MISSING_ENDPOINT" in f for f in verification.failures)
 
 
 def test_a_capture_naming_every_required_endpoint_verifies():
-    from src.adapters.certification import verify_capture
-
     store, manifest = store_with(*STANDARD_VENDOR_IV)
-    verification = verify_capture(manifest, store, plan=plan_for())
+    verification = verified(manifest, store)
     assert verification.verified, verification.failures
 
 
 def test_a_missing_index_snapshot_is_named_specifically():
-    from src.adapters.certification import verify_capture
-
     store, manifest = store_with(*STANDARD_VENDOR_IV[:-1])
-    verification = verify_capture(manifest, store, plan=plan_for())
+    verification = verified(manifest, store)
     assert any(Endpoint.INDEX_PRICE_SNAPSHOT.value in f for f in verification.failures)
 
 
 def test_an_endpoint_record_the_store_does_not_hold_is_refused():
-    from src.adapters.certification import verify_capture
+    import dataclasses
+
+    from src.adapters.raw_store import ManifestRecord
 
     store, manifest = store_with(*STANDARD_VENDOR_IV)
-    forged = RawCaptureManifest(
-        session_id=manifest.session_id,
-        record_ids=manifest.record_ids,
-        payload_hashes=manifest.payload_hashes,
-        endpoint_records={
-            **manifest.endpoint_records,
-            Endpoint.OPTION_GREEKS_SECOND_ORDER.value: ("never-written",),
-        },
+    forged = dataclasses.replace(
+        manifest,
+        records=(
+            *manifest.records,
+            ManifestRecord(
+                record_id="never-written",
+                endpoint=Endpoint.OPTION_GREEKS_SECOND_ORDER.value,
+                payload_hash="0" * 64,
+                parameter_hash="0" * 16,
+            ),
+        ),
     )
-    verification = verify_capture(forged, store, plan=plan_for())
-    assert not verification.verified
+    assert not verified(forged, store).verified
 
 
 def test_the_manifest_hash_is_a_full_sha256():
@@ -219,7 +238,14 @@ def test_an_unwritable_store_is_not_usable(tmp_path: pathlib.Path):
     from src.adapters.raw_store import probe_raw_store
 
     class Refuses(FileRawStore):
-        def put(self, **kwargs):  # type: ignore[override]
+        """A store whose filesystem refuses every write.
+
+        Overrides the write primitive rather than ``put``: since v2.1.6 the
+        probe writes a scratch file directly, so that it can check the capture
+        destination without adding a record to the index it is checking.
+        """
+
+        def _atomic_write(self, *args, **kwargs):  # type: ignore[override]
             raise OSError("read-only filesystem")
 
     health = probe_raw_store(Refuses(tmp_path / "raw"))

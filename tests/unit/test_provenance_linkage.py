@@ -92,24 +92,40 @@ def test_the_snapshot_can_locate_its_source_payloads(tmp_path):
         assert rt.client.raw_store.get_payload(record_id)
 
 
+def _descriptor(record_id: str, payload_hash: str):
+    from src.adapters.raw_store import ManifestRecord
+
+    return ManifestRecord(
+        record_id=record_id,
+        endpoint="/v3/option/snapshot/quote",
+        payload_hash=payload_hash,
+        parameter_hash="p" * 16,
+    )
+
+
 def test_the_manifest_hash_is_deterministic():
-    first = RawCaptureManifest(
-        session_id="s1", record_ids=("a", "b"), payload_hashes=("h1", "h2")
-    )
-    second = RawCaptureManifest(
-        session_id="s1", record_ids=("b", "a"), payload_hashes=("h2", "h1")
-    )
+    """Record order is not part of what a capture is."""
+    a, b = _descriptor("a", "h1"), _descriptor("b", "h2")
+    first = RawCaptureManifest(session_id="s1", records=(a, b))
+    second = RawCaptureManifest(session_id="s1", records=(b, a))
     assert first.manifest_hash == second.manifest_hash
 
 
 def test_a_different_source_set_changes_the_manifest_hash():
-    base = RawCaptureManifest(
-        session_id="s1", record_ids=("a",), payload_hashes=("h1",)
-    )
-    other = RawCaptureManifest(
-        session_id="s1", record_ids=("a", "b"), payload_hashes=("h1", "h2")
-    )
+    a, b = _descriptor("a", "h1"), _descriptor("b", "h2")
+    base = RawCaptureManifest(session_id="s1", records=(a,))
+    other = RawCaptureManifest(session_id="s1", records=(a, b))
     assert base.manifest_hash != other.manifest_hash
+
+
+def test_swapping_two_payload_hashes_changes_the_manifest_hash():
+    """v2.1.5 hashed four independently sorted lists, so this was invisible."""
+    a, b = _descriptor("a", "h1"), _descriptor("b", "h2")
+    honest = RawCaptureManifest(session_id="s1", records=(a, b))
+    swapped = RawCaptureManifest(
+        session_id="s1", records=(_descriptor("a", "h2"), _descriptor("b", "h1"))
+    )
+    assert honest.manifest_hash != swapped.manifest_hash
 
 
 def test_disabled_capture_is_recorded_explicitly():
@@ -217,12 +233,12 @@ def test_human_prose_alone_does_not_change_the_hash():
 # =============================================================================
 
 
-def test_the_parser_version_is_2_1_5():
-    assert PARSER_VERSION == "thetadata-v3-parser/2.1.5"
+def test_the_parser_version_is_2_1_6():
+    assert PARSER_VERSION == "thetadata-v3-parser/2.1.6"
 
 
 def test_the_engine_version_is_2_1_5():
-    assert MODEL_VERSION == "gex-engine/2.1.5"
+    assert MODEL_VERSION == "gex-engine/2.1.6"
 
 
 def test_the_two_versions_stay_distinct():

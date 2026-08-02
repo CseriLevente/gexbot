@@ -97,6 +97,13 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Trusted vs diagnostic calculation | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; unresolved pricing refuses a trusted GEX |
 | Exact decimal strike carried through the domain | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Typed capture and validation evidence | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `verify_capture` checks a manifest against its store |
+| Trusted calculation requires independently verified evidence | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `compute_trusted_gex(chain, context=...)`, and a chain's own metadata authorizes nothing |
+| Per-record manifest descriptors, bound field by field | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the manifest hash covers full per-record semantics |
+| Durable storage required for paid capture | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `InMemoryRawStore` stays supported for tests and cannot be capture-ready |
+| Capture origin stamped by the transport | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; an offline fixture cannot read as a live capture |
+| Post-capture pricing compatibility | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; validated observations reach the gate, and a live mismatch blocks |
+| Chain-level convention coverage (every row, every record) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; one matching contract cannot characterise a chain |
+| One vendor timestamp interpretation (`src/domain/vendor_time.py`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; adapter and validator read the same string identically |
 | Graded provenance (PLANNED / OBSERVED / VALIDATED) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; derived from a named raw record, never asserted |
 | Typed pricing dimensions and attestations | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; no comparison has been run, so nothing carries `LIVE_COMPARISON` evidence |
 | Canonical pipeline API (`fetch_chain` / `compute_gex` / `capture_and_compute`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |

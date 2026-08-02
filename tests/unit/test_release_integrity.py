@@ -3,10 +3,10 @@
 Three properties that were previously only claimed in prose and enforced by CI
 scripts that nobody runs locally:
 
-* §22 the numerics run on a bare interpreter, in a subprocess, with no
+* Â§22 the numerics run on a bare interpreter, in a subprocess, with no
   third-party package importable at all -- not merely "not imported";
-* §23 the build and its tooling are pinned, so a rebuild resolves the same way;
-* §24 the release archive is produced from tracked content only, is
+* Â§23 the build and its tooling are pinned, so a rebuild resolves the same way;
+* Â§24 the release archive is produced from tracked content only, is
   reproducible for a given commit, and carries no credential.
 """
 
@@ -44,7 +44,7 @@ def in_git_repo() -> bool:
 
 
 # =============================================================================
-# §22 -- environment independence
+# Â§22 -- environment independence
 # =============================================================================
 
 BARE_PROGRAM = """
@@ -133,7 +133,7 @@ def test_parsing_yaml_without_pyyaml_fails_loudly_rather_than_silently():
 
 
 # =============================================================================
-# §23 -- pinned, reproducible build
+# Â§23 -- pinned, reproducible build
 # =============================================================================
 
 
@@ -203,7 +203,7 @@ def test_warnings_are_errors():
 
 
 # =============================================================================
-# §24 -- the release archive
+# Â§24 -- the release archive
 # =============================================================================
 
 CREDENTIAL_PATTERNS = (
@@ -356,7 +356,7 @@ def test_the_release_procedure_is_documented():
     assert "git status --porcelain" in text
     # An archive nobody has extracted is an archive nobody knows works.
     assert "smoke test" in text.lower()
-    assert "git archive --format=zip --output=gex-bot-v2.1.5.zip HEAD" in text
+    assert "git archive --format=zip --output=gex-bot-v2.1.6.zip HEAD" in text
 
 
 def test_ci_runs_the_release_integrity_checks():

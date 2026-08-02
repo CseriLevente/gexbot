@@ -139,7 +139,7 @@ def test_provenance_evidence_raises_a_structured_error():
             record_id="",
             endpoint="/v3/x",
             payload_hash="0" * 64,
-            parser_version="thetadata-v3-parser/2.1.5",
+            parser_version="thetadata-v3-parser/2.1.6",
             field_path="open_interest",
             observed_value=1,
         )

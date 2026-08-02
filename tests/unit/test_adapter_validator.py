@@ -41,7 +41,11 @@ from src.adapters.errors import (
     ThetaDataProvenanceError,
     ThetaDataValidationError,
 )
-from src.adapters.raw_store import InMemoryRawStore, RawCaptureManifest
+from src.adapters.raw_store import (
+    PARSER_VERSION,
+    InMemoryRawStore,
+    RawCaptureManifest,
+)
 from src.adapters.thetadata.endpoints import Endpoint
 from src.config.compatibility import PricingDimension
 from tests.certification_fixtures import (
@@ -71,11 +75,24 @@ def test_readiness_takes_a_manifest_and_a_store_not_a_verdict():
 def test_a_hand_built_capture_verification_is_refused():
     """The regression."""
     from src.adapters.certification import CaptureVerification
+    from src.adapters.raw_store import ManifestRecord
 
     forged = CaptureVerification(
-        manifest=RawCaptureManifest(session_id="s", record_ids=("fake-record",)),
+        manifest=RawCaptureManifest(
+            session_id="s",
+            records=(
+                ManifestRecord(
+                    record_id="fake-record",
+                    endpoint=Endpoint.OPTION_QUOTE_SNAPSHOT.value,
+                    payload_hash="0" * 64,
+                    parameter_hash="0" * 16,
+                ),
+            ),
+        ),
         confirmed_record_ids=("fake-record",),
         failures=(),
+        plan_fingerprint="anything",
+        expected_pipeline_fingerprint="anything",
     )
     assert forged.verified  # it says so, and that is the point
     with pytest.raises(ThetaDataCertificationError):
@@ -88,12 +105,19 @@ def test_a_hand_built_capture_verification_is_refused():
 
 
 def test_a_forged_manifest_does_not_verify_against_a_real_store():
+    from src.adapters.raw_store import ManifestRecord
+
     store, _ = build_capture()
     forged = RawCaptureManifest(
         session_id="s",
-        record_ids=("never-written",),
-        payload_hashes=("0" * 64,),
-        endpoint_records={Endpoint.OPTION_QUOTE_SNAPSHOT.value: ("never-written",)},
+        records=(
+            ManifestRecord(
+                record_id="never-written",
+                endpoint=Endpoint.OPTION_QUOTE_SNAPSHOT.value,
+                payload_hash="0" * 64,
+                parameter_hash="0" * 16,
+            ),
+        ),
     )
     result = readiness(manifest=forged, raw_store=store)
     assert result.state is CertificationState.READY_FOR_RAW_CAPTURE_ONLY
@@ -106,8 +130,11 @@ def test_readiness_recomputes_verification_every_time():
     assert first.state is not CertificationState.READY_FOR_RAW_CAPTURE_ONLY
 
     # Same manifest, empty store. If the verdict were cached or trusted from the
-    # previous call this would still read as a completed capture.
-    empty = readiness(manifest=manifest, raw_store=InMemoryRawStore())
+    # previous call this would still read as a completed capture. The empty
+    # store is durable, so the only thing wrong with it is that it is empty.
+    from tests.certification_fixtures import durable_store
+
+    empty = readiness(manifest=manifest, raw_store=durable_store())
     assert empty.state is CertificationState.READY_FOR_RAW_CAPTURE_ONLY
 
 
@@ -236,7 +263,7 @@ def observation(**overrides) -> VerifiedFieldObservation:
         "record_id": "r",
         "endpoint": Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT.value,
         "payload_hash": "0" * 64,
-        "parser_version": "thetadata-v3-parser/2.1.5",
+        "parser_version": PARSER_VERSION,
         "field_path": "open_interest",
         "observed_value": 4200,
     }

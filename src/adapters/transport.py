@@ -224,10 +224,19 @@ class RecordedCall:
 class FakeTransport:
     """Deterministic in-memory transport. Never touches the network.
 
+    Declares its own origin, so a capture taken through it is labelled an
+    offline fixture in the manifest and in the manifest hash. v2.1.5 carried
+    ``live_capture = False`` as a constant on the validation report, which was
+    the right answer and not an *answer*: it would have stayed False through the
+    first real session.
+
     Responses are keyed by a substring of the URL path so a test can register
     "whatever hits /v3/option/snapshot/quote" without reproducing the exact query
     string.
     """
+
+    #: Nothing this transport returns is evidence about the vendor.
+    capture_origin = "OFFLINE_FIXTURE"
 
     def __init__(
         self,
@@ -254,6 +263,15 @@ class FakeTransport:
         self, path_fragment: str, text: str, *, status_code: int = 200
     ) -> None:
         self.register(path_fragment, HttpResponse(status_code=status_code, text=text))
+
+    def registered_text(self, path_fragment: str) -> str | None:
+        """The body registered for a route, or ``None``.
+
+        So a fixture can capture the same bytes this transport would answer
+        with, rather than keeping a second copy that can drift out of step.
+        """
+        response = self._routes.get(path_fragment)
+        return response.text if isinstance(response, HttpResponse) else None
 
     def get(
         self, url: str, params: Mapping[str, Any], timeout_seconds: float
@@ -497,6 +515,19 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
     byte count exceeds the cap, so an oversized payload is never fully held in
     memory and never reaches a parser.
     """
+
+    #: A real round trip, which is what makes a capture live. Whether it reaches
+    #: the vendor directly or through a local Theta Terminal is decided per
+    #: request from the URL: both are live, and they fail differently.
+    capture_origin = "LIVE_HTTP_CAPTURE"
+
+    @staticmethod
+    def origin_for(url: str) -> str:
+        return (
+            "LOCAL_TERMINAL_CAPTURE"
+            if "127.0.0.1" in url or "localhost" in url
+            else "LIVE_HTTP_CAPTURE"
+        )
 
     def __init__(
         self,

@@ -1191,7 +1191,11 @@ class ThetaDataRuntime:
         manifest = RawCaptureManifest.from_session(capture)
         observation = AdapterValidator.observe_field(
             manifest=manifest,
-            store=self.client.raw_store,
+            # The session's own store, not the client's default: a fetch may be
+            # directed elsewhere, and reading the observation back from a place
+            # the bytes were never written is how a spot silently loses its
+            # attribution.
+            store=capture.store,
             endpoint=Endpoint.INDEX_PRICE_SNAPSHOT,
             field_path="index_price",
         )
@@ -1241,6 +1245,7 @@ class ThetaDataRuntime:
             # nobody threaded a session through is the same class of defect as
             # a setting that never reaches a request.
             from src.adapters.raw_store import CaptureSession, new_capture_session_id
+            from src.adapters.thetadata.client import capture_origin_of
 
             capture = CaptureSession(
                 store=self.client.raw_store,
@@ -1249,6 +1254,9 @@ class ThetaDataRuntime:
                 # fetches at the same market instant collided in an append-only
                 # store.
                 session_id=new_capture_session_id(as_of=as_of),
+                # Read off the transport actually in use, so an offline fixture
+                # cannot present itself as a live capture.
+                capture_origin=capture_origin_of(self.client.transport),
             )
 
         chain = self.client.fetch_chain(

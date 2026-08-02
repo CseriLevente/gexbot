@@ -26,6 +26,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -34,29 +35,36 @@ from src.adapters.errors import (
     ThetaDataProvenanceError,
     ThetaDataValidationError,
 )
-from src.adapters.raw_store import PARSER_VERSION, RawCaptureManifest
+from src.adapters.raw_store import (
+    PARSER_VERSION,
+    CaptureOrigin,
+    RawCaptureManifest,
+)
 from src.adapters.thetadata.endpoints import RESPONSE_FIELDS, Endpoint
 from src.config.compatibility import (
     EvidenceSource,
     PricingDimension,
     VendorObservation,
 )
+from src.domain.vendor_time import parse_vendor_timestamp
 
 __all__ = [
     "VALIDATION_SCHEMA_VERSION",
     "VALIDATOR_VERSION",
     "AdapterValidationReport",
     "AdapterValidator",
+    "ChainCoverage",
     "ValidationCheck",
     "VerifiedFieldObservation",
+    "parse_observation_timestamp",
 ]
 
 #: Bumped when the *meaning* of a validation report changes.
-VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.5"
+VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.6"
 
 #: Bumped when the validator's own logic changes, so two reports that disagree
 #: can be told apart by which code produced them.
-VALIDATOR_VERSION = "adapter-validator/2.1.5"
+VALIDATOR_VERSION = "adapter-validator/2.1.6"
 
 #: Parser versions whose output this validator understands. A payload read by
 #: something else is not evidence this code can interpret.
@@ -135,6 +143,72 @@ class VerifiedFieldObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class ChainCoverage:
+    """How much of the chain a convention was actually measured across.
+
+    v2.1.5 read row zero of one record and let that stand for the chain. One
+    agreeing contract characterised every strike, so a vendor that priced a
+    single strike against the index print and the rest against something else
+    read as agreement -- and the dimension it settled, ``UNDERLYING_SOURCE``,
+    multiplies every gamma in the snapshot.
+
+    The counts are separate because they mean different things. A missing row
+    had no such column; a non-finite row had one that could not be read as a
+    number; a mismatching row was read and disagreed. Only the last is evidence
+    about the vendor.
+    """
+
+    rows_inspected: int = 0
+    records_inspected: int = 0
+    matching_rows: int = 0
+    mismatching_rows: int = 0
+    missing_rows: int = 0
+    non_finite_rows: int = 0
+    #: Every distinct value seen, as text. A chain-level convention that is not
+    #: one value is not a convention.
+    distinct_observed_values: tuple[str, ...] = ()
+    #: Largest absolute difference where the comparison is numeric.
+    maximum_deviation: float | None = None
+
+    @property
+    def coverage_ratio(self) -> float:
+        """Comparable rows over rows looked at. 0.0 when nothing was readable."""
+        if self.rows_inspected <= 0:
+            return 0.0
+        comparable = self.matching_rows + self.mismatching_rows
+        return comparable / self.rows_inspected
+
+    @property
+    def uniform(self) -> bool:
+        """Every readable row agreed, and there was something to read."""
+        return (
+            self.rows_inspected > 0
+            and self.matching_rows > 0
+            and self.mismatching_rows == 0
+            and self.missing_rows == 0
+            and self.non_finite_rows == 0
+        )
+
+    @property
+    def mixed(self) -> bool:
+        """Some rows agreed and some did not. Not a chain-level answer."""
+        return self.matching_rows > 0 and self.mismatching_rows > 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "rows_inspected": self.rows_inspected,
+            "records_inspected": self.records_inspected,
+            "matching_rows": self.matching_rows,
+            "mismatching_rows": self.mismatching_rows,
+            "missing_rows": self.missing_rows,
+            "non_finite_rows": self.non_finite_rows,
+            "coverage_ratio": self.coverage_ratio,
+            "distinct_observed_values": list(self.distinct_observed_values),
+            "maximum_deviation": self.maximum_deviation,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ValidationCheck:
     """One thing the validator checked, and what it found."""
 
@@ -147,6 +221,10 @@ class ValidationCheck:
     #: read any.
     record_ids: tuple[str, ...] = ()
     observed: VerifiedFieldObservation | None = None
+    #: How far across the chain the check actually looked. ``None`` for checks
+    #: that are not chain-level, so an absent measurement is distinguishable
+    #: from a measurement that found nothing.
+    coverage: ChainCoverage | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +234,7 @@ class ValidationCheck:
             "dimension": self.dimension.value if self.dimension else None,
             "record_ids": list(self.record_ids),
             "observed": self.observed.as_dict() if self.observed else None,
+            "coverage": self.coverage.as_dict() if self.coverage else None,
         }
 
     def semantic_payload(self) -> dict[str, Any]:
@@ -168,6 +247,7 @@ class ValidationCheck:
             "observed_value_hash": (
                 self.observed.observed_value_hash if self.observed else None
             ),
+            "coverage": self.coverage.as_dict() if self.coverage else None,
         }
 
 
@@ -191,8 +271,12 @@ class AdapterValidationReport:
     validator_version: str = VALIDATOR_VERSION
     parser_version: str = PARSER_VERSION
     pipeline_fingerprint: str = ""
-    #: Whether the bytes came from a real vendor session. Always False so far.
-    live_capture: bool = False
+    #: Where the captured bytes came from, as the transport stamped it on every
+    #: record. v2.1.5 carried a ``live_capture`` boolean that was hardcoded
+    #: ``False`` at the only construction site -- true at the time, and it would
+    #: have stayed ``False`` through the first real session, because nothing
+    #: derived it from anything.
+    capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
     pricing_observations: tuple[VendorObservation, ...] = ()
     spot_observation: VerifiedFieldObservation | None = None
     open_interest_observation: VerifiedFieldObservation | None = None
@@ -208,6 +292,16 @@ class AdapterValidationReport:
                 "AdapterValidationReport carries no checks. An empty report is "
                 "not a passing report."
             )
+
+    @property
+    def live_capture(self) -> bool:
+        """Whether these bytes came from a real vendor round trip.
+
+        Derived, not stored. An offline fixture reports ``OFFLINE_FIXTURE`` and
+        can never read as live, which is what keeps a synthetic capture out of
+        ``ADAPTER_CERTIFIED``.
+        """
+        return self.capture_origin.is_live
 
     @property
     def completed_checks(self) -> tuple[str, ...]:
@@ -249,6 +343,7 @@ class AdapterValidationReport:
             "validator_version": self.validator_version,
             "parser_version": self.parser_version,
             "pipeline_fingerprint": self.pipeline_fingerprint,
+            "capture_origin": self.capture_origin.value,
             "live_capture": self.live_capture,
             "required_checks": sorted(self.required_checks),
             "checks": sorted(
@@ -266,6 +361,7 @@ class AdapterValidationReport:
             "validated_at": self.validated_at,
             "parser_version": self.parser_version,
             "pipeline_fingerprint": self.pipeline_fingerprint,
+            "capture_origin": self.capture_origin.value,
             "live_capture": self.live_capture,
             "passed": self.passed,
             "required_checks": sorted(self.required_checks),
@@ -496,7 +592,7 @@ class AdapterValidator:
                 continue
             name = f"vendor_{dimension.value.lower()}"
             required.append(name)
-            observed, evidence_records, detail = _observe_dimension(
+            observed, evidence_records, detail, coverage = _observe_dimension(
                 dimension, manifest, store, pipeline
             )
             if observed is not None:
@@ -504,8 +600,14 @@ class AdapterValidator:
             checks.append(
                 ValidationCheck(
                     name=name,
-                    passed=observed is not None,
+                    # A chain-level convention that was measured and found to
+                    # vary has not been established, whatever value the
+                    # observation carries. v2.1.5 passed on the mere existence
+                    # of an observation.
+                    passed=observed is not None
+                    and (coverage is None or coverage.uniform),
                     detail=detail,
+                    coverage=coverage,
                     dimension=dimension,
                     record_ids=evidence_records,
                 )
@@ -520,7 +622,9 @@ class AdapterValidator:
             pipeline_fingerprint=(
                 pipeline.fingerprint() if hasattr(pipeline, "fingerprint") else ""
             ),
-            live_capture=False,
+            # Read off the capture, which read it off the transport. The
+            # validator is not in a position to know, and must not assert.
+            capture_origin=manifest.capture_origin,
             pricing_observations=tuple(observations),
             spot_observation=spot,
             open_interest_observation=open_interest,
@@ -538,92 +642,65 @@ def _try_observe(
         return None
 
 
+#: What a chain-level scan reports back: the observation, the records read, a
+#: sentence for a human, and how much of the chain the answer rests on.
+DimensionFinding = tuple[
+    "VendorObservation | None", tuple[str, ...], str, "ChainCoverage | None"
+]
+
+#: Recorded when a chain-level convention holds for some contracts and not
+#: others. Compared as a token like any other observed value, so it lands as
+#: MISMATCHED -- a chain that is two things is not evidence of either.
+MIXED_ACROSS_CHAIN = "MIXED_ACROSS_CHAIN"
+
+
+def _rows_of(
+    manifest: RawCaptureManifest, store: Any, endpoint: Endpoint
+) -> tuple[tuple[str, list[dict[str, str]]], ...]:
+    """Every row of every record the manifest holds for one endpoint.
+
+    The payload is re-hashed before it is read. Bytes that no longer match what
+    the store recorded are not evidence, and reading them anyway would let a
+    corrupted record contribute to a coverage count.
+    """
+    records = {r.record_id: r for r in store.records()}
+    out: list[tuple[str, list[dict[str, str]]]] = []
+    for record_id in manifest.records_for(endpoint.value):
+        record = records.get(record_id)
+        if record is None:
+            continue
+        payload = store.get_payload(record_id)
+        if hashlib.sha256(payload.encode("utf-8")).hexdigest() != record.payload_hash:
+            continue
+        out.append((record_id, list(csv.DictReader(io.StringIO(payload)))))
+    return tuple(out)
+
+
 def _observe_dimension(
     dimension: PricingDimension,
     manifest: RawCaptureManifest,
     store: Any,
     pipeline: Any,
-) -> tuple[VendorObservation | None, tuple[str, ...], str]:
+) -> DimensionFinding:
     """What this capture can establish about one vendor convention.
 
     Today: almost nothing. A snapshot reports the vendor's *output*; the
     conventions that produced it are not in the payload. Two dimensions are
     partially readable and the rest are not readable at all, which is recorded
     rather than glossed.
+
+    The two that are readable are read **across the chain**. v2.1.5 asked
+    ``observe_field`` for row zero of the first matching record and let the
+    answer characterise every strike.
     """
     greeks = manifest.records_for(Endpoint.OPTION_GREEKS_FIRST_ORDER.value)
     index = manifest.records_for(Endpoint.INDEX_PRICE_SNAPSHOT.value)
 
     if dimension is PricingDimension.UNDERLYING_SOURCE:
-        spot = _try_observe(
-            manifest, store, Endpoint.INDEX_PRICE_SNAPSHOT, "index_price"
-        )
-        vendor_underlying = _try_observe(
-            manifest, store, Endpoint.OPTION_GREEKS_FIRST_ORDER, "underlying_price"
-        )
-        if spot is None or vendor_underlying is None:
-            return (
-                None,
-                tuple(sorted({*index, *greeks})),
-                "needs both an index snapshot and a first-order greeks response",
-            )
-        # The greeks endpoint reports the underlying it used. If that equals the
-        # index print, the vendor priced against the same underlying we do.
-        agrees = _close(vendor_underlying.observed_value, spot.observed_value)
-        return (
-            VendorObservation(
-                dimension=dimension,
-                observed_value=(
-                    pipeline.model_spec.underlying_price_source.value
-                    if agrees
-                    else "DIFFERS_FROM_INDEX_PRINT"
-                ),
-                source=EvidenceSource.LIVE_COMPARISON,
-                reference=f"records {sorted({*index, *greeks})}",
-                observed_at=datetime.now(UTC).date().isoformat(),
-                record_ids=tuple(sorted({*index, *greeks})),
-                manifest_hash=manifest.manifest_hash,
-                note=(
-                    f"greeks underlying_price {vendor_underlying.observed_value} "
-                    f"vs index_price {spot.observed_value}"
-                ),
-            ),
-            tuple(sorted({*index, *greeks})),
-            "compared the vendor's stated underlying against the index print",
-        )
+        return _observe_underlying_source(manifest, store, pipeline, greeks, index)
 
     if dimension is PricingDimension.UNDERLYING_TIMESTAMP:
-        vendor_clock = _try_observe(
-            manifest, store, Endpoint.OPTION_GREEKS_FIRST_ORDER, "underlying_timestamp"
-        )
-        if vendor_clock is None:
-            return (
-                None,
-                tuple(greeks),
-                "no first-order greeks response carrying underlying_timestamp",
-            )
-        same_instant = vendor_clock.source_timestamp is not None and str(
-            vendor_clock.observed_value
-        ) == vendor_clock.source_timestamp.isoformat().replace("+00:00", "")
-        return (
-            VendorObservation(
-                dimension=dimension,
-                observed_value=(
-                    "OPTION_QUOTE_INSTANT" if same_instant else "DIFFERS_FROM_QUOTE"
-                ),
-                source=EvidenceSource.LIVE_COMPARISON,
-                reference=f"records {list(greeks)}",
-                observed_at=datetime.now(UTC).date().isoformat(),
-                record_ids=tuple(greeks),
-                manifest_hash=manifest.manifest_hash,
-                note=(
-                    f"underlying_timestamp {vendor_clock.observed_value} against "
-                    f"the row timestamp"
-                ),
-            ),
-            tuple(greeks),
-            "compared the vendor's underlying clock against the quote instant",
-        )
+        return _observe_underlying_timestamp(manifest, store, greeks)
 
     # Everything else: the convention is not in the response. Naming the records
     # that *would* have carried it keeps the check honest about what was looked
@@ -637,14 +714,220 @@ def _observe_dimension(
             "computed under. Vendor documentation or a purpose-built comparison "
             "is required."
         ),
+        None,
     )
 
 
-def _close(left: object, right: object, tolerance: float = 1e-9) -> bool:
+def _observe_underlying_source(
+    manifest: RawCaptureManifest,
+    store: Any,
+    pipeline: Any,
+    greeks: tuple[str, ...],
+    index: tuple[str, ...],
+) -> DimensionFinding:
+    """Did the vendor price *every* contract against the index print?
+
+    The greeks endpoint reports the underlying it used, per row, so comparing
+    one row answers the question for one strike and no others.
+    """
+    records = tuple(sorted({*index, *greeks}))
+    spot = _try_observe(manifest, store, Endpoint.INDEX_PRICE_SNAPSHOT, "index_price")
+    scanned = _rows_of(manifest, store, Endpoint.OPTION_GREEKS_FIRST_ORDER)
+    if spot is None or not scanned:
+        return (
+            None,
+            records,
+            "needs both an index snapshot and a first-order greeks response",
+            None,
+        )
+
+    reference = _as_number(spot.observed_value)
+    if reference is None:
+        return (
+            None,
+            records,
+            f"the index snapshot carries {spot.observed_value!r}, not a price",
+            None,
+        )
+
+    matching = mismatching = missing = non_finite = 0
+    rows_inspected = 0
+    seen: set[str] = set()
+    deviation: float | None = None
+    for _record_id, rows in scanned:
+        for row in rows:
+            rows_inspected += 1
+            raw = row.get("underlying_price")
+            if raw is None or not str(raw).strip():
+                missing += 1
+                continue
+            value = _as_number(raw)
+            if value is None:
+                non_finite += 1
+                continue
+            seen.add(repr(value))
+            gap = abs(value - reference)
+            deviation = gap if deviation is None else max(deviation, gap)
+            if gap <= 1e-9:
+                matching += 1
+            else:
+                mismatching += 1
+
+    coverage = ChainCoverage(
+        rows_inspected=rows_inspected,
+        records_inspected=len(scanned),
+        matching_rows=matching,
+        mismatching_rows=mismatching,
+        missing_rows=missing,
+        non_finite_rows=non_finite,
+        distinct_observed_values=tuple(sorted(seen)),
+        maximum_deviation=deviation,
+    )
+
+    if coverage.uniform:
+        observed: object = pipeline.model_spec.underlying_price_source.value
+        detail = (
+            f"every one of {rows_inspected} rows across {len(scanned)} records "
+            "priced against the index print"
+        )
+    elif coverage.mixed:
+        observed = MIXED_ACROSS_CHAIN
+        detail = (
+            f"{mismatching} of {rows_inspected} rows priced against something "
+            f"other than the index print (largest gap {deviation}). One matching "
+            "contract does not characterise the chain."
+        )
+    elif mismatching > 0:
+        observed = "DIFFERS_FROM_INDEX_PRINT"
+        detail = (
+            f"none of {rows_inspected} rows priced against the index print "
+            f"(largest gap {deviation})"
+        )
+    else:
+        return (
+            None,
+            records,
+            (
+                f"no greeks row carried a readable underlying_price "
+                f"({missing} missing, {non_finite} unreadable)"
+            ),
+            coverage,
+        )
+
+    return (
+        VendorObservation(
+            dimension=PricingDimension.UNDERLYING_SOURCE,
+            observed_value=observed,
+            source=EvidenceSource.LIVE_COMPARISON,
+            reference=f"records {list(records)}",
+            observed_at=datetime.now(UTC).date().isoformat(),
+            record_ids=records,
+            manifest_hash=manifest.manifest_hash,
+            note=detail,
+        ),
+        records,
+        detail,
+        coverage,
+    )
+
+
+def _observe_underlying_timestamp(
+    manifest: RawCaptureManifest, store: Any, greeks: tuple[str, ...]
+) -> DimensionFinding:
+    """Was the underlying read at the same instant as the option, row by row?
+
+    Both sides go through ``src.domain.vendor_time``, so this compares two
+    values built the same way. v2.1.5 compared a raw vendor string against an
+    ``isoformat()`` with ``+00:00`` stripped out, which could only ever agree
+    because the validator happened to read the string as UTC.
+    """
+    scanned = _rows_of(manifest, store, Endpoint.OPTION_GREEKS_FIRST_ORDER)
+    if not scanned:
+        return (
+            None,
+            tuple(greeks),
+            "no first-order greeks response carrying underlying_timestamp",
+            None,
+        )
+
+    matching = mismatching = missing = 0
+    rows_inspected = 0
+    seen: set[str] = set()
+    deviation: float | None = None
+    for _record_id, rows in scanned:
+        for row in rows:
+            rows_inspected += 1
+            underlying = parse_vendor_timestamp(row.get("underlying_timestamp"))
+            quoted = parse_vendor_timestamp(row.get("timestamp"))
+            if underlying is None or quoted is None:
+                missing += 1
+                continue
+            seen.add(underlying.normalized_utc.isoformat())
+            gap = abs(
+                (underlying.normalized_utc - quoted.normalized_utc).total_seconds()
+            )
+            deviation = gap if deviation is None else max(deviation, gap)
+            if gap == 0.0:
+                matching += 1
+            else:
+                mismatching += 1
+
+    coverage = ChainCoverage(
+        rows_inspected=rows_inspected,
+        records_inspected=len(scanned),
+        matching_rows=matching,
+        mismatching_rows=mismatching,
+        missing_rows=missing,
+        distinct_observed_values=tuple(sorted(seen)),
+        maximum_deviation=deviation,
+    )
+
+    if coverage.uniform:
+        observed: object = "OPTION_QUOTE_INSTANT"
+        detail = f"all {rows_inspected} rows share one instant with their quote"
+    elif coverage.mixed:
+        observed = MIXED_ACROSS_CHAIN
+        detail = (
+            f"{mismatching} of {rows_inspected} rows read the underlying at a "
+            f"different instant (largest gap {deviation}s)"
+        )
+    elif mismatching > 0:
+        observed = "DIFFERS_FROM_QUOTE"
+        detail = f"no row read the underlying at its quote instant ({deviation}s)"
+    else:
+        return (
+            None,
+            tuple(greeks),
+            f"no greeks row carried a readable underlying_timestamp ({missing} missing)",
+            coverage,
+        )
+
+    return (
+        VendorObservation(
+            dimension=PricingDimension.UNDERLYING_TIMESTAMP,
+            observed_value=observed,
+            source=EvidenceSource.LIVE_COMPARISON,
+            reference=f"records {list(greeks)}",
+            observed_at=datetime.now(UTC).date().isoformat(),
+            record_ids=tuple(greeks),
+            manifest_hash=manifest.manifest_hash,
+            note=detail,
+        ),
+        tuple(greeks),
+        detail,
+        coverage,
+    )
+
+
+def _as_number(value: object) -> float | None:
+    """A finite float, or nothing."""
+    if isinstance(value, bool):
+        return None
     try:
-        return abs(float(left) - float(right)) <= tolerance  # type: ignore[arg-type]
+        number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return False
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _coerce(raw: str) -> object:
@@ -662,11 +945,22 @@ def _coerce(raw: str) -> object:
         return text
 
 
+def parse_observation_timestamp(raw: str | None) -> datetime | None:
+    """The validator's reading of a vendor clock. Identical to the adapter's.
+
+    v2.1.5 read a naive vendor string as UTC here while the adapter localised it
+    to US Eastern. The same four characters were two instants four hours apart,
+    and the module disagreeing was the one whose job is to check the other. Both
+    now go through ``src.domain.vendor_time``.
+
+    Returned in the vendor's own zone, so a comparison against a chain
+    timestamp -- which the adapter also returns in that zone -- is a comparison
+    of two values built the same way.
+    """
+    observed = parse_vendor_timestamp(raw)
+    return observed.vendor_local if observed is not None else None
+
+
 def _parse_timestamp(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.strip())
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    """Retained name for the module's internal call sites."""
+    return parse_observation_timestamp(raw)

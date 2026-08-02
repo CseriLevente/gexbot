@@ -215,7 +215,7 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
-Current: **93.89%** across 4,192 statements, against a `fail_under` of 90.
+Current: **92%** across 6,699 statements, against a `fail_under` of 90.
 
 ### Three versions, three meanings
 
@@ -223,9 +223,12 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.5` | `pyproject.toml` | anything ships |
-| Parser version | `thetadata-v3-parser/2.1.5` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
-| Engine version | `gex-engine/2.1.5` | `src/domain/model_spec.py` | the numerics change |
+| Package version | `2.1.6` | `pyproject.toml` | anything ships |
+| Parser version | `thetadata-v3-parser/2.1.6` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
+| Engine version | `gex-engine/2.1.6` | `src/domain/model_spec.py` | the numerics change |
+| Manifest schema | `raw-capture-manifest/2.1.6` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
+| Certification schema | `adapter-certification/2.1.6` | `src/adapters/certification.py` | what a readiness verdict means changes |
+| Validation schema | `adapter-validation/2.1.6` | `src/adapters/validation.py` | what a validation report means changes |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

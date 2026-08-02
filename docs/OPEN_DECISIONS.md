@@ -42,8 +42,10 @@ was matched.
 **The question.** ThetaData v3 emits timestamps as wall-clock strings with no
 offset. Which zone are they in?
 
-**Current behaviour.** `src/adapters/thetadata/client._to_datetime` attaches US
-Eastern.
+**Current behaviour.** `src/domain/vendor_time.parse_vendor_timestamp` attaches
+US Eastern. Since v2.1.6 that is the *only* place a zone may be assumed, and it
+is used by chain normalization, field observation, validation comparison, spot
+synchronisation and replay alike.
 
 **Why this is a decision and not a fact.** It is an inference from the venue,
 not something the payload states. The engine itself refuses naive datetimes
@@ -53,6 +55,32 @@ drifting into the maths.
 **Consequence if wrong.** A four- or five-hour error in time-to-expiry, which on
 0DTE does not produce a slightly wrong gamma — it produces a completely wrong
 one.
+
+**Why it had to be centralised (v2.1.6).** There were two implementations. The
+adapter localised a naive vendor string to Eastern; `src/adapters/validation.py`,
+written later, read the same string as UTC. So `"2026-03-17T11:00:00.000"` was
+15:00 UTC when the adapter normalised a chain and 11:00 UTC when the validator
+re-read the same bytes to check it. Four hours — and the module disagreeing was
+the one whose job is to catch disagreements. A parsed timestamp now carries the
+raw text, the zone assumed, the normalised UTC instant, whether localisation was
+applied, and how any ambiguity was resolved.
+
+**The DST fold policy.** On the autumn transition Sunday the wall clock 01:30
+occurs twice. The choice is recorded as an `ambiguity_resolution` value
+(`EARLIER` / `LATER`) rather than as `datetime.fold`, because
+`src/gex/sessions.USEastern` is written by hand and deliberately ignores `fold`
+— there is no `tzdata` wheel on every machine this runs on, and an engine whose
+time-to-expiry depends on whether an optional data package happened to be
+installed is not one to trust on a 0DTE afternoon. The two readings are
+constructed from their offsets directly, so asking for the later one gives the
+later instant. A nonexistent spring-forward reading is normalised and labelled
+`NONEXISTENT_WALL_CLOCK_NORMALISED` rather than silently accepted.
+
+**Known imprecision.** Because the hand-written zone resolves its offset from
+the wall clock, rendering an instant *inside* the repeated autumn hour back into
+Eastern can be an hour out. The normalised UTC instant — which is what every
+calculation uses — is correct. The window is one hour a year, at 01:00–02:00
+local, outside any US index-option session.
 
 **What would settle it.** One live response compared against a known wall-clock
 instant.
@@ -678,6 +706,44 @@ reason `ADAPTER_CERTIFIED` is unreachable today rather than a policy.
 that infers a convention from behaviour -- e.g. solving for the day count that
 reproduces the vendor's IV from a known price. Neither has been built, and
 neither should be guessed at.
+
+**What v2.1.6 changed about the two that are recoverable.** They are now
+measured across the whole chain rather than from row zero of the first matching
+record. Each check reports rows and records inspected, matching, mismatching,
+missing and non-finite rows, a coverage ratio, the distinct values seen and the
+maximum deviation. A chain that is uniform reads as the convention; a chain that
+disagrees everywhere reads as the disagreement; a chain that is *mixed* records
+`MIXED_ACROSS_CHAIN`, which compares as a mismatch and blocks a trusted
+calculation. One matching contract is not a statement about a chain.
+
+---
+
+## 36. A chain cannot witness its own provenance - **RESOLVED**
+
+**The question.** Until v2.1.5, `compute_trusted_gex(chain)` decided trust by
+reading `chain.meta`: the pipeline fingerprint, the raw-capture manifest, the
+spot provenance. What stopped a caller writing those keys itself?
+
+**Nothing.** `ChainSnapshot` is a public frozen dataclass and `meta` is an open
+`dict[str, object]`, so `dataclasses.replace(build_synthetic_chain(), meta={...})`
+with three plausible entries passed every gate. The metadata is written by the
+code that produced the snapshot, which makes it a *description* of provenance
+and not a *demonstration* of it.
+
+**Resolution.** `compute_trusted_gex` requires a `VerifiedCalculationContext`,
+produced only by `build_verified_calculation_context`, which re-derives every
+verification from the manifest and the raw store. The context is hashed over its
+own fields and the hash is recomputed at the gate, so an edited context is
+refused. The manifest in `chain.meta` stays -- it tells a later reader which
+bytes to open -- and it authorizes nothing.
+
+**What is still not settled.** The binding between a chain and a capture rests
+on the manifest hash and on `chain.spot` matching the verified index print. It
+does not yet prove that every *quote* in the chain came from the captured
+payloads. That would need a per-contract digest carried from assembly into the
+snapshot; the current binding is enough to catch a chain from a different
+session, and not enough to catch a chain assembled from the right session's
+bytes with one row altered afterwards.
 
 ---
 

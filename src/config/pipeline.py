@@ -775,6 +775,14 @@ def _chain_fingerprint(chain: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _same_price(left: object, right: object, tolerance: float = 1e-9) -> bool:
+    """Two readings of the same underlying, to the precision it is quoted at."""
+    try:
+        return abs(float(left) - float(right)) <= tolerance  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
 def _require_a_chain(chain: Any, *, mode: str) -> None:
     """Refuse a computed snapshot where a chain belongs.
 
@@ -957,6 +965,7 @@ class ThetaDataResearchPipeline:
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
         capture: Any = None,
+        store: Any = None,
     ) -> ChainSnapshot:
         """Fetch the chain this session is configured for, spot included.
 
@@ -985,7 +994,11 @@ class ThetaDataResearchPipeline:
                 "fetch_chain_with_external_spot, which records the spot as "
                 "caller-supplied rather than observed."
             )
-        session = capture if capture is not None else self._new_capture_session(as_of)
+        session = (
+            capture
+            if capture is not None
+            else self._new_capture_session(as_of, store=store)
+        )
         mark = session.mark() if session is not None else 0
         spot, spot_timestamp, observation = self._capture_index_spot(
             as_of=as_of, capture=session
@@ -1013,6 +1026,7 @@ class ThetaDataResearchPipeline:
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
         capture: Any = None,
+        store: Any = None,
     ) -> ChainSnapshot:
         """Fetch with a spot from outside this adapter.
 
@@ -1022,7 +1036,11 @@ class ThetaDataResearchPipeline:
         a trusted calculation.
         """
         self.validate_integrity()
-        session = capture if capture is not None else self._new_capture_session(as_of)
+        session = (
+            capture
+            if capture is not None
+            else self._new_capture_session(as_of, store=store)
+        )
         mark = session.mark() if session is not None else 0
         return self._assemble(
             as_of=as_of,
@@ -1041,14 +1059,25 @@ class ThetaDataResearchPipeline:
     def _uses_vendor_index_spot(self) -> bool:
         return self.config.underlying_price_source == "vendor_index_snapshot"
 
-    def _new_capture_session(self, as_of: datetime) -> Any:
+    def _new_capture_session(self, as_of: datetime, *, store: Any = None) -> Any:
+        """Open a capture session for one fetch.
+
+        ``store`` overrides where the evidence lands. The default is the store
+        this session was configured with; naming one explicitly is how a caller
+        keeps a fetch and the manifest it will be verified against in the same
+        place.
+        """
         from src.adapters.raw_store import CaptureSession, new_capture_session_id
+        from src.adapters.thetadata.client import capture_origin_of
 
         if not self.config.raw_capture_enabled:
             return None
         return CaptureSession(
-            store=self.runtime.client.raw_store,
+            store=store if store is not None else self.runtime.client.raw_store,
             session_id=new_capture_session_id(as_of=as_of),
+            # Read off the transport actually in use, so an offline fixture
+            # cannot present itself as a live capture.
+            capture_origin=capture_origin_of(self.runtime.client.transport),
         )
 
     def _capture_index_spot(
@@ -1154,17 +1183,31 @@ class ThetaDataResearchPipeline:
             chain_fingerprint=_chain_fingerprint(chain),
         ).with_warnings(DIAGNOSTIC_WARNING_CODE)
 
-    def compute_trusted_gex(
-        self, chain: ChainSnapshot, *, evidence_context: Any = None
-    ) -> Any:
-        """Compute only when everything the number depends on is established.
+    def compute_trusted_gex(self, chain: ChainSnapshot, *, context: Any) -> Any:
+        """Compute only when independently verified evidence authorizes it.
 
         Refuses rather than warns. A warning beside a number is read by whoever
         happens to look; a refusal is read by everybody.
+
+        ``context`` is required, and it is a ``VerifiedCalculationContext``
+        produced by ``build_verified_calculation_context`` -- which re-derives
+        every verification from the manifest and the raw store. v2.1.5 decided
+        trust from ``chain.meta``, and ``ChainSnapshot.with_meta`` is public, so
+        a synthetic chain carrying the right keys passed every gate. The
+        manifest inside the snapshot is still worth having; it is a description
+        of where to look, and it is not a witness.
         """
         self.validate_integrity()
         _require_a_chain(chain, mode="trusted")
-        blockers = self.calculation_blockers(chain)
+        refusals = self._context_refusals(chain, context)
+        if refusals:
+            raise PipelineConsistencyError(
+                "the evidence context does not authorize a trusted calculation "
+                "for this chain: " + "; ".join(refusals)
+            )
+        blockers = self.calculation_blockers(
+            chain, report=context.effective_pricing_compatibility
+        )
         if blockers:
             raise PipelineConsistencyError(
                 "a trusted GEX cannot be computed under unresolved assumptions: "
@@ -1179,16 +1222,149 @@ class ThetaDataResearchPipeline:
             calculation_blockers=[],
             pipeline_fingerprint=self.fingerprint(),
             chain_fingerprint=_chain_fingerprint(chain),
-            evidence_context=(
-                evidence_context.as_dict()
-                if hasattr(evidence_context, "as_dict")
-                else None
-            ),
+            evidence_context=context.as_dict(),
+            evidence_context_hash=context.context_hash,
         )
 
-    def calculation_blockers(self, chain: ChainSnapshot) -> tuple[str, ...]:
-        """Everything standing between this chain and a trusted number."""
-        report = self.pricing_compatibility
+    def _context_refusals(self, chain: ChainSnapshot, context: Any) -> tuple[str, ...]:
+        """Every reason this context cannot authorize this chain.
+
+        All of them reported, not just the first: a context can be for the wrong
+        pipeline *and* for the wrong capture, and a caller fixing one at a time
+        learns more from being told both.
+        """
+        from src.adapters.certification import VerifiedCalculationContext
+
+        if not isinstance(context, VerifiedCalculationContext):
+            return (
+                "compute_trusted_gex needs a VerifiedCalculationContext from "
+                "build_verified_calculation_context, got "
+                f"{type(context).__name__}. A verdict a caller can construct is "
+                "a verdict a caller can assert.",
+            )
+
+        refusals: list[str] = []
+
+        # -- the context is the one the builder produced ---------------------
+        if context.context_hash != context.recomputed_hash():
+            refusals.append(
+                "the context hash does not follow from its own fields, so this "
+                "object has been edited since it was verified"
+            )
+
+        # -- it describes this pipeline --------------------------------------
+        if context.pipeline_fingerprint != self.fingerprint():
+            refusals.append(
+                f"the context was built for pipeline "
+                f"{context.pipeline_fingerprint!r}; this one is "
+                f"{self.fingerprint()!r}"
+            )
+        if context.capture_plan_fingerprint != self.capture_plan.fingerprint:
+            refusals.append("the context was verified against a different capture plan")
+        from src.adapters.raw_store import PARSER_VERSION
+
+        if context.parser_version != PARSER_VERSION:
+            refusals.append(
+                f"the context was built by parser {context.parser_version!r}; "
+                f"this repository reads {PARSER_VERSION!r}"
+            )
+
+        # -- and this chain ---------------------------------------------------
+        provenance_meta = _mapping(chain.meta.get("pipeline"))
+        carried = provenance_meta.get("pipeline_fingerprint")
+        if carried != self.fingerprint():
+            refusals.append(
+                f"the chain carries pipeline fingerprint {carried!r}; this "
+                f"pipeline is {self.fingerprint()!r}"
+            )
+        chain_manifest = _mapping(chain.meta.get("raw_capture_manifest"))
+        chain_hash = chain_manifest.get("manifest_hash")
+        if chain_hash != context.manifest.manifest_hash:
+            refusals.append(
+                f"the context verified capture "
+                f"{context.manifest.manifest_hash[:16]}..., but this chain was "
+                f"built from {str(chain_hash)[:16]}...; a manifest mismatch "
+                "means the verified bytes are not the bytes behind this number"
+            )
+
+        # -- the evidence itself holds ---------------------------------------
+        if not context.capture_verification.verified:
+            refusals.append(
+                "the capture did not verify against its store: "
+                f"{list(context.capture_verification.failures)}"
+            )
+        if context.failures:
+            refusals.append(f"the context records {list(context.failures)}")
+
+        # -- provenance applies to this chain --------------------------------
+        refusals.extend(self._provenance_refusals(chain, context))
+        return tuple(refusals)
+
+    def _provenance_refusals(
+        self, chain: ChainSnapshot, context: Any
+    ) -> tuple[str, ...]:
+        """Whether the spot and open-interest evidence is about *this* chain."""
+        refusals: list[str] = []
+        spot = context.spot_provenance
+        if spot is None:
+            refusals.append("the context carries no spot provenance")
+        else:
+            carried = _mapping(chain.meta.get("spot_provenance"))
+            source = getattr(spot.source, "value", spot.source)
+            if carried.get("source") != source:
+                refusals.append(
+                    f"the chain's spot is {carried.get('source')!r}; the context "
+                    f"verified a {source!r} print"
+                )
+            skew = spot.skew_seconds(chain.as_of)
+            if skew is None:
+                refusals.append("the verified spot has no timestamp to compare")
+            elif skew > spot.tolerance_seconds:
+                refusals.append(
+                    f"the verified spot is {skew:.3f}s from the chain instant, "
+                    f"outside the {spot.tolerance_seconds}s tolerance"
+                )
+            # The number itself, not only its provenance. Every gamma in the
+            # snapshot is computed against ``chain.spot``, and the verified
+            # evidence says what the vendor's index print actually was -- so a
+            # chain carrying a different underlying was not built from these
+            # bytes, whatever its metadata claims.
+            observed = getattr(spot.observation, "observed_value", None)
+            if observed is None:
+                refusals.append(
+                    "the verified spot names no stored value, so nothing "
+                    "connects it to the underlying this chain used"
+                )
+            elif not _same_price(chain.spot, observed):
+                refusals.append(
+                    f"the chain was computed against spot {chain.spot!r}, but "
+                    f"the verified index print is {observed!r}"
+                )
+
+        open_interest = context.open_interest_provenance
+        if open_interest is None:
+            refusals.append("the context carries no open-interest provenance")
+        elif open_interest.chain_date is not None and (
+            open_interest.chain_date != chain.as_of.date()
+        ):
+            refusals.append(
+                f"the open-interest evidence is for session "
+                f"{open_interest.chain_date.isoformat()}, not "
+                f"{chain.as_of.date().isoformat()}"
+            )
+        return tuple(refusals)
+
+    def calculation_blockers(
+        self, chain: ChainSnapshot, *, report: Any = None
+    ) -> tuple[str, ...]:
+        """Everything standing between this chain and a trusted number.
+
+        ``report`` is the *effective* pricing compatibility -- the static
+        assessment revised by what a verified capture observed. It defaults to
+        the static one so a diagnostic calculation, which has no capture behind
+        it, still gets an answer.
+        """
+        report = report if report is not None else self.pricing_compatibility
         blockers: list[str] = []
 
         if report.hard_failures:

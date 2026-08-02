@@ -36,8 +36,10 @@ Three v2.1.4 corrections shape the rest of this module:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
@@ -46,7 +48,15 @@ from src.adapters.errors import (
     ThetaDataCertificationError,
     ThetaDataProvenanceError,
 )
-from src.adapters.raw_store import RawCaptureManifest, probe_raw_store
+from src.adapters.raw_store import (
+    MANIFEST_SCHEMA_VERSION,
+    PARSER_VERSION,
+    SUPPORTED_PARSER_VERSIONS,
+    RawCaptureManifest,
+    canonical_parameter_hash,
+    probe_raw_store,
+    record_id_belongs_to,
+)
 from src.adapters.thetadata.capture_plan import CapturePlan, capture_plan_for
 from src.adapters.thetadata.endpoints import Tier
 from src.adapters.validation import (
@@ -55,7 +65,10 @@ from src.adapters.validation import (
     ValidationCheck,
     VerifiedFieldObservation,
 )
-from src.config.compatibility import EvidenceSource
+from src.config.compatibility import (
+    EvidenceSource,
+    derive_post_capture_compatibility,
+)
 
 __all__ = [
     "CERTIFICATION_SCHEMA_VERSION",
@@ -70,15 +83,17 @@ __all__ = [
     "SpotProvenance",
     "SpotSource",
     "ValidationCheck",
+    "VerifiedCalculationContext",
     "VerifiedFieldObservation",
     "assess_readiness",
+    "build_verified_calculation_context",
     "verify_capture",
 ]
 
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.5"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.6"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -142,6 +157,27 @@ class OpenInterestSource(str, Enum):
 FUTURE_TOLERANCE_SECONDS = 3600.0
 
 
+def _require_a_plain_date(value: object, *, field: str) -> None:
+    """A calendar date, and not a datetime pretending to be one.
+
+    ``datetime`` subclasses ``date``, so ``isinstance(value, date)`` accepted
+    both -- and the two compare and serialise differently. A settlement date
+    carrying a time of day is a date somebody constructed from a timestamp
+    without deciding which session it belongs to.
+    """
+    if value is None or type(value) is date:
+        return
+    if isinstance(value, datetime):
+        raise ThetaDataProvenanceError(
+            f"{field} must be a date, got a datetime ({value.isoformat()}). "
+            "Open interest settles per session, not per instant; call .date() "
+            "and decide which session you mean."
+        )
+    raise ThetaDataProvenanceError(
+        f"{field} must be a date, got {type(value).__name__} {value!r}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OpenInterestProvenance:
     """Where the open-interest settlement date came from."""
@@ -165,10 +201,8 @@ class OpenInterestProvenance:
             ) from error
         object.__setattr__(self, "source", resolved)
 
-        if self.as_of is not None and not isinstance(self.as_of, date):
-            raise ThetaDataProvenanceError(
-                f"as_of must be a date, got {type(self.as_of).__name__}"
-            )
+        for name in ("as_of", "chain_date"):
+            _require_a_plain_date(getattr(self, name), field=name)
         if (
             self.as_of is not None
             and self.chain_date is not None
@@ -242,6 +276,16 @@ class SpotProvenance:
             )
 
         if self.timestamp is not None:
+            if not isinstance(self.timestamp, datetime):
+                # An ISO string and an epoch integer both *denote* an instant,
+                # and neither is one. v2.1.5 went straight to ``.tzinfo`` and
+                # leaked an AttributeError out of a provenance constructor.
+                raise ThetaDataProvenanceError(
+                    f"spot timestamp must be a timezone-aware datetime, got "
+                    f"{type(self.timestamp).__name__} {self.timestamp!r}. Parse "
+                    "it before it gets here: this field is compared against the "
+                    "chain instant, and a string cannot be."
+                )
             if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
                 raise ThetaDataProvenanceError(
                     "spot timestamp must be timezone-aware; a naive datetime "
@@ -311,6 +355,10 @@ class CaptureVerification:
     #: requirements were not checked at all, which certification treats as
     #: unverified rather than as "no requirements".
     plan_fingerprint: str = ""
+    #: The pipeline the manifest was required to match. Empty means verification
+    #: was not told which configuration to expect, and an unanchored check is
+    #: recorded as such rather than passing quietly.
+    expected_pipeline_fingerprint: str = ""
 
     @property
     def verified(self) -> bool:
@@ -318,6 +366,14 @@ class CaptureVerification:
             not self.failures
             and self.manifest.capture_enabled
             and bool(self.confirmed_record_ids)
+            # A verification that named no pipeline and no plan checked the
+            # records against nothing in particular. It is not a verdict.
+            and bool(self.expected_pipeline_fingerprint)
+            and bool(self.plan_fingerprint)
+            # Every record the manifest claims has to be one of the confirmed
+            # ones. Without this a manifest could carry an unconfirmable record
+            # alongside good ones and still read as verified.
+            and len(self.confirmed_record_ids) == len(self.manifest.records)
         )
 
     @property
@@ -333,6 +389,7 @@ class CaptureVerification:
             "failures": list(self.failures),
             "store_description": self.store_description,
             "plan_fingerprint": self.plan_fingerprint,
+            "expected_pipeline_fingerprint": self.expected_pipeline_fingerprint,
         }
 
 
@@ -379,19 +436,26 @@ def verify_capture(
     store: Any,
     *,
     plan: CapturePlan | None = None,
+    expected_pipeline_fingerprint: str = "",
 ) -> CaptureVerification:
-    """Check that every record a manifest claims is really in the store, and
-    that the manifest claims everything the session needs.
+    """Check that a manifest describes the capture it claims to describe.
 
-    Two questions, and v2.1.4 asked only the first. A one-record capture -- a
-    quote snapshot with no open interest, no implied volatility and no
-    underlying -- verified cleanly, because every record it named was present.
-    It could not have produced a GEX number, and it advanced the certification
-    ladder anyway.
+    Three questions. v2.1.4 asked only the first -- are the named records in the
+    store? -- so a one-record quote snapshot with no open interest, no implied
+    volatility and no underlying verified cleanly and advanced the ladder. v2.1.5
+    added the second: does the manifest claim *enough*? That is ``plan``.
 
-    ``plan`` is the answer to the second question. It is optional only so that
-    the record-level checks stay usable on their own; certification always
-    supplies one.
+    v2.1.6 adds the third, which is the one that matters here: is every
+    audit-relevant field of every record bound to the bytes in the store? The
+    manifest used to be believed about its own request ids, parameter hashes,
+    statuses and clocks. Only the payload hashes were checked, and only as a
+    multiset. A manifest is a claim about evidence; each field of it now has to
+    survive being compared with the evidence.
+
+    Both ``plan`` and ``expected_pipeline_fingerprint`` default to "absent" so
+    that a caller who forgets one gets a *failed verification* rather than a
+    ``TypeError`` -- but absent is a failure, not a skip. An empty fingerprint
+    verifying against anything is exactly the hole this closes.
     """
     if not isinstance(manifest, RawCaptureManifest):
         raise ThetaDataCertificationError(
@@ -401,34 +465,157 @@ def verify_capture(
     failures: list[str] = []
     if not manifest.capture_enabled:
         failures.append("CAPTURE_DISABLED: the manifest records that capture was off")
-    if not manifest.record_ids:
+    if not manifest.records:
         failures.append("EMPTY_MANIFEST: no record ids were captured")
 
+    # -- what this capture was taken by, and against ------------------------
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION:
+        # Refused rather than reinterpreted: v2.1.5's parallel arrays cannot
+        # express the per-record binding checked below, so an older manifest
+        # would be verified against fields it never carried.
+        failures.append(
+            f"MANIFEST_SCHEMA_UNSUPPORTED:{manifest.schema_version!r}: "
+            f"this verifier reads {MANIFEST_SCHEMA_VERSION!r}"
+        )
+    if manifest.parser_version not in SUPPORTED_PARSER_VERSIONS:
+        failures.append(
+            f"PARSER_VERSION_UNSUPPORTED:{manifest.parser_version!r}: "
+            f"accepted versions are {sorted(SUPPORTED_PARSER_VERSIONS)}"
+        )
+    if not expected_pipeline_fingerprint:
+        failures.append(
+            "EXPECTED_PIPELINE_FINGERPRINT_MISSING: verification was asked to "
+            "check a manifest against no particular pipeline"
+        )
+    if not manifest.pipeline_fingerprint:
+        failures.append(
+            "MANIFEST_PIPELINE_FINGERPRINT_EMPTY: pipeline_fingerprint is "
+            "empty, so the capture does not say which configuration produced it"
+        )
+    if (
+        expected_pipeline_fingerprint
+        and manifest.pipeline_fingerprint
+        and manifest.pipeline_fingerprint != expected_pipeline_fingerprint
+    ):
+        failures.append(
+            f"PIPELINE_FINGERPRINT_MISMATCH:{manifest.pipeline_fingerprint!r}: "
+            f"this pipeline is {expected_pipeline_fingerprint!r}"
+        )
+    if plan is None:
+        failures.append(
+            "CAPTURE_PLAN_NOT_SUPPLIED: without a plan nothing states what the "
+            "capture was meant to contain"
+        )
+    if not manifest.capture_plan_fingerprint:
+        failures.append(
+            "MANIFEST_CAPTURE_PLAN_FINGERPRINT_EMPTY: capture_plan_fingerprint "
+            "is empty, so the capture does not say what it was meant to contain"
+        )
+    if not manifest.session_id and manifest.records:
+        failures.append("MANIFEST_SESSION_ID_EMPTY: the capture names no session")
+
     records = {r.record_id: r for r in getattr(store, "records", lambda: ())()}
+
+    # -- record ids must be unique before anything is keyed by them ---------
+    #
+    # ``record_ids`` is a sorted tuple, so a duplicate descriptor would silently
+    # collapse in every dict built below and the second one would never be
+    # checked against anything.
+    seen: set[str] = set()
+    duplicated = sorted(
+        {
+            entry.record_id
+            for entry in manifest.records
+            if entry.record_id in seen or seen.add(entry.record_id)  # type: ignore[func-returns-value]
+        }
+    )
+    if duplicated:
+        failures.append(f"DUPLICATE_RECORD_ID:{duplicated}")
+
+    sequences: dict[int, str] = {}
     confirmed: list[str] = []
-    for record_id in manifest.record_ids:
+    for entry in sorted(manifest.records, key=lambda e: e.record_id):
+        record_id = entry.record_id
         record = records.get(record_id)
         if record is None:
             failures.append(f"MISSING_RECORD:{record_id}")
             continue
-        if record.payload_hash not in manifest.payload_hashes:
-            failures.append(f"PAYLOAD_HASH_NOT_IN_MANIFEST:{record_id}")
-            continue
+
+        # -- each field of the descriptor against the stored record ---------
+        #
+        # Bound to *this* record id, not looked up in a pooled set. Two records
+        # that swapped payload hashes used to satisfy the old membership test
+        # unchanged, because the multiset of hashes was the same.
+        problems: list[str] = []
+        if entry.payload_hash != record.payload_hash:
+            problems.append(f"PAYLOAD_HASH_MISMATCH:{record_id}")
+        if entry.endpoint != record.endpoint:
+            problems.append(
+                f"ENDPOINT_MISMATCH:{record_id}:{entry.endpoint}!={record.endpoint}"
+            )
+        if entry.parameter_hash != canonical_parameter_hash(record.query_params):
+            problems.append(f"PARAMETER_HASH_MISMATCH:{record_id}")
+        if entry.request_id != record.request_id:
+            problems.append(f"REQUEST_ID_MISMATCH:{record_id}")
+        if entry.request_sequence != record.request_sequence:
+            problems.append(f"REQUEST_SEQUENCE_MISMATCH:{record_id}")
+        if entry.http_status != record.http_status:
+            problems.append(f"HTTP_STATUS_MISMATCH:{record_id}")
+        if entry.parser_version != record.parser_version:
+            problems.append(f"RECORD_PARSER_VERSION_MISMATCH:{record_id}")
+        if entry.vendor_schema_version != record.vendor_schema_version:
+            problems.append(f"VENDOR_SCHEMA_VERSION_MISMATCH:{record_id}")
+        if entry.capture_origin != record.capture_origin:
+            problems.append(f"CAPTURE_ORIGIN_MISMATCH:{record_id}")
+        if entry.request_started_at != record.request_started_at:
+            problems.append(f"REQUEST_TIMESTAMP_MISMATCH:{record_id}")
+        if entry.response_received_at != record.response_received_at:
+            problems.append(f"RESPONSE_TIMESTAMP_MISMATCH:{record_id}")
+
+        # -- the record's own internal coherence ----------------------------
+        if manifest.session_id and not record_id_belongs_to(
+            record_id, manifest.session_id
+        ):
+            problems.append(f"RECORD_NOT_FROM_SESSION:{record_id}")
+        if not 200 <= record.http_status < 300:
+            # A vendor error page is a real response and worth storing. It is
+            # not evidence of a successful capture, and a certification capture
+            # that contains one did not get what it went for.
+            problems.append(
+                f"UNSUCCESSFUL_HTTP_STATUS:{record_id}:{record.http_status}"
+            )
         if not record.capture_complete:
-            failures.append(f"INCOMPLETE_CAPTURE:{record_id}")
+            problems.append(f"INCOMPLETE_CAPTURE:{record_id}")
+        if not isinstance(record.request_sequence, int) or record.request_sequence < 0:
+            problems.append(f"INVALID_REQUEST_SEQUENCE:{record_id}")
+        else:
+            owner = sequences.setdefault(record.request_sequence, record_id)
+            if owner != record_id:
+                problems.append(
+                    f"DUPLICATE_REQUEST_SEQUENCE:{record.request_sequence}:"
+                    f"{sorted((owner, record_id))}"
+                )
+        for label, moment in (
+            ("REQUEST", record.request_started_at),
+            ("RESPONSE", record.response_received_at),
+        ):
+            if not isinstance(moment, datetime):
+                problems.append(f"{label}_TIMESTAMP_NOT_A_DATETIME:{record_id}")
+            elif moment.tzinfo is None or moment.utcoffset() is None:
+                problems.append(f"{label}_TIMESTAMP_NAIVE:{record_id}")
+        if (
+            isinstance(record.request_started_at, datetime)
+            and isinstance(record.response_received_at, datetime)
+            and record.request_started_at.tzinfo is not None
+            and record.response_received_at.tzinfo is not None
+            and record.response_received_at < record.request_started_at
+        ):
+            problems.append(f"RESPONSE_BEFORE_REQUEST:{record_id}")
+
+        if problems:
+            failures.extend(problems)
             continue
         confirmed.append(record_id)
-
-    # Every payload hash the manifest claims must be accounted for exactly once.
-    # Membership alone is too weak: two records carrying the same bytes -- a
-    # retry written under two ids -- would satisfy two distinct manifest claims,
-    # and the bytes claimed under the second hash would never have been stored.
-    claimed = sorted(manifest.payload_hashes)
-    confirmed_hashes = sorted(
-        records[record_id].payload_hash for record_id in confirmed
-    )
-    if confirmed and claimed != confirmed_hashes:
-        failures.append("PAYLOAD_HASHES_DO_NOT_PAIR_WITH_RECORDS")
 
     # -- the endpoint map has to describe the same records as the id list ----
     #
@@ -482,10 +669,7 @@ def verify_capture(
                     f"UNCONFIRMED_ENDPOINT_RECORD:{endpoint.value}:"
                     f"{sorted(unconfirmed)}"
                 )
-        if (
-            manifest.capture_plan_fingerprint
-            and manifest.capture_plan_fingerprint != plan.fingerprint
-        ):
+        if manifest.capture_plan_fingerprint != plan.fingerprint:
             failures.append(
                 "CAPTURE_PLAN_MISMATCH: the manifest was taken against a "
                 f"different plan ({manifest.capture_plan_fingerprint[:16]}...)"
@@ -503,7 +687,215 @@ def verify_capture(
         failures=tuple(sorted(failures)),
         store_description=type(store).__name__,
         plan_fingerprint=plan.fingerprint if plan is not None else "",
+        expected_pipeline_fingerprint=expected_pipeline_fingerprint,
     )
+
+
+# =============================================================================
+# The evidence a trusted calculation is authorized by
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedCalculationContext:
+    """Independently verified evidence that a calculation may be trusted.
+
+    The v2.1.5 defect this exists to close: ``compute_trusted_gex`` decided
+    trust from ``chain.meta`` -- the pipeline fingerprint, the raw-capture
+    manifest, the spot provenance. All three are metadata the producing code
+    wrote into the snapshot, and ``ChainSnapshot.with_meta`` is public, so a
+    synthetic chain carrying the right keys satisfied every gate. A snapshot
+    cannot be a witness to its own provenance.
+
+    Everything here is *recomputed* by ``build_verified_calculation_context``
+    from the manifest and the store. There is no constructor argument that
+    carries a verdict in, which is why ``context_hash`` is checkable: the gate
+    rebuilds it from the fields and refuses a context that has been edited.
+
+    The manifest inside ``chain.meta`` remains useful -- it says which bytes a
+    reader should go and look at -- but it is descriptive, and on its own it
+    authorizes nothing.
+    """
+
+    pipeline_fingerprint: str
+    capture_plan_fingerprint: str
+    manifest: RawCaptureManifest
+    capture_verification: CaptureVerification
+    validation_report: AdapterValidationReport | None
+    effective_pricing_compatibility: Any
+    spot_provenance: SpotProvenance | None
+    open_interest_provenance: OpenInterestProvenance | None
+    raw_store_description: str
+    context_hash: str
+    parser_version: str = PARSER_VERSION
+    #: Everything that stopped this context from being usable. Empty is the
+    #: only value a trusted calculation accepts.
+    failures: tuple[str, ...] = ()
+
+    @property
+    def verified(self) -> bool:
+        return not self.failures and self.capture_verification.verified
+
+    @property
+    def manifest_hash(self) -> str:
+        return self.manifest.manifest_hash
+
+    def semantic_payload(self) -> dict[str, Any]:
+        """Everything the hash covers. Recomputable from the fields alone."""
+        return {
+            "schema_version": CERTIFICATION_SCHEMA_VERSION,
+            "pipeline_fingerprint": self.pipeline_fingerprint,
+            "capture_plan_fingerprint": self.capture_plan_fingerprint,
+            "parser_version": self.parser_version,
+            "manifest_hash": self.manifest.manifest_hash,
+            "capture_verified": self.capture_verification.verified,
+            "capture_failures": sorted(self.capture_verification.failures),
+            "confirmed_record_ids": sorted(
+                self.capture_verification.confirmed_record_ids
+            ),
+            "validation": (
+                self.validation_report.semantic_payload()
+                if self.validation_report is not None
+                else None
+            ),
+            "compatibility": self.effective_pricing_compatibility.semantic_payload(),
+            "spot": (
+                self.spot_provenance.as_dict()
+                if self.spot_provenance is not None
+                else None
+            ),
+            "open_interest": (
+                self.open_interest_provenance.as_dict()
+                if self.open_interest_provenance is not None
+                else None
+            ),
+            "raw_store_description": self.raw_store_description,
+            "failures": sorted(self.failures),
+        }
+
+    def recomputed_hash(self) -> str:
+        payload = json.dumps(
+            self.semantic_payload(), sort_keys=True, separators=(",", ":"), default=str
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.semantic_payload(),
+            "context_hash": self.context_hash,
+            "verified": self.verified,
+            "capture": self.capture_verification.as_dict(),
+            "effective_pricing_compatibility": (
+                self.effective_pricing_compatibility.as_dict()
+            ),
+        }
+
+
+def build_verified_calculation_context(
+    *,
+    pipeline: Any,
+    manifest: RawCaptureManifest,
+    store: Any,
+    validation: AdapterValidationReport | None = None,
+    spot: SpotProvenance | None = None,
+    open_interest: OpenInterestProvenance | None = None,
+) -> VerifiedCalculationContext:
+    """Verify a capture from scratch and package what it authorizes.
+
+    Deliberately takes no ``capture_verification`` and no compatibility report.
+    A caller who could pass either could pass a passing one, which is the whole
+    class of defect this release is about: ``assess_readiness(capture_manifest=
+    object())`` returned ``ADAPTER_CERTIFIED`` in v2.1.4 because the evidence
+    was a parameter rather than a derivation.
+
+    Failures are recorded, not raised. A context that does not hold is a useful
+    object -- it says what is missing -- and it simply cannot authorize a
+    trusted calculation.
+    """
+    if not isinstance(manifest, RawCaptureManifest):
+        raise ThetaDataCertificationError(
+            "build_verified_calculation_context needs a RawCaptureManifest, got "
+            f"{type(manifest).__name__}"
+        )
+    pipeline.validate_integrity()
+
+    plan = pipeline.capture_plan
+    capture = verify_capture(
+        manifest,
+        store,
+        plan=plan,
+        expected_pipeline_fingerprint=pipeline.fingerprint(),
+    )
+
+    failures: list[str] = []
+    if not capture.verified:
+        failures.append(f"CAPTURE_NOT_VERIFIED:{list(capture.failures)}")
+    if manifest.parser_version not in SUPPORTED_PARSER_VERSIONS:
+        failures.append(f"PARSER_VERSION:{manifest.parser_version!r}")
+
+    # -- the validation report, re-derived rather than believed ---------------
+    report = validation
+    if report is not None:
+        if not report.describes(manifest.manifest_hash):
+            failures.append(
+                f"VALIDATION_DESCRIBES_ANOTHER_CAPTURE:{report.manifest_hash!r}"
+            )
+            report = None
+        else:
+            rederived = AdapterValidator.validate(
+                manifest=manifest, store=store, pipeline=pipeline
+            )
+            if rederived.semantic_payload() != report.semantic_payload():
+                failures.append(
+                    "VALIDATION_NOT_ISSUED_BY_THIS_VALIDATOR: re-running the "
+                    "validation over the same capture produces a different "
+                    "result, so the report is not a record of what was checked"
+                )
+                report = None
+
+    effective = derive_post_capture_compatibility(
+        base_report=pipeline.pricing_compatibility,
+        validation_report=report if capture.verified else None,
+        model_spec=pipeline.model_spec,
+        manifest=manifest,
+    )
+
+    # -- provenance, graded against the capture rather than asserted ----------
+    validated_names = (
+        {c.name for c in report.checks if c.passed and c.dimension is None}
+        if report is not None and report.passed
+        else set()
+    )
+    for claim, name in (
+        (open_interest, "open_interest_as_of"),
+        (spot, "spot"),
+    ):
+        if claim is None:
+            continue
+        _grade, complaint = grade_claim(
+            claim,
+            manifest=manifest if capture.verified else None,
+            store=store,
+            validated=name in validated_names,
+        )
+        if complaint:
+            failures.append(f"{name.upper()}:{complaint}")
+
+    context = VerifiedCalculationContext(
+        pipeline_fingerprint=pipeline.fingerprint(),
+        capture_plan_fingerprint=plan.fingerprint,
+        manifest=manifest,
+        capture_verification=capture,
+        validation_report=report,
+        effective_pricing_compatibility=effective,
+        spot_provenance=spot,
+        open_interest_provenance=open_interest,
+        raw_store_description=type(store).__name__,
+        context_hash="",
+        parser_version=PARSER_VERSION,
+        failures=tuple(sorted(failures)),
+    )
+    return replace(context, context_hash=context.recomputed_hash())
 
 
 # =============================================================================
@@ -780,7 +1172,12 @@ def assess_readiness(
     )
     capture: CaptureVerification | None = None
     if manifest is not None:
-        capture = verify_capture(manifest, raw_store, plan=plan)
+        capture = verify_capture(
+            manifest,
+            raw_store,
+            plan=plan,
+            expected_pipeline_fingerprint=pipeline.fingerprint(),
+        )
         if not capture.verified:
             calculation_blockers.append(
                 f"the capture manifest does not match its store: "

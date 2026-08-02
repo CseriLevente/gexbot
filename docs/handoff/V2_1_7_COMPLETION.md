@@ -45,14 +45,18 @@ of issuer.
 | Field | Value |
 |---|---|
 | Branch | `master` |
-| Release commit | `PENDING_COMMIT` |
+| Release commit | `478faacbf1b0189585e06f284fc5615d784aa301` |
 | Commit message | `v2.1.7: bind trusted calculation to the re-derived normalized chain` |
 | Clean status | `git status --porcelain` empty |
-| Diff stat | `PENDING_DIFFSTAT` |
+| Diff stat | 40 files changed, 3,453 insertions, 419 deletions |
 
 Added: `src/domain/normalization.py`, `src/adapters/open_interest.py`,
 `src/adapters/thetadata/request_spec.py`,
 `tests/unit/test_normalized_evidence_binding.py`.
+
+This document is added by the commit that follows `478faac`, which changes
+no code. The archive is built from that final commit; its SHA-256 is given
+alongside the delivered file, for the reason set out under **Artifact**.
 
 ---
 
@@ -184,8 +188,8 @@ it is a hand-typed literal, and all of them held.
 | Field | Value |
 |---|---|
 | File | `gex-bot-v2.1.7.zip` |
-| Files tracked | `PENDING_FILES` |
-| ZIP entries | `PENDING_ENTRIES` |
+| Files tracked | 172 |
+| ZIP entries | 213 (172 files plus 41 directory entries) |
 
 Built with:
 

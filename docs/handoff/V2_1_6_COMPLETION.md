@@ -16,10 +16,10 @@ repository remains incapable of placing an order.
 v2.1.5 made evidence *derived*. v2.1.6 makes the **authorization independent of
 the thing being authorized**.
 
-`compute_trusted_gex(chain)` decided trust by reading `chain.meta` — the pipeline
-fingerprint, the raw-capture manifest, the spot provenance. All three are written
-into the snapshot by the code that produced it, and `ChainSnapshot` is a public
-frozen dataclass with an open `meta` dict. So:
+`compute_trusted_gex(chain)` decided trust by reading `chain.meta` -- the
+pipeline fingerprint, the raw-capture manifest, the spot provenance. All three
+are written into the snapshot by the code that produced it, and `ChainSnapshot`
+is a public frozen dataclass with an open `meta` dict. So:
 
 ```python
 dataclasses.replace(
@@ -42,14 +42,18 @@ cannot be a witness to its own provenance.
 | Field | Value |
 |---|---|
 | Branch | `master` |
-| Commit | `PENDING — filled in by the release commit` |
+| Release commit | `868d7bf9193c6a7f609c39b32983534804ae4b71` |
 | Commit message | `v2.1.6: bind trusted calculation to independently verified evidence` |
-| Clean status | `git status --porcelain` empty after the commit |
-| Diff stat | 33 files changed (29 modified, 4 added) |
+| Clean status | `git status --porcelain` empty |
+| Diff stat | 33 files changed, 2,591 insertions, 412 deletions |
 
 Added: `src/domain/vendor_time.py`, `tests/unit/test_evidence_binding.py`,
 `tests/unit/test_post_capture_compatibility.py`,
 `tests/unit/test_vendor_timestamps.py`.
+
+This document is added by the commit that follows `868d7bf`, which changes no
+code. The archive is built from that final commit; its hash is given alongside
+the delivered file, for the reason set out under **Artifact**.
 
 ---
 
@@ -57,22 +61,25 @@ Added: `src/domain/vendor_time.py`, `tests/unit/test_evidence_binding.py`,
 
 | Check | Result | How |
 |---|---|---|
-| Python 3.12 full suite | **PASS** — 1 skipped | locally executed |
-| Python 3.13 full suite | **unverified** | 3.13 is not installed on this machine (`py -0p` lists 3.12 and 3.11 only) and no CI run exists for this commit |
+| Python 3.12 full suite | **PASS**, 1 skipped | locally executed |
+| Python 3.13 full suite | **unverified** | 3.13 is not installed here (`py -0p` lists 3.12 and 3.11) and no CI run exists for this commit |
 | `pytest -m integration` | **PASS** (18) | locally executed |
 | `pytest -m regression` | **PASS** (46) | locally executed |
 | `pytest -m replay` | **PASS** (10) | locally executed |
 | `ruff check .` | **PASS** | locally executed |
 | `ruff format --check .` | **PASS** (121 files) | locally executed |
 | `mypy src` | **PASS** (59 source files) | locally executed |
-| `coverage report --fail-under=90` | **PASS** — 92% of 6,699 statements | locally executed |
+| `coverage report --fail-under=90` | **PASS**, 92% of 6,699 statements | locally executed |
 | Demo (`python -m src.app`) | **PASS** | locally executed |
 | Demo output hash | `bd668a626632abadd4aa0dec4ee9b19689ed3b16ebb43db6ea7862de2de58586` | locally executed |
 
 **Python 3.13 is unverified.** The CI matrix names `["3.12", "3.13"]` across the
-`quality`, `invariants` and `no-trading-guarantee` jobs, and tests were written
-with 3.13 in mind, but no 3.13 result exists. Neither of those is a result. Do
-not read the green 3.12 column as covering both.
+`quality`, `invariants` and `no-trading-guarantee` jobs, and the tests were
+written with 3.13 in mind. Neither of those is a result. Do not read the green
+3.12 column as covering both.
+
+Nothing here was executed in CI: the workflow runs on push to `master`, and this
+commit has not been pushed from this session.
 
 ---
 
@@ -91,7 +98,7 @@ Each row names a test that fails against v2.1.5.
 | The manifest hash binds per-record semantics | `test_mutating_any_audit_relevant_field_moves_the_manifest_hash` (9 cases), `test_swapping_two_payload_hashes_changes_the_manifest_hash` |
 | An old manifest schema is refused, not reinterpreted | `test_an_old_schema_manifest_is_refused_rather_than_reinterpreted` |
 | Volatile storage cannot be capture-ready | `test_an_in_memory_store_cannot_be_capture_ready`, `test_a_durable_store_can_be_capture_ready`, `test_readiness_requires_free_space` |
-| The probe leaves nothing behind | `test_the_probe_does_not_enter_the_capture_index`, `test_an_unwritable_store_is_not_usable` |
+| The health probe leaves nothing behind | `test_the_probe_does_not_enter_the_capture_index`, `test_an_unwritable_store_is_not_usable` |
 | Post-capture observations alter effective compatibility | `test_a_validated_observation_settles_its_dimension`, `test_a_live_mismatch_overrides_a_documented_match`, `test_the_trusted_calculation_reads_the_post_capture_report` |
 | A capture cannot launder a documented mismatch | `test_act_360_against_act_365f_stays_mismatched_after_a_capture` |
 | One contract cannot characterise a chain | `test_every_row_is_inspected_not_only_the_first`, `test_one_mismatching_row_blocks_chain_level_agreement`, `test_a_mixed_result_does_not_settle_the_dimension` |
@@ -107,14 +114,14 @@ Each row names a test that fails against v2.1.5.
 
 | Value | Before | After | Classification |
 |---|---|---|---|
-| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | — |
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | -- |
 | `EXPECTED_MODEL_FINGERPRINT` | `d3d458592b6f87e0` | `faf0a9f595f2a93a` | `VERSION_METADATA_ONLY` |
-| `EXPECTED_OUTPUT_HASH` | `568d2c2d…` | `bd668a62…` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `568d2c2d...` | `bd668a62...` | `VERSION_METADATA_ONLY` |
 
 **Measured, not argued.** Recomputing the reference case with `model_version`
-pinned back to `gex-engine/2.1.5` — and *nothing else* reverted — reproduces both
+pinned back to `gex-engine/2.1.5`, and *nothing else* reverted, reproduces both
 v2.1.5 digests exactly. The version string is the whole of both moves, with no
-residue to attribute elsewhere. This is a stronger check than the
+residue to attribute elsewhere. That is a stronger check than the
 search-by-elimination used in v2.1.4 and v2.1.5, because it does not depend on
 knowing which changes to look for.
 
@@ -143,15 +150,31 @@ exactly two assertions in that file changed.
 | Field | Value |
 |---|---|
 | File | `gex-bot-v2.1.6.zip` |
-| SHA-256 | `PENDING — computed from the archive of the release commit` |
 | Files tracked | 161 |
-| Commit | see Git above |
+| ZIP entries | 207 (161 files plus 46 directory entries) |
 
-Produced by `git archive --format=zip --output=gex-bot-v2.1.6.zip HEAD`, which
-contains exactly the tracked files at that commit. It is not wrapped in an outer
-ZIP and contains no development checkout, no `.venv`, no `artifacts/`, no
-`__pycache__` and no captured payloads. The SHA-256 above applies to that exact
-file.
+Built with:
+
+```
+git archive --format=zip --output=gex-bot-v2.1.6.zip HEAD
+```
+
+**This document cannot state the archive's own SHA-256** -- it is inside the
+archive, so any digest written here would be the hash of a different file. The
+digest and byte count are reported alongside the delivered `.zip`. The archive is
+reproducible from its commit, so `git archive` followed by `sha256sum` returns
+the same value on any machine.
+
+What was verified about the delivered file, by enumerating its entry list rather
+than by inspection:
+
+- It is a bare `git archive` of the release commit. It is **not** wrapped in an
+  outer ZIP and is not a copy of the development checkout.
+- It contains no `.venv`, no `artifacts/`, no `__pycache__`, no `.pyc`, no
+  `.coverage`, no `.raw` captured payload and no nested `.zip`.
+- Top-level entries: `.gitattributes`, `.github`, `.gitignore`, `README.md`,
+  `config`, `docs`, `infra`, `migrations`, `pyproject.toml`,
+  `requirements-lock.txt`, `src`, `tests`.
 
 ---
 
@@ -163,16 +186,16 @@ print. That catches a chain from a different session. It does not yet prove that
 every *quote* came from the captured payloads, so a chain assembled from the
 right session's bytes and then altered row by row would still pass. Closing it
 needs a per-contract digest carried from assembly into the snapshot. Recorded as
-OPEN_DECISIONS §36.
+OPEN_DECISIONS section 36.
 
 **2. The hand-written Eastern zone is imprecise inside the repeated autumn
 hour.** `src/gex/sessions.USEastern` resolves its offset from the wall clock and
 deliberately ignores `fold`, because there is no `tzdata` wheel on every machine
-this runs on. Rendering an instant *inside* the 01:00–02:00 window on the
+this runs on. Rendering an instant *inside* the 01:00-02:00 window on the
 fall-back Sunday back into Eastern can therefore be an hour out. The normalised
-UTC instant — which is what every calculation uses — is correct, and the
-ambiguity resolution is recorded on the parsed value. One hour a year, outside
-any US index-option session. Recorded as OPEN_DECISIONS §2.
+UTC instant, which is what every calculation uses, is correct, and the ambiguity
+resolution is recorded on the parsed value. One hour a year, outside any US
+index-option session. Recorded as OPEN_DECISIONS section 2.
 
 ---
 

@@ -54,8 +54,8 @@ Added: `src/domain/normalization.py`, `src/adapters/open_interest.py`,
 `src/adapters/thetadata/request_spec.py`,
 `tests/unit/test_normalized_evidence_binding.py`.
 
-This document is added by the commit that follows `478faac`, which changes
-no code. The archive is built from that final commit; its SHA-256 is given
+This document was added by `478faac` and corrected by the two commits that
+follow it, neither of which changes any code. The archive is built from that final commit; its SHA-256 is given
 alongside the delivered file, for the reason set out under **Artifact**.
 
 ---
@@ -188,8 +188,8 @@ it is a hand-typed literal, and all of them held.
 | Field | Value |
 |---|---|
 | File | `gex-bot-v2.1.7.zip` |
-| Files tracked | 172 |
-| ZIP entries | 213 (172 files plus 41 directory entries) |
+| Files tracked | 171 |
+| ZIP entries | 212 (171 files plus 41 directory entries) |
 
 Built with:
 

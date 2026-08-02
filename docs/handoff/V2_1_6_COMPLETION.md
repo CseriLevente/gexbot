@@ -150,8 +150,8 @@ exactly two assertions in that file changed.
 | Field | Value |
 |---|---|
 | File | `gex-bot-v2.1.6.zip` |
-| Files tracked | 161 |
-| ZIP entries | 207 (161 files plus 46 directory entries) |
+| Files tracked | 166 |
+| ZIP entries | 207 (166 files plus 41 directory entries) |
 
 Built with:
 

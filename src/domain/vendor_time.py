@@ -15,6 +15,12 @@ chain and 11:00 UTC when the validator re-read the same bytes to check it. Four
 hours. On a 0DTE contract that is not a slightly wrong gamma, and the module
 disagreeing was the one whose job is to catch disagreements.
 
+v2.1.6 unified the two readers. It did not make either of them right on the
+autumn transition: the zone was hand-written, resolved its offset from the wall
+clock, and so could not represent an hour that occurs twice. v2.1.7 uses
+``zoneinfo`` and ``fold``, so 01:30 on the fall-back Sunday is two instants an
+hour apart and each converts to the UTC the IANA database says it does.
+
 Everything downstream refuses naive datetimes, which is what confines the
 inference to this boundary. What this module adds is that the *result* of the
 inference is a value: the raw text, the zone assumed, the normalised instant,
@@ -26,9 +32,10 @@ know which module produced it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, tzinfo
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 __all__ = [
     "DEFAULT_VENDOR_TIMEZONE",
@@ -39,27 +46,22 @@ __all__ = [
 
 #: The venue's zone. SPX and SPXW trade on Cboe, and the vendor's wall clock
 #: follows the exchange rather than the reader's machine.
-#:
-#: Resolved through ``src.gex.sessions.USEastern`` rather than ``zoneinfo``:
-#: ``ZoneInfo("America/New_York")`` needs the ``tzdata`` wheel on Windows and
-#: raises without it, and an engine whose time-to-expiry depends on whether an
-#: optional data package happened to be installed is not one to trust on a 0DTE
-#: afternoon. See the module docstring of ``src/gex/sessions.py``.
 DEFAULT_VENDOR_TIMEZONE = "America/New_York"
 
 
 def _zone(name: str) -> tzinfo:
-    """The tzinfo for a named zone, without depending on ``tzdata``."""
-    from src.gex.sessions import EASTERN
+    """The tzinfo for a named zone.
 
+    The default resolves through ``src.gex.sessions`` so the whole repository
+    shares one zone object, and one failure message when the timezone database
+    is missing.
+    """
     if name == DEFAULT_VENDOR_TIMEZONE:
+        from src.gex.sessions import EASTERN
+
         return EASTERN
     if name in ("UTC", "Etc/UTC"):
         return UTC
-    # Anything else is a deliberate configuration choice, and the caller has
-    # accepted the tzdata dependency by naming it.
-    from zoneinfo import ZoneInfo
-
     return ZoneInfo(name)
 
 
@@ -83,8 +85,8 @@ class AmbiguityPolicy(str, Enum):
 
 
 #: Recorded when the wall clock names an instant the zone does not have. 02:30
-#: on the spring-forward Sunday never happens; Python resolves it, and the
-#: resolution is written down rather than silently accepted.
+#: on the spring-forward Sunday never happens; ``zoneinfo`` still yields an
+#: instant, and the resolution is written down rather than silently accepted.
 NONEXISTENT = "NONEXISTENT_WALL_CLOCK_NORMALISED"
 
 #: Recorded when the payload carried an offset, so nothing had to be assumed.
@@ -142,8 +144,6 @@ def parse_vendor_timestamp(
     except ValueError:
         return None
 
-    zone = _zone(assumed_timezone)
-
     if parsed.tzinfo is not None and parsed.utcoffset() is not None:
         return VendorTimestamp(
             raw_value=text,
@@ -153,76 +153,25 @@ def parse_vendor_timestamp(
             ambiguity_resolution=NOT_APPLICABLE,
         )
 
-    transition = _transition_kind(parsed, assumed_timezone)
-
-    if transition is _Transition.AMBIGUOUS:
-        # The hour occurs twice. ``USEastern`` is written by hand and does not
-        # honour ``fold`` -- deliberately, see src/gex/sessions.py -- so the two
-        # readings are constructed from their offsets rather than requested from
-        # the zone, and the one taken is recorded.
-        offset = _DAYLIGHT if ambiguity is AmbiguityPolicy.EARLIER else _STANDARD
-        return VendorTimestamp(
-            raw_value=text,
-            assumed_timezone=assumed_timezone,
-            normalized_utc=(parsed - offset).replace(tzinfo=UTC),
-            localization_applied=True,
-            ambiguity_resolution=ambiguity.value,
-        )
-
-    if transition is _Transition.NONEXISTENT:
-        # 02:30 on the spring-forward Sunday is a reading of a clock that never
-        # showed it. Normalised through standard time, which maps it into the
-        # hour the clock jumped to, and labelled so a reader knows the input was
-        # not a real instant.
-        return VendorTimestamp(
-            raw_value=text,
-            assumed_timezone=assumed_timezone,
-            normalized_utc=(parsed - _STANDARD).replace(tzinfo=UTC),
-            localization_applied=True,
-            ambiguity_resolution=NONEXISTENT,
-        )
-
-    localised = parsed.replace(tzinfo=zone)
+    localised = parsed.replace(tzinfo=_zone(assumed_timezone), fold=ambiguity.fold)
     return VendorTimestamp(
         raw_value=text,
         assumed_timezone=assumed_timezone,
         normalized_utc=localised.astimezone(UTC),
         localization_applied=True,
-        ambiguity_resolution=ambiguity.value,
+        ambiguity_resolution=(
+            NONEXISTENT if _is_nonexistent(localised) else ambiguity.value
+        ),
     )
 
 
-#: US Eastern offsets. Named rather than inlined because the ambiguous-hour
-#: readings are built from them directly.
-_STANDARD = timedelta(hours=-5)
-_DAYLIGHT = timedelta(hours=-4)
+def _is_nonexistent(localised: datetime) -> bool:
+    """Whether a localised wall clock names an instant the zone never had.
 
-
-class _Transition(Enum):
-    """Whether a wall clock reading is real, doubled, or skipped."""
-
-    NORMAL = "NORMAL"
-    AMBIGUOUS = "AMBIGUOUS"
-    NONEXISTENT = "NONEXISTENT"
-
-
-def _transition_kind(naive: datetime, assumed_timezone: str) -> _Transition:
-    """Classify a naive reading against the zone's DST transitions."""
-    if assumed_timezone != DEFAULT_VENDOR_TIMEZONE:
-        # Another zone means the caller accepted ``tzdata``, and ``fold`` works
-        # there, so there is nothing to reconstruct by hand.
-        return _Transition.NORMAL
-
-    from src.gex.sessions import dst_end, dst_start
-
-    try:
-        start, end = dst_start(naive.year), dst_end(naive.year)
-    except ValueError:
-        # Pre-2007, which the engine refuses elsewhere. Nothing to classify.
-        return _Transition.NORMAL
-
-    if start <= naive < start + timedelta(hours=1):
-        return _Transition.NONEXISTENT
-    if end - timedelta(hours=1) <= naive < end:
-        return _Transition.AMBIGUOUS
-    return _Transition.NORMAL
+    02:30 on the spring-forward Sunday is a reading of a clock that never showed
+    it. ``zoneinfo`` still produces an instant, and the round trip is what
+    detects the problem: converting to UTC and back gives a *different* wall
+    clock, because the original one does not exist.
+    """
+    round_tripped = localised.astimezone(UTC).astimezone(localised.tzinfo)
+    return round_tripped.replace(tzinfo=None) != localised.replace(tzinfo=None)

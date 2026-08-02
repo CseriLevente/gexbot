@@ -1,8 +1,10 @@
 """US Eastern clock and settlement times.
 
-The cross-check against ``zoneinfo`` is the important test here: it is what stops
-the hand-rolled DST rule from drifting away from the real tz database on a machine
-where ``tzdata`` happens to be installed.
+Since v2.1.7 the zone *is* ``zoneinfo.ZoneInfo("America/New_York")``, with
+``tzdata`` pinned. What these tests now guard is that the repository asks the
+real database rather than re-deriving a rule beside it: the offsets, the
+transition dates the calendar depends on, and -- the reason for the change --
+that the repeated autumn hour is two distinct instants.
 """
 
 from __future__ import annotations
@@ -50,25 +52,51 @@ def test_offsets_across_the_year(moment, expected_offset_hours, expected_name):
     assert aware.tzname() == expected_name
 
 
-def test_rejects_years_before_the_2007_rule():
-    with pytest.raises(ValueError, match="2007"):
-        datetime(2005, 7, 1, tzinfo=EASTERN).utcoffset()
+def test_pre_2007_dates_use_the_rule_that_was_actually_in_force():
+    """The hand-written zone refused these. The database knows them.
+
+    DST began on the first Sunday in April until 2007, so 1 April 2005 is still
+    standard time -- a date the post-2005 rule would have called daylight.
+    """
+    assert datetime(2005, 4, 1, 12, 0, tzinfo=EASTERN).utcoffset() == timedelta(
+        hours=-5
+    )
+    assert datetime(2005, 7, 1, 12, 0, tzinfo=EASTERN).utcoffset() == timedelta(
+        hours=-4
+    )
 
 
-def test_matches_zoneinfo_when_tzdata_is_available():
-    """Skipped where tzdata is absent (e.g. a bare Windows install)."""
-    zoneinfo = pytest.importorskip("zoneinfo")
-    try:
-        reference = zoneinfo.ZoneInfo("America/New_York")
-    except zoneinfo.ZoneInfoNotFoundError:
-        pytest.skip("tzdata not installed; hand-rolled rule cannot be cross-checked")
+def test_the_repeated_autumn_hour_is_two_instants():
+    """The reason ``tzdata`` is now a dependency.
 
-    probe = datetime(2026, 1, 1, 12, 0)
-    for _ in range(365 * 2):
-        assert probe.replace(tzinfo=EASTERN).utcoffset() == reference.utcoffset(
-            probe
-        ), f"offset mismatch at {probe}"
-        probe += timedelta(days=1)
+    A wall-clock rule cannot express this: 01:30 occurs twice on the fall-back
+    Sunday, an hour apart. The hand-written zone ignored ``fold`` and rendered
+    the second occurrence as 02:30, which is the right offset on the wrong hour.
+    """
+    first = eastern(2026, 11, 1, 1, 30)
+    second = eastern(2026, 11, 1, 1, 30, fold=1)
+
+    assert first.astimezone(UTC) == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
+    assert second.astimezone(UTC) == datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
+    assert second.astimezone(UTC) - first.astimezone(UTC) == timedelta(hours=1)
+
+    # And the later one still reads 01:30, on standard time.
+    assert (second.hour, second.minute) == (1, 30)
+    assert second.utcoffset() == timedelta(hours=-5)
+    assert first.utcoffset() == timedelta(hours=-4)
+
+
+def test_a_round_trip_through_utc_preserves_the_later_occurrence():
+    """to_eastern must not collapse the two folds onto one wall clock."""
+    later = eastern(2026, 11, 1, 1, 30, fold=1)
+    assert to_eastern(later.astimezone(UTC)).isoformat() == "2026-11-01T01:30:00-05:00"
+
+
+def test_the_zone_is_the_iana_database():
+    from src.gex.sessions import EASTERN_ZONE_NAME
+
+    assert EASTERN_ZONE_NAME == "America/New_York"
+    assert str(EASTERN) == EASTERN_ZONE_NAME
 
 
 def test_spxw_settles_at_the_close_and_spx_at_the_open():

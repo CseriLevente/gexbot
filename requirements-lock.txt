@@ -7,14 +7,17 @@
 # pins what a known-good environment actually resolved to. Regenerate it
 # deliberately, in a commit that says why.
 #
-# Note what is NOT here: the engine core (src/gex, src/domain, src/synthetic)
-# imports none of these. Only the config loader (PyYAML) and the real HTTP
-# transport (httpx) have runtime dependencies at all; the rest is tooling.
+# The engine core (src/gex, src/domain, src/synthetic) imports no *code* from
+# this list. The config loader needs PyYAML and the real HTTP transport needs
+# httpx; the rest is tooling.
+#
+# tzdata is the one runtime entry the core does reach, and it is data: the IANA
+# timezone database, with no importable logic. v2.1.7 adopted it because the
+# hand-written US Eastern rule it replaced could not represent the repeated hour
+# of the autumn DST transition and returned an instant an hour wrong.
 #
 # Python 3.12 or 3.13.
 
-PyYAML==6.0.3
-Pygments==2.20.0
 anyio==4.14.2
 certifi==2026.7.22
 colorama==0.4.6
@@ -25,13 +28,16 @@ httpx==0.28.1
 idna==3.18
 iniconfig==2.3.0
 librt==0.13.0
-mypy==1.20.2
 mypy_extensions==1.1.0
+mypy==1.20.2
 packaging==26.2
 pathspec==1.1.1
 pluggy==1.6.0
-pytest-cov==7.1.0
+Pygments==2.20.0
 pytest==9.1.1
+pytest-cov==7.1.0
+PyYAML==6.0.3
 ruff==0.14.14
+tzdata==2025.3
 types-PyYAML==6.0.12.20260724
 typing_extensions==4.16.0

@@ -27,9 +27,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from dataclasses import replace as _replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from src.adapters.raw_store import PARSER_VERSION
 from src.config.compatibility import (
     CompatibilityEvidence,
     CompatibilityStatus,
@@ -775,6 +777,53 @@ def _chain_fingerprint(chain: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _open_interest_as_of(chain: Any) -> Any:
+    """The settlement date the chain's contracts carry, when they agree.
+
+    Read from the quotes rather than from ``meta``: the recipe has to describe
+    what normalization actually produced, and a metadata key is a description.
+    ``None`` when the chain is empty or its contracts disagree, which is a state
+    the trusted path refuses elsewhere rather than papering over here.
+    """
+    dates = {
+        quote.timestamps.open_interest_as_of for quote in getattr(chain, "quotes", ())
+    }
+    return dates.pop() if len(dates) == 1 else None
+
+
+def _first_field_difference(supplied: Any, rederived: Any) -> str:
+    """Name the first field that differs, so a refusal is actionable.
+
+    A digest mismatch on its own tells an operator that something moved and
+    nothing about what. This walks the same canonical payload the hash covers
+    and reports the first disagreement it finds.
+    """
+    from src.domain.normalization import canonical_chain_payload
+
+    left, right = canonical_chain_payload(supplied), canonical_chain_payload(rederived)
+    for key in sorted(set(left) | set(right)):
+        if key == "quotes":
+            continue
+        if left.get(key) != right.get(key):
+            return f"{key} is {left.get(key)!r} here and {right.get(key)!r} there"
+
+    by_id = {entry["contract_id"]: entry for entry in right.get("quotes", ())}
+    for entry in left.get("quotes", ()):
+        other = by_id.pop(entry["contract_id"], None)
+        if other is None:
+            return f"contract {entry['contract_id']} is not in the re-derived chain"
+        for field_name in sorted(entry):
+            if entry[field_name] != other.get(field_name):
+                return (
+                    f"contract {entry['contract_id']} has {field_name} "
+                    f"{entry[field_name]!r} here and "
+                    f"{other.get(field_name)!r} there"
+                )
+    if by_id:
+        return f"the re-derived chain has contracts this one does not: {sorted(by_id)}"
+    return "the difference is not in a field either payload names"
+
+
 def _same_price(left: object, right: object, tolerance: float = 1e-9) -> bool:
     """Two readings of the same underlying, to the precision it is quoted at."""
     try:
@@ -1066,18 +1115,63 @@ class ThetaDataResearchPipeline:
         this session was configured with; naming one explicitly is how a caller
         keeps a fetch and the manifest it will be verified against in the same
         place.
+
+        The session is stamped with what the repository looks like *now*, and
+        every record it writes carries the stamp. v2.1.6 put the pipeline
+        fingerprint on the manifest alone, which made relabelling a capture a
+        one-field edit that the evidence could not contradict.
         """
-        from src.adapters.raw_store import CaptureSession, new_capture_session_id
+        from src.adapters.raw_store import new_capture_session_id
         from src.adapters.thetadata.client import capture_origin_of
 
         if not self.config.raw_capture_enabled:
             return None
-        return CaptureSession(
+        return self.capture_session(
             store=store if store is not None else self.runtime.client.raw_store,
             session_id=new_capture_session_id(as_of=as_of),
-            # Read off the transport actually in use, so an offline fixture
-            # cannot present itself as a live capture.
+            as_of=as_of,
             capture_origin=capture_origin_of(self.runtime.client.transport),
+        )
+
+    def capture_session(
+        self,
+        *,
+        store: Any,
+        session_id: str,
+        as_of: datetime,
+        capture_origin: Any = None,
+        open_interest_as_of: date | None = None,
+    ) -> Any:
+        """A capture session stamped with this pipeline's identity.
+
+        The one way to open a session that produces verifiable records. The
+        five capture-time claims are computed here, from the pipeline, and are
+        immutable for the life of the session -- so every record it writes can
+        be asked which pipeline, plan, request specification and normalization
+        recipe were in force when the bytes arrived.
+        """
+        from src.adapters.raw_store import CaptureOrigin, CaptureSession
+        from src.adapters.thetadata.client import capture_origin_of
+
+        recipe = self.normalization_recipe(
+            as_of=as_of, open_interest_as_of=open_interest_as_of
+        )
+        return CaptureSession(
+            store=store,
+            session_id=session_id,
+            capture_origin=(
+                capture_origin
+                if capture_origin is not None
+                else capture_origin_of(self.runtime.client.transport)
+            )
+            or CaptureOrigin.UNKNOWN_ORIGIN,
+            pipeline_fingerprint=self.fingerprint(),
+            capture_plan_fingerprint=self.capture_plan.fingerprint,
+            request_spec_fingerprint=recipe.request_spec_fingerprint,
+            # The *rules*, not this fetch's parameters. Stamping the
+            # full recipe hash would bind the record to one market
+            # instant, and verification would have to guess it back.
+            normalization_recipe_fingerprint=recipe.rules_fingerprint,
         )
 
     def _capture_index_spot(
@@ -1155,6 +1249,151 @@ class ThetaDataResearchPipeline:
             tier=Tier(self.config.tier),
         )
 
+    # -- binding a normalized chain to the bytes behind it --------------------
+
+    def request_spec(self) -> Any:
+        """What this session would send to each endpoint of its plan.
+
+        Canonical and computed from configuration alone, so it can be
+        recomputed later without the capture and compared against it. Stamped
+        onto every record so a capture taken at ``rate_value=4.2`` cannot be
+        presented as one from a pipeline configured with 3.1 -- the vendor
+        computed those greeks under a rate, and it is not the one being claimed.
+        """
+        from src.adapters.thetadata.request_spec import build_request_spec
+
+        return build_request_spec(
+            request=self.runtime.default_chain_request,
+            greeks=self.runtime.client.greeks,
+            settings=self.runtime.client.settings,
+            endpoints=self.capture_plan.required_endpoints,
+        )
+
+    def normalization_recipe(
+        self,
+        *,
+        as_of: datetime,
+        open_interest_as_of: date | None = None,
+        expected_universe_fingerprint: str | None = None,
+    ) -> Any:
+        """Every input besides the raw bytes that decides what normalization gives.
+
+        Two captures of identical payloads normalize differently under a
+        different IV source, duplicate policy or rate. Rebuilding therefore
+        needs this, and its digest is stamped at capture time so a chain cannot
+        be re-derived under rules the capture never saw.
+        """
+        from src.domain.normalization import NormalizationRecipe
+
+        return NormalizationRecipe(
+            parser_version=PARSER_VERSION,
+            pipeline_fingerprint=self.fingerprint(),
+            model_fingerprint=self.model_spec.fingerprint(),
+            capture_plan_fingerprint=self.capture_plan.fingerprint,
+            request_spec_fingerprint=self.request_spec().fingerprint,
+            as_of=as_of,
+            iv_source=self.runtime.iv_source.value,
+            duplicate_policy=self.runtime.duplicate_policy,
+            risk_free_rate=self.model_spec.risk_free_rate,
+            dividend_yield=self.model_spec.dividend_yield,
+            spot_source=self.config.underlying_price_source,
+            open_interest_as_of=open_interest_as_of,
+            expected_universe_fingerprint=expected_universe_fingerprint,
+        )
+
+    def rebuild_chain_from_capture(
+        self, *, manifest: Any, store: Any, recipe: Any
+    ) -> ChainSnapshot:
+        """Normalize the stored payloads again, under a stated recipe.
+
+        Replays the capture through the ordinary fetch path with a transport
+        that answers from the store. That is deliberate: a separate rebuilder
+        that re-read the CSVs itself would be a second implementation of
+        normalization, and two implementations of the same thing drift. Here the
+        client, the parser, the join and the model are the production ones and
+        only the bytes come from somewhere else.
+
+        The rebuilt chain carries no capture manifest of its own -- it is not a
+        session, it is a re-derivation -- and nothing is written to any store.
+        """
+        from src.adapters.transport import StoredPayloadTransport
+        from src.config.thetadata import ThetaDataRuntime
+
+        self.validate_integrity()
+        if recipe.pipeline_fingerprint != self.fingerprint():
+            raise PipelineConsistencyError(
+                f"the recipe was written for pipeline "
+                f"{recipe.pipeline_fingerprint!r}; this one is "
+                f"{self.fingerprint()!r}. Rebuilding under different rules "
+                "produces a different chain, which would be compared against "
+                "the original and read as tampering."
+            )
+
+        replay = ThetaDataRuntime.from_config(
+            # Capture is off for the rebuild. The evidence already exists; a
+            # rebuild that wrote more of it would be appending to the audit
+            # trail it is checking.
+            _replace(self.config, raw_capture_enabled=False, raw_capture_path=None),
+            symbol=self.runtime.default_chain_request.symbol,
+            transport=StoredPayloadTransport.from_capture(
+                manifest=manifest, store=store
+            ),
+        )
+        spot, spot_timestamp = self._replayed_spot(
+            runtime=replay, recipe=recipe, manifest=manifest, store=store
+        )
+        return replay.fetch_chain(
+            as_of=recipe.as_of,
+            spot=spot,
+            spot_timestamp=spot_timestamp,
+            open_interest_as_of=recipe.open_interest_as_of,
+            risk_free_rate=recipe.risk_free_rate or 0.0,
+            dividend_yield=recipe.dividend_yield or 0.0,
+        )
+
+    def _replayed_spot(
+        self, *, runtime: Any, recipe: Any, manifest: Any, store: Any
+    ) -> tuple[float, datetime | None]:
+        """The underlying, read back out of the captured index snapshot.
+
+        Read from the stored bytes rather than taken from the chain being
+        checked. Every gamma is computed against this number, so accepting the
+        supplied chain's own spot here would make the comparison circular.
+        """
+
+        if recipe.spot_source != "vendor_index_snapshot":
+            raise PipelineConsistencyError(
+                f"a chain whose underlying is {recipe.spot_source!r} cannot be "
+                "rebuilt from a capture: the number did not come from the "
+                "captured bytes, so re-deriving it would prove nothing"
+            )
+        record = runtime.client.fetch_index_snapshot(
+            symbol=runtime.default_chain_request.symbol, as_of=recipe.as_of
+        )
+        if record is None:
+            raise PipelineConsistencyError(
+                "the capture holds no index snapshot, so the underlying this "
+                "chain was priced against cannot be re-derived"
+            )
+        return record.spot, record.timestamp
+
+    def normalized_chain_receipt(
+        self, chain: ChainSnapshot, *, manifest: Any, recipe: Any
+    ) -> Any:
+        """Name a chain by the evidence and the rules that produced it."""
+        from src.domain.normalization import (
+            NormalizedChainReceipt,
+            canonical_chain_hash,
+        )
+
+        return NormalizedChainReceipt(
+            manifest_hash=manifest.manifest_hash,
+            recipe_hash=recipe.recipe_hash,
+            normalized_chain_hash=canonical_chain_hash(chain),
+            contract_count=len(chain.quotes),
+            parser_version=PARSER_VERSION,
+        )
+
     # -- the two calculations ------------------------------------------------
     #
     # v2.1.4 had one, ``compute_gex``, and it called the engine. It ran with six
@@ -1183,27 +1422,68 @@ class ThetaDataResearchPipeline:
             chain_fingerprint=_chain_fingerprint(chain),
         ).with_warnings(DIAGNOSTIC_WARNING_CODE)
 
-    def compute_trusted_gex(self, chain: ChainSnapshot, *, context: Any) -> Any:
-        """Compute only when independently verified evidence authorizes it.
+    def compute_trusted_gex(
+        self,
+        chain: ChainSnapshot,
+        *,
+        manifest: Any,
+        store: Any,
+        validation_report: Any = None,
+        spot_provenance: Any = None,
+        open_interest_provenance: Any = None,
+        open_interest_as_of_evidence: Any = None,
+    ) -> Any:
+        """Compute only when this call has itself derived the authority to.
 
         Refuses rather than warns. A warning beside a number is read by whoever
         happens to look; a refusal is read by everybody.
 
-        ``context`` is required, and it is a ``VerifiedCalculationContext``
-        produced by ``build_verified_calculation_context`` -- which re-derives
-        every verification from the manifest and the raw store. v2.1.5 decided
-        trust from ``chain.meta``, and ``ChainSnapshot.with_meta`` is public, so
-        a synthetic chain carrying the right keys passed every gate. The
-        manifest inside the snapshot is still worth having; it is a description
-        of where to look, and it is not a witness.
+        **Takes primitive evidence, not a verdict.** v2.1.6 took a
+        ``VerifiedCalculationContext``, which was the right shape of object and
+        the wrong kind of argument: it is a public frozen dataclass whose
+        ``context_hash`` any caller can recompute, so
+
+            forged = dataclasses.replace(
+                context, effective_pricing_compatibility=PricingCompatibilityReport()
+            )
+            forged = dataclasses.replace(forged, context_hash=forged.recomputed_hash())
+
+        produced an internally consistent context asserting that every pricing
+        dimension was fine. A hash is an integrity checksum. It says the fields
+        agree with the digest; it says nothing about who computed them.
+
+        There is no cryptography here and none is wanted -- arbitrary Python can
+        reach into anything. The requirement is narrower and achievable: **no
+        public API accepts a derived verdict where it could derive one.** So
+        this method takes the manifest, the store and the provenance claims, and
+        runs the verification, the validation re-derivation, the compatibility
+        derivation and the chain rebuild itself, in that order, before computing.
+
+        The returned snapshot carries the ``VerifiedCalculationContext`` this
+        call produced. It remains a serialisable *report* of what was checked.
         """
+        from src.adapters.certification import build_verified_calculation_context
+
         self.validate_integrity()
         _require_a_chain(chain, mode="trusted")
-        refusals = self._context_refusals(chain, context)
+
+        context = build_verified_calculation_context(
+            pipeline=self,
+            manifest=manifest,
+            store=store,
+            validation=validation_report,
+            spot=spot_provenance,
+            open_interest=open_interest_provenance,
+            open_interest_as_of_evidence=open_interest_as_of_evidence,
+        )
+        receipt = self._rederivation_refusals(
+            chain, manifest=manifest, store=store, context=context
+        )
+        refusals = [*self._context_refusals(chain, context), *receipt]
         if refusals:
             raise PipelineConsistencyError(
-                "the evidence context does not authorize a trusted calculation "
-                "for this chain: " + "; ".join(refusals)
+                "the evidence does not authorize a trusted calculation for this "
+                "chain: " + "; ".join(refusals)
             )
         blockers = self.calculation_blockers(
             chain, report=context.effective_pricing_compatibility
@@ -1224,6 +1504,60 @@ class ThetaDataResearchPipeline:
             chain_fingerprint=_chain_fingerprint(chain),
             evidence_context=context.as_dict(),
             evidence_context_hash=context.context_hash,
+            normalized_chain_receipt=self.normalized_chain_receipt(
+                chain,
+                manifest=manifest,
+                recipe=self.normalization_recipe(
+                    as_of=chain.as_of,
+                    open_interest_as_of=_open_interest_as_of(chain),
+                ),
+            ).as_dict(),
+        )
+
+    def _rederivation_refusals(
+        self, chain: ChainSnapshot, *, manifest: Any, store: Any, context: Any
+    ) -> tuple[str, ...]:
+        """Whether this chain is the one those raw records normalize to.
+
+        The gap v2.1.6 left. Verification proved a great deal about the *bytes*
+        and nothing about the ``ChainSnapshot`` -- so a chain fetched honestly,
+        then edited, kept a verified manifest and a trusted verdict. Adding
+        999,999 to one strike's open interest moved the unsigned total by about
+        two orders of magnitude and the result still said ``trusted=True``.
+
+        The answer is not a stricter check on the chain's metadata. It is to
+        normalize the stored payloads again and compare the two chains field by
+        field.
+        """
+        from src.domain.normalization import canonical_chain_hash
+
+        if not context.capture_verification.verified:
+            # Rebuilding from a capture that did not verify would compare a
+            # chain against bytes nobody has vouched for. The capture failure is
+            # reported by ``_context_refusals``; this is not a second one.
+            return ()
+        recipe = self.normalization_recipe(
+            as_of=chain.as_of, open_interest_as_of=_open_interest_as_of(chain)
+        )
+        try:
+            rederived = self.rebuild_chain_from_capture(
+                manifest=manifest, store=store, recipe=recipe
+            )
+        except PipelineConsistencyError as error:
+            return (f"the chain could not be re-derived from its capture: {error}",)
+        except Exception as error:
+            return (
+                f"re-deriving the chain from its capture raised "
+                f"{type(error).__name__}: {error}",
+            )
+
+        supplied, rebuilt = canonical_chain_hash(chain), canonical_chain_hash(rederived)
+        if supplied == rebuilt:
+            return ()
+        return (
+            f"the supplied chain hashes to {supplied[:16]}... and the chain "
+            f"re-derived from its raw records hashes to {rebuilt[:16]}...; "
+            f"{_first_field_difference(chain, rederived)}",
         )
 
     def _context_refusals(self, chain: ChainSnapshot, context: Any) -> tuple[str, ...]:
@@ -1233,24 +1567,7 @@ class ThetaDataResearchPipeline:
         pipeline *and* for the wrong capture, and a caller fixing one at a time
         learns more from being told both.
         """
-        from src.adapters.certification import VerifiedCalculationContext
-
-        if not isinstance(context, VerifiedCalculationContext):
-            return (
-                "compute_trusted_gex needs a VerifiedCalculationContext from "
-                "build_verified_calculation_context, got "
-                f"{type(context).__name__}. A verdict a caller can construct is "
-                "a verdict a caller can assert.",
-            )
-
         refusals: list[str] = []
-
-        # -- the context is the one the builder produced ---------------------
-        if context.context_hash != context.recomputed_hash():
-            refusals.append(
-                "the context hash does not follow from its own fields, so this "
-                "object has been edited since it was verified"
-            )
 
         # -- it describes this pipeline --------------------------------------
         if context.pipeline_fingerprint != self.fingerprint():
@@ -1261,8 +1578,6 @@ class ThetaDataResearchPipeline:
             )
         if context.capture_plan_fingerprint != self.capture_plan.fingerprint:
             refusals.append("the context was verified against a different capture plan")
-        from src.adapters.raw_store import PARSER_VERSION
-
         if context.parser_version != PARSER_VERSION:
             refusals.append(
                 f"the context was built by parser {context.parser_version!r}; "

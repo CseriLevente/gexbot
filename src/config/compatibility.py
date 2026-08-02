@@ -798,10 +798,17 @@ def derive_post_capture_compatibility(
       dimension already measured as disagreeing would launder the disagreement,
       which is the one thing evidence must never do.
 
-    An observation is used only when it belongs to *this* manifest and the
-    records behind it are in *this* capture. Both are checked here rather than
-    trusted from the report, because a validation report is a document and a
-    document can be moved between captures.
+    An observation is admitted only behind a **passing** check that names it,
+    reads the same manifest, names records this capture holds, measured a
+    uniform chain where a chain-level answer was required, and is itself part of
+    the report's semantic payload. Each of those is a way v2.1.6 could be
+    talked round:
+
+    * it iterated the checks and never looked at ``check.passed``, so a check
+      that had *failed* still handed its observation to the comparator -- and a
+      chain measured as ``MIXED_ACROSS_CHAIN`` could revise a dimension;
+    * ``pricing_observations`` was outside ``semantic_payload``, so an
+      observation could be edited without the re-derivation noticing.
     """
     if validation_report is None or manifest is None:
         return PostCaptureCompatibilityReport(
@@ -830,6 +837,37 @@ def derive_post_capture_compatibility(
         observation = observations.get(dimension)
         if observation is None:
             continue
+
+        # -- the check must have passed, about this dimension ---------------
+        if not getattr(check, "passed", False):
+            rejected.append(
+                f"{dimension.value}: the validation check did not pass "
+                f"({getattr(check, 'name', '?')}), so its observation cannot "
+                "revise anything. A failed check is a finding, not a source."
+            )
+            continue
+        if observation.dimension is not dimension:
+            rejected.append(
+                f"{dimension.value}: the observation is about "
+                f"{observation.dimension.value}"
+            )
+            continue
+
+        # -- a chain-level answer requires a uniform chain -------------------
+        coverage = getattr(check, "coverage", None)
+        if coverage is not None and not coverage.settled:
+            rejected.append(
+                f"{dimension.value}: the chain was measured across "
+                f"{coverage.rows_inspected} rows and did not settle on one "
+                f"answer ({coverage.matching_rows} matching, "
+                f"{coverage.mismatching_rows} mismatching, "
+                f"{coverage.missing_rows} missing, "
+                f"{coverage.non_finite_rows} unreadable). One contract cannot "
+                "characterise a chain."
+            )
+            continue
+
+        # -- the evidence is about this capture ------------------------------
         if observation.manifest_hash != manifest_hash:
             rejected.append(
                 f"{dimension.value}: the observation was read from capture "
@@ -843,6 +881,25 @@ def derive_post_capture_compatibility(
             rejected.append(
                 f"{dimension.value}: names records {sorted(set(records) - captured)} "
                 "which this capture does not contain"
+            )
+            continue
+        if not set(observation.record_ids) <= set(check.record_ids):
+            rejected.append(
+                f"{dimension.value}: the observation names records "
+                f"{sorted(set(observation.record_ids) - set(check.record_ids))} "
+                "that the check did not read"
+            )
+            continue
+
+        # -- and it is something the report is committed to ------------------
+        covered = getattr(
+            validation_report, "observation_is_in_the_semantic_payload", None
+        )
+        if callable(covered) and not covered(observation):
+            rejected.append(
+                f"{dimension.value}: the observation is not part of the "
+                "validation report's comparable payload, so re-deriving the "
+                "report would not have caught a change to it"
             )
             continue
 

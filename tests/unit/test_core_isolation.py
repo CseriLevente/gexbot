@@ -26,10 +26,13 @@ is meaningful even when the host has preloaded half of PyPI.
 
 from __future__ import annotations
 
+import functools
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -52,17 +55,46 @@ CORE_ENTRY_POINTS = (
 )
 
 
+@functools.cache
+def tzdata_root() -> str | None:
+    """A directory containing ``tzdata`` and nothing else.
+
+    v2.1.7 made ``tzdata`` a dependency, which narrows this file's claim from
+    "the core imports no third-party *package*" to "the core executes no
+    third-party *code*". ``tzdata`` is the IANA database and nothing else: it
+    has no importable logic, and the alternative was a hand-written zone that
+    could not represent the repeated hour of the autumn DST transition and so
+    returned an instant an hour wrong.
+
+    The package is **copied into a scratch directory** rather than having
+    site-packages put back on the path. Adding site-packages would make every
+    other wheel importable too, and the subprocess would stop proving anything
+    -- which is what ``test_dash_s_really_removes_site_packages`` catches.
+    """
+    try:
+        import tzdata
+    except ModuleNotFoundError:  # pragma: no cover - system tz database in use
+        return None
+    source = pathlib.Path(tzdata.__file__).resolve().parent
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="gex-tzdata-only-"))
+    shutil.copytree(source, scratch / source.name)
+    return str(scratch)
+
+
 def bare(program: str) -> subprocess.CompletedProcess[str]:
     """Run under ``-S -E``: no site-packages, no PYTHON* influence, no
-    sitecustomize. Whatever the host has arranged is invisible here.
+    sitecustomize. Whatever the host has arranged is invisible here -- except
+    the IANA timezone database, which is data and is added explicitly.
     """
     environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith(("PYTHON", "VIRTUAL_ENV", "COV_CORE"))
     }
+    root = tzdata_root()
+    prelude = f"import sys; sys.path.insert(0, r'{root}');" if root else ""
     return subprocess.run(  # noqa: S603
-        [sys.executable, "-S", "-E", "-c", program],
+        [sys.executable, "-S", "-E", "-c", prelude + program],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

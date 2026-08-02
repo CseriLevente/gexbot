@@ -31,7 +31,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
@@ -845,16 +845,23 @@ def _naive_or_none(value: str | None) -> datetime | None:
 
 
 def _reject_impossible_eastern_wall_clock(naive: datetime, *, fold: int | None) -> None:
-    """Refuse wall-clock readings that Eastern does not have exactly once."""
-    from src.gex.sessions import dst_end, dst_start
+    """Refuse wall-clock readings that Eastern does not have exactly once.
 
-    start, end = dst_start(naive.year), dst_end(naive.year)
-    if start <= naive < start.replace(hour=3):
+    Asked of the zone rather than reimplemented against the transition dates. A
+    nonexistent reading is one whose UTC round trip lands on a different wall
+    clock; an ambiguous one is one whose two folds are different instants.
+    """
+    from src.gex.sessions import EASTERN
+
+    earlier = naive.replace(tzinfo=EASTERN, fold=0)
+    later = naive.replace(tzinfo=EASTERN, fold=1)
+
+    if earlier.astimezone(UTC).astimezone(EASTERN).replace(tzinfo=None) != naive:
         raise ValueError(
             f"{naive.isoformat()} does not exist in US Eastern: the clock jumps "
             "from 02:00 to 03:00 on the spring-forward date"
         )
-    if fold is None and end.replace(hour=1) <= naive < end:
+    if fold is None and earlier.utcoffset() != later.utcoffset():
         raise ValueError(
             f"{naive.isoformat()} is ambiguous in US Eastern: the hour before the "
             "fall-back transition occurs twice. Pass fold=0 or fold=1."

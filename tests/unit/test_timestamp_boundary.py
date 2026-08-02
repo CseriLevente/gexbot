@@ -212,13 +212,9 @@ def test_an_ambiguous_dst_wall_clock_requires_explicit_fold():
 def test_ambiguous_dst_is_resolvable_with_an_explicit_fold():
     """The two readings are two instants, an hour apart.
 
-    Asserted on the instants rather than on ``.fold``. ``src.gex.sessions``
-    implements US Eastern by hand -- there is no ``tzdata`` wheel on every
-    machine this runs on, see that module -- and the hand-written zone
-    deliberately ignores ``fold``. v2.1.6 therefore carries the choice as a
-    recorded ``ambiguity_resolution`` on the parsed value instead of hiding it
-    in an attribute the zone does not honour; what has to be true, and is, is
-    that asking for the later reading gives you the later instant.
+    Compared in UTC, not by subtracting the two Eastern values: Python
+    subtracts same-zone datetimes as wall clocks, so ``second - first`` is zero
+    however correct the instants are. The instants are the claim.
     """
     first, _ = parse_vendor_timestamp(
         "2026-11-01T01:30:00.000", strict_dst=True, fold=0
@@ -228,7 +224,11 @@ def test_ambiguous_dst_is_resolvable_with_an_explicit_fold():
     )
     assert first is not None
     assert second is not None
-    assert (second - first) == timedelta(hours=1)
+    assert first.astimezone(UTC) == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
+    assert second.astimezone(UTC) == datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
+    # The later reading is 01:30 on standard time, not 02:30. v2.1.6 returned
+    # 02:30-05:00 here: the right offset on an hour the vendor never sent.
+    assert second.isoformat() == "2026-11-01T01:30:00-05:00"
 
 
 def test_ordinary_timestamps_are_unaffected_by_strict_dst():

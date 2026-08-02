@@ -443,6 +443,97 @@ timestamps and a response no earlier than its request.
 `if manifest.capture_plan_fingerprint and ...` meant a manifest that claimed
 nothing was checked against nothing.
 
+## v2.1.7: bound to the chain, not only to the bytes
+
+Everything above is about raw records. The `ChainSnapshot` a caller hands to a
+trusted calculation is a *different object* — the result of parsing and joining
+those records — and until v2.1.7 nothing connected the two:
+
+```python
+chain = pipeline.fetch_chain(...)          # honest
+tampered = dataclasses.replace(chain, quotes=(edited, *chain.quotes[1:]))
+pipeline.compute_trusted_gex(tampered, context=real_context)   # trusted=True
+```
+
+Adding 999,999 to one strike's open interest moved the unsigned total by about
+two orders of magnitude, with a verified manifest and `trusted=True`.
+
+### Re-derivation
+
+```python
+snapshot = pipeline.compute_trusted_gex(
+    chain,
+    manifest=manifest,
+    store=store,
+    validation_report=validation_report,          # optional
+    spot_provenance=spot_provenance,
+    open_interest_provenance=open_interest_provenance,
+    open_interest_as_of_evidence=settlement_date_evidence,
+)
+```
+
+Note what is **not** a parameter: any verdict. v2.1.6 took a
+`VerifiedCalculationContext`, a public frozen dataclass whose `context_hash` any
+caller can recompute — so an edited context with a fresh hash was internally
+consistent and asserted whatever the caller wanted. A hash proves the fields
+agree with the digest; it says nothing about who computed them. The method now
+takes evidence and does the deriving, in this order:
+
+1. validate pipeline integrity;
+2. verify the capture (records, identity, request specification);
+3. re-derive the validation report and compare it;
+4. derive the effective pricing compatibility;
+5. rebuild the normalized chain from the stored payloads;
+6. compare `canonical_chain_hash(supplied)` against the rebuilt one;
+7. check spot and open-interest provenance against this chain;
+8. only then compute.
+
+The rebuild replays the capture through the **ordinary fetch path** with a
+transport that answers from the store. A separate rebuilder that re-read the
+CSVs itself would be a second implementation of normalization, and two
+implementations of the same thing drift.
+
+The `VerifiedCalculationContext` still exists. It is what the call *returns*.
+
+### What the canonical chain hash covers
+
+Contract identity, exact strike, expiry, right, multiplier; bid, ask, last, both
+sizes, volume, open interest; IV value *and* source *and* usability; gamma and
+whether the vendor supplied it; delta, theta, vega; the per-contract underlying;
+all five source clocks and the selected-source provenance; parse issues;
+exclusion state. Chain level: `as_of`, spot, spot timestamp, rate, dividend,
+source, expected contract count, completeness status, effective-model
+fingerprint.
+
+Not covered: the chain-level `SnapshotClocks` *values*. All three are read from
+the client's own clock at fetch time, so a rebuild necessarily differs and
+hashing them would make the comparison fail always. Their ordering is hashed,
+and the per-record request and response clocks are compared against the store by
+`verify_capture` — which is where a timestamp is evidence about a response
+rather than about the machine that asked for it.
+
+### Records carry what was true when the bytes arrived
+
+`CaptureIdentity` — session, pipeline fingerprint, capture-plan fingerprint,
+request-spec fingerprint, normalization-rules fingerprint — is fixed when a
+session opens and stamped on every record. Verification compares it twice:
+descriptor against record, and record against what this pipeline is *now*. In
+v2.1.6 the pipeline fingerprint lived on the manifest alone, so relabelling a
+capture as another pipeline's was one field on a document the evidence could not
+contradict.
+
+The request specification is the sharpest of these. `rate_value` and
+`annual_dividend` are sent to the vendor's greeks endpoints and change the IV
+and greeks that come back, so a capture taken at `rate_value=4.2` presented as
+one from a pipeline configured with `3.1` describes numbers computed under a
+different rate. `RequestSpec` states, per endpoint, exactly what this session
+would send; verification recomputes it and compares against each record's stored
+query parameters.
+
+`capture_origin` is likewise no longer a field on the manifest. It is derived
+from the records: one uniform origin, or `UNKNOWN_ORIGIN` for none or mixed. A
+declaration that contradicts the records fails verification.
+
 ### Paid capture needs somewhere the evidence survives
 
 `READY_FOR_RAW_CAPTURE_ONLY` additionally requires a `DURABLE_APPEND_ONLY`

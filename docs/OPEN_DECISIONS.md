@@ -65,25 +65,31 @@ the one whose job is to catch disagreements. A parsed timestamp now carries the
 raw text, the zone assumed, the normalised UTC instant, whether localisation was
 applied, and how any ambiguity was resolved.
 
-**The DST fold policy.** On the autumn transition Sunday the wall clock 01:30
-occurs twice. The choice is recorded as an `ambiguity_resolution` value
-(`EARLIER` / `LATER`) rather than as `datetime.fold`, because
-`src/gex/sessions.USEastern` is written by hand and deliberately ignores `fold`
-— there is no `tzdata` wheel on every machine this runs on, and an engine whose
-time-to-expiry depends on whether an optional data package happened to be
-installed is not one to trust on a 0DTE afternoon. The two readings are
-constructed from their offsets directly, so asking for the later one gives the
-later instant. A nonexistent spring-forward reading is normalised and labelled
+**The DST fold policy (v2.1.7).** On the autumn transition Sunday the wall clock
+01:30 occurs twice: once at `-04:00` and again an hour later at `-05:00`. The
+choice is recorded as an `ambiguity_resolution` value (`EARLIER` / `LATER`) *and*
+carried as `datetime.fold`, because the zone is now
+`zoneinfo.ZoneInfo("America/New_York")` and honours it. A nonexistent
+spring-forward reading is normalised and labelled
 `NONEXISTENT_WALL_CLOCK_NORMALISED` rather than silently accepted.
 
-**Known imprecision.** Because the hand-written zone resolves its offset from
-the wall clock, rendering an instant *inside* the repeated autumn hour back into
-Eastern can be an hour out. The normalised UTC instant — which is what every
-calculation uses — is correct. The window is one hour a year, at 01:00–02:00
-local, outside any US index-option session.
+**The reversal, and why.** v2.1.6 implemented US Eastern by hand, to keep the
+engine core free of the `tzdata` wheel. The DST rule has been stable since 2007
+and re-implementing it is twenty lines, so the rule was never the problem — the
+*representation* was. A hand-written `tzinfo` resolves its offset from the wall
+clock, and a wall clock that occurs twice cannot tell the two occurrences apart.
+Converting the second instant back into Eastern returned `02:30-05:00`: the
+right offset on the wrong hour, an hour of error on an instant the IANA database
+has always had correct.
 
-**What would settle it.** One live response compared against a known wall-clock
-instant.
+`tzdata` is now a pinned dependency. It is data, not code: the engine core still
+executes nothing third-party, which is the property the bare-interpreter check
+actually protects, and the CI job makes exactly that one exception. Carrying a
+wrong instant to avoid a data dependency was the wrong trade.
+
+**What would settle the underlying question.** One live response compared
+against a known wall-clock instant. The zone is now right; which zone the vendor
+*means* is still an inference.
 
 ---
 
@@ -737,13 +743,59 @@ own fields and the hash is recomputed at the gate, so an edited context is
 refused. The manifest in `chain.meta` stays -- it tells a later reader which
 bytes to open -- and it authorizes nothing.
 
-**What is still not settled.** The binding between a chain and a capture rests
-on the manifest hash and on `chain.spot` matching the verified index print. It
-does not yet prove that every *quote* in the chain came from the captured
-payloads. That would need a per-contract digest carried from assembly into the
-snapshot; the current binding is enough to catch a chain from a different
-session, and not enough to catch a chain assembled from the right session's
-bytes with one row altered afterwards.
+**Closed in v2.1.7.** The gap noted here — that nothing proved every *quote*
+came from the captured payloads — is closed by re-derivation rather than by a
+per-contract digest. `compute_trusted_gex` replays the stored bytes through the
+ordinary fetch path, hashes both chains over every calculation-relevant field,
+and refuses unless they agree. A chain assembled from the right session's bytes
+with one row altered afterwards now fails, naming the field that moved.
+
+The trusted API also stopped accepting the context. It is a public frozen
+dataclass whose `context_hash` any caller can recompute, so an edited context
+with a fresh hash was internally consistent and said whatever the caller wanted.
+A hash is an integrity checksum, not proof of issuer. The method takes the
+manifest, the store and the provenance claims and derives the rest itself.
+
+---
+
+## 37. Open interest: the number and the session are separate facts - **OPEN**
+
+**The question.** An open-interest response carries a figure. Which settlement
+session does that figure belong to?
+
+**Why v2.1.6 got this wrong.** `OpenInterestProvenance` held a date, a source
+and a `VerifiedFieldObservation` together, and `grade_claim` confirmed the
+observation by re-reading `open_interest` from the named record. That
+confirmation is real, and it is about the wrong field: it proves the vendor sent
+the *number*. The date came from the caller and was graded `OBSERVED` on the
+strength of a value nobody disputed.
+
+Open interest is the linear weight on every GEX term. Using Friday's figures
+believing them to be Monday's is not a stale number, it is a different market.
+
+**Current behaviour (v2.1.7).** Two types. `OpenInterestValueObservation` says
+the vendor sent this number in this record; it carries no date, so the confusion
+cannot be expressed. `OpenInterestAsOfEvidence` says which session, and names
+the *kind* of thing being relied on:
+
+| Kind | Permits a trusted GEX |
+|---|---|
+| `VENDOR_FIELD` | yes — and must name the records it was read from |
+| `AUTHORITATIVE_VENDOR_DOCUMENTATION` | yes — and must carry a resolvable reference |
+| `DERIVED_FROM_VERIFIED_VENDOR_SCHEDULE` | yes |
+| `CALLER_ASSUMPTION` | **no** |
+
+Supplying no evidence is treated as `CALLER_ASSUMPTION`: silence is not a vendor
+statement. A caller assumption permits a raw capture and a diagnostic GEX, and
+blocks a trusted calculation, calculation validation, adapter certification and
+any feature generation.
+
+**So the shipped configuration cannot produce a trusted number today**, and that
+is the honest position rather than a regression. See OD-26 for the vendor-side
+question this depends on.
+
+**What would settle it.** A documented ThetaData settlement convention, or a
+field in the response, or a verified settlement schedule to derive from.
 
 ---
 

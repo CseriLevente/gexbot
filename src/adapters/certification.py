@@ -48,6 +48,11 @@ from src.adapters.errors import (
     ThetaDataCertificationError,
     ThetaDataProvenanceError,
 )
+from src.adapters.open_interest import (
+    EvidenceKind,
+    OpenInterestAsOfEvidence,
+    OpenInterestValueObservation,
+)
 from src.adapters.raw_store import (
     MANIFEST_SCHEMA_VERSION,
     PARSER_VERSION,
@@ -77,8 +82,11 @@ __all__ = [
     "AdapterValidator",
     "CaptureVerification",
     "CertificationState",
+    "EvidenceKind",
+    "OpenInterestAsOfEvidence",
     "OpenInterestProvenance",
     "OpenInterestSource",
+    "OpenInterestValueObservation",
     "ProvenanceGrade",
     "SpotProvenance",
     "SpotSource",
@@ -93,7 +101,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.6"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.7"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -431,12 +439,28 @@ def grade_claim(
     return ProvenanceGrade.OBSERVED, ""
 
 
+def _render_parameter(value: Any) -> str:
+    """Render a stored query value the way the request spec renders it.
+
+    Text on both sides, because text is what reaches the wire: ``4.2`` and
+    ``"4.2"`` are the same request, and comparing a float against a value read
+    back from JSON would fail on formatting rather than on substance.
+    """
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def verify_capture(
     manifest: RawCaptureManifest,
     store: Any,
     *,
     plan: CapturePlan | None = None,
     expected_pipeline_fingerprint: str = "",
+    expected_identity: Any = None,
+    expected_request_spec: Any = None,
 ) -> CaptureVerification:
     """Check that a manifest describes the capture it claims to describe.
 
@@ -513,6 +537,17 @@ def verify_capture(
         )
     if not manifest.session_id and manifest.records:
         failures.append("MANIFEST_SESSION_ID_EMPTY: the capture names no session")
+    if not manifest.declared_origin_matches_records:
+        failures.append(
+            f"DECLARED_ORIGIN_CONTRADICTS_RECORDS:"
+            f"{manifest.declared_capture_origin.value}: the records say "
+            f"{manifest.capture_origin.value}"
+        )
+    if manifest.records and not manifest.origin_is_uniform:
+        failures.append(
+            "MIXED_CAPTURE_ORIGIN: the records came from more than one "
+            "transport, so this is not one session"
+        )
 
     records = {r.record_id: r for r in getattr(store, "records", lambda: ())()}
 
@@ -571,6 +606,75 @@ def verify_capture(
             problems.append(f"REQUEST_TIMESTAMP_MISMATCH:{record_id}")
         if entry.response_received_at != record.response_received_at:
             problems.append(f"RESPONSE_TIMESTAMP_MISMATCH:{record_id}")
+        if entry.byte_length != record.byte_length:
+            problems.append(f"BYTE_LENGTH_MISMATCH:{record_id}")
+        if entry.capture_complete != record.capture_complete:
+            problems.append(f"CAPTURE_COMPLETE_MISMATCH:{record_id}")
+
+        # -- what the repository looked like when these bytes arrived -------
+        #
+        # The v2.1.6 gap. The pipeline fingerprint lived on the manifest and
+        # nowhere else, so relabelling a capture as another pipeline's was one
+        # field on a document the evidence could not contradict. Each of these
+        # was stamped by the capture session and is compared twice: descriptor
+        # against record, and record against what this pipeline is *now*.
+        if entry.capture_identity != record.capture_identity:
+            problems.append(f"CAPTURE_IDENTITY_MISMATCH:{record_id}")
+        if not record.capture_identity.complete:
+            problems.append(
+                f"RECORD_NOT_STAMPED:{record_id}: the record does not say which "
+                "pipeline, plan, request or recipe it was captured under"
+            )
+        if manifest.session_id and record.capture_session_id != manifest.session_id:
+            problems.append(
+                f"RECORD_SESSION_MISMATCH:{record_id}:"
+                f"{record.capture_session_id!r}!={manifest.session_id!r}"
+            )
+        if (
+            expected_pipeline_fingerprint
+            and record.pipeline_fingerprint
+            and record.pipeline_fingerprint != expected_pipeline_fingerprint
+        ):
+            problems.append(
+                f"RECORD_PIPELINE_MISMATCH:{record_id}:"
+                f"{record.pipeline_fingerprint!r} was stamped at capture; this "
+                f"pipeline is {expected_pipeline_fingerprint!r}"
+            )
+        if plan is not None and record.capture_plan_fingerprint != plan.fingerprint:
+            problems.append(f"RECORD_CAPTURE_PLAN_MISMATCH:{record_id}")
+        if expected_identity is not None:
+            if (
+                record.request_spec_fingerprint
+                != expected_identity.request_spec_fingerprint
+            ):
+                problems.append(
+                    f"RECORD_REQUEST_SPEC_MISMATCH:{record_id}: captured under a "
+                    "different request specification"
+                )
+            if (
+                record.normalization_recipe_fingerprint
+                != expected_identity.normalization_recipe_fingerprint
+            ):
+                problems.append(f"RECORD_NORMALIZATION_RECIPE_MISMATCH:{record_id}")
+
+        # -- and the request it actually sent -------------------------------
+        if expected_request_spec is not None:
+            expected_params = expected_request_spec.parameters_for(record.endpoint)
+            if expected_params is None:
+                problems.append(
+                    f"UNEXPECTED_ENDPOINT:{record_id}:{record.endpoint} is not "
+                    "part of this session's request specification"
+                )
+            else:
+                actual = {
+                    str(k): _render_parameter(v) for k, v in record.query_params.items()
+                }
+                if actual != expected_params:
+                    problems.append(
+                        f"REQUEST_PARAMETERS_MISMATCH:{record_id}: sent "
+                        f"{sorted(actual.items())}, this pipeline would send "
+                        f"{sorted(expected_params.items())}"
+                    )
 
         # -- the record's own internal coherence ----------------------------
         if manifest.session_id and not record_id_belongs_to(
@@ -727,6 +831,12 @@ class VerifiedCalculationContext:
     open_interest_provenance: OpenInterestProvenance | None
     raw_store_description: str
     context_hash: str
+    #: What establishes the settlement session the open interest belongs to.
+    #: Separate from ``open_interest_provenance``, which is about the *value*:
+    #: an OI response carries a number and no date, so confirming the number
+    #: says nothing about the session -- and v2.1.6 graded the date OBSERVED on
+    #: the strength of that confirmation.
+    open_interest_as_of_evidence: Any = None
     parser_version: str = PARSER_VERSION
     #: Everything that stopped this context from being usable. Empty is the
     #: only value a trusted calculation accepts.
@@ -769,6 +879,11 @@ class VerifiedCalculationContext:
                 if self.open_interest_provenance is not None
                 else None
             ),
+            "open_interest_as_of_evidence": (
+                self.open_interest_as_of_evidence.as_dict()
+                if self.open_interest_as_of_evidence is not None
+                else None
+            ),
             "raw_store_description": self.raw_store_description,
             "failures": sorted(self.failures),
         }
@@ -791,6 +906,33 @@ class VerifiedCalculationContext:
         }
 
 
+def _expected_identity(pipeline: Any, *, manifest: RawCaptureManifest) -> Any:
+    """The stamp this pipeline would put on a capture of this session.
+
+    The ``as_of`` a recipe needs is taken from the records themselves -- the
+    session already happened, and recomputing the recipe against *now* would
+    make every capture look stale by the time anyone verified it. What is being
+    compared is the configuration, not the clock.
+    """
+    from src.adapters.raw_store import CaptureIdentity
+
+    moments = [
+        record.request_started_at
+        for record in manifest.records
+        if record.request_started_at is not None
+    ]
+    as_of = min(moments) if moments else datetime.now(UTC)
+    recipe = pipeline.normalization_recipe(as_of=as_of)
+    return CaptureIdentity(
+        session_id=manifest.session_id,
+        pipeline_fingerprint=pipeline.fingerprint(),
+        capture_plan_fingerprint=pipeline.capture_plan.fingerprint,
+        request_spec_fingerprint=recipe.request_spec_fingerprint,
+        normalization_recipe_fingerprint=recipe.rules_fingerprint,
+        capture_origin=manifest.capture_origin,
+    )
+
+
 def build_verified_calculation_context(
     *,
     pipeline: Any,
@@ -799,6 +941,7 @@ def build_verified_calculation_context(
     validation: AdapterValidationReport | None = None,
     spot: SpotProvenance | None = None,
     open_interest: OpenInterestProvenance | None = None,
+    open_interest_as_of_evidence: Any = None,
 ) -> VerifiedCalculationContext:
     """Verify a capture from scratch and package what it authorizes.
 
@@ -820,11 +963,19 @@ def build_verified_calculation_context(
     pipeline.validate_integrity()
 
     plan = pipeline.capture_plan
+    # What this pipeline *would* stamp and *would* send, recomputed now. The
+    # records carry their own copies from capture time, and verification
+    # compares the two: a capture taken under a different rate, plan or recipe
+    # cannot be presented as this one's.
+    request_spec = pipeline.request_spec()
+    expected_identity = _expected_identity(pipeline, manifest=manifest)
     capture = verify_capture(
         manifest,
         store,
         plan=plan,
         expected_pipeline_fingerprint=pipeline.fingerprint(),
+        expected_identity=expected_identity,
+        expected_request_spec=request_spec,
     )
 
     failures: list[str] = []
@@ -881,6 +1032,27 @@ def build_verified_calculation_context(
         if complaint:
             failures.append(f"{name.upper()}:{complaint}")
 
+    # -- the settlement date, which the OI value cannot establish -------------
+    #
+    # An open-interest response carries a number and no date. Confirming the
+    # number proves the vendor sent it; it proves nothing about which session it
+    # settled in, and v2.1.6 promoted a caller's assumption to OBSERVED on
+    # exactly that confirmation.
+    evidence = open_interest_as_of_evidence
+    if evidence is None and open_interest is not None and open_interest.as_of:
+        from src.adapters.open_interest import EvidenceKind, OpenInterestAsOfEvidence
+
+        # No evidence supplied means nobody stated one, which is a caller
+        # assumption whether or not it was framed as such.
+        evidence = OpenInterestAsOfEvidence(
+            as_of=open_interest.as_of,
+            source=str(getattr(open_interest.source, "value", open_interest.source)),
+            chain_date=open_interest.chain_date,
+            evidence_kind=EvidenceKind.CALLER_ASSUMPTION,
+        )
+    if evidence is not None and not evidence.permits_trusted_calculation:
+        failures.append(f"OPEN_INTEREST_AS_OF:{evidence.blocker}")
+
     context = VerifiedCalculationContext(
         pipeline_fingerprint=pipeline.fingerprint(),
         capture_plan_fingerprint=plan.fingerprint,
@@ -890,6 +1062,7 @@ def build_verified_calculation_context(
         effective_pricing_compatibility=effective,
         spot_provenance=spot,
         open_interest_provenance=open_interest,
+        open_interest_as_of_evidence=evidence,
         raw_store_description=type(store).__name__,
         context_hash="",
         parser_version=PARSER_VERSION,
@@ -931,6 +1104,47 @@ class CertificationState(str, Enum):
     #: load-bearing convention settled by a live comparison rather than by
     #: documentation. Unreachable without a real paid session.
     ADAPTER_CERTIFIED = "ADAPTER_CERTIFIED"
+
+
+class AnalyticalReadiness(str, Enum):
+    """Whether this data may feed anything downstream of a chart.
+
+    A **separate axis** from ``CertificationState``, and the separation is the
+    point. Capture readiness asks "are the bytes worth collecting?"; this asks
+    "is the resulting dataset fit to build on?". Conflating them would either
+    block the first capture on questions only a capture can answer, or let a
+    dataset with an unknown contract universe reach a backtest.
+
+    Nothing in this repository consumes an analytical dataset -- there is no
+    strategy, no feature store and no backtester, by design. The state exists
+    so that when something does, the gate is already written down rather than
+    invented by whoever gets there first.
+    """
+
+    #: Raw capture only. The honest state today.
+    NOT_ANALYTICALLY_READY = "NOT_ANALYTICALLY_READY"
+    #: Trusted normalization, a vendor-established OI settlement date, resolved
+    #: pricing compatibility, verified chain completeness, no material source
+    #: exclusions.
+    READY_FOR_ANALYTICAL_DATASET = "READY_FOR_ANALYTICAL_DATASET"
+
+
+#: What ``READY_FOR_ANALYTICAL_DATASET`` requires beyond a verified capture.
+#: Listed as prose because none of it is implemented as a gate yet: writing the
+#: list down is the deliverable, and pretending to enforce it would be worse
+#: than saying so.
+ANALYTICAL_DATASET_REQUIREMENTS = (
+    "trusted normalization: the chain re-derived from its raw records, and the "
+    "two canonical hashes equal",
+    "a settlement date for open interest established by the vendor rather than "
+    "assumed by this repository (OPEN_DECISIONS OD-26)",
+    "pricing compatibility resolved: no load-bearing dimension UNKNOWN or "
+    "MISMATCHED in the post-capture report",
+    "chain completeness measured against an independent contract universe, or "
+    "the limitation explicitly modelled (OPEN_DECISIONS OD-11)",
+    "no material source exclusions: contracts dropped by validation accounted "
+    "for rather than silently absent",
+)
 
 
 @dataclass(frozen=True, slots=True)

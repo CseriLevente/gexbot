@@ -7,16 +7,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gex-futures-bot"
-version = "2.1.6"
+version = "2.1.7"
 description = "GEX research engine for SPX/SPXW option chains (research only; cannot trade)"
 requires-python = ">=3.12,<3.14"
 
-# The GEX engine core (src/gex, src/domain, src/synthetic) imports nothing from
-# this list -- it is pure stdlib maths and stays that way, so the numerics are
-# verifiable on a bare interpreter. These dependencies belong to the config
-# loader and the ThetaData transport, which are optional at import time.
+# The GEX engine core (src/gex, src/domain, src/synthetic) imports no *code*
+# from this list -- it is pure stdlib maths and stays that way, so the numerics
+# are verifiable on a bare interpreter. PyYAML belongs to the config loader.
+#
+# ``tzdata`` is the exception, and it is a deliberate reversal. Until v2.1.6 US
+# Eastern was implemented by hand precisely to avoid this wheel. That hand-
+# written zone resolves its offset from the wall clock and therefore cannot
+# represent the repeated hour of the autumn transition: 01:30 EST came back as
+# 02:30 EST, an hour wrong on an instant the IANA database has always had right.
+# Carrying a wrong instant to avoid a dependency is the wrong trade, and the
+# dependency is *data*, not code -- it ships no importable logic, so the engine
+# core remains free of third-party behaviour.
 dependencies = [
     "PyYAML>=6.0,<7.0",
+    "tzdata>=2024.1,<2026.0",
 ]
 
 [project.optional-dependencies]

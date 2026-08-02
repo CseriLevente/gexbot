@@ -184,13 +184,23 @@ def test_engine_core_imports_on_a_bare_interpreter() -> None:
     unaffected by anything already resident. ``-S -E`` additionally removes
     site-packages and PYTHON* influence; see tests/unit/test_core_isolation.py
     for the static import-graph counterpart.
+
+    Since v2.1.7 the subprocess is given exactly one third-party directory: the
+    IANA timezone database. That is data, not code -- the assertion below still
+    fails on any real third-party import -- and it is what lets the engine's
+    Eastern clock be ``zoneinfo`` rather than a hand-written rule that could not
+    represent the repeated hour of the autumn DST transition.
     """
     import os
     import subprocess
     import sys
 
+    from tests.unit.test_core_isolation import tzdata_root
+
+    root = tzdata_root()
     script = (
-        f"import sys; sys.path.insert(0, r'{REPO_ROOT}');"
+        (f"import sys; sys.path.insert(0, r'{root}');" if root else "")
+        + f"import sys; sys.path.insert(0, r'{REPO_ROOT}');"
         "before = set(sys.modules);"
         "import src.gex.engine, src.gex.pricing, src.gex.zero_gamma,"
         "src.gex.confidence, src.gex.walls, src.domain.contracts,"

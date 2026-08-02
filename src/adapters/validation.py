@@ -60,11 +60,11 @@ __all__ = [
 ]
 
 #: Bumped when the *meaning* of a validation report changes.
-VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.6"
+VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.7"
 
 #: Bumped when the validator's own logic changes, so two reports that disagree
 #: can be told apart by which code produced them.
-VALIDATOR_VERSION = "adapter-validator/2.1.6"
+VALIDATOR_VERSION = "adapter-validator/2.1.7"
 
 #: Parser versions whose output this validator understands. A payload read by
 #: something else is not evidence this code can interpret.
@@ -86,6 +86,33 @@ def _value_hash(value: object) -> str:
         {"v": value}, sort_keys=True, separators=(",", ":"), default=str
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _observation_payload(observation: Any) -> dict[str, Any]:
+    """One vendor observation, as the part of it that is a finding.
+
+    The observed value *and* its hash: the value so a reader can see what was
+    found, the hash so a type change -- ``4.2`` for ``"4.2"`` -- is a
+    difference rather than a formatting detail. The ``note`` is prose and stays
+    out, like every other explanation in this repository's hashes.
+    """
+    return {
+        "dimension": observation.dimension.value,
+        "observed_value": _normalised_value(observation.observed_value),
+        "observed_value_hash": _value_hash(observation.observed_value),
+        "source": observation.source.value,
+        "reference": observation.reference,
+        "observed_on": observation.observed_on.isoformat(),
+        "manifest_hash": observation.manifest_hash,
+        "record_ids": sorted(observation.record_ids),
+    }
+
+
+def _normalised_value(value: object) -> Any:
+    """JSON-safe rendering of an observed value, without losing its type."""
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    return str(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,12 +208,27 @@ class ChainCoverage:
     @property
     def uniform(self) -> bool:
         """Every readable row agreed, and there was something to read."""
+        return self.settled and self.matching_rows > 0
+
+    @property
+    def settled(self) -> bool:
+        """Every row gave the *same* answer -- agreement or disagreement.
+
+        The distinction ``uniform`` alone could not draw. A chain where every
+        contract priced against something other than the index print is a
+        measured fact about the vendor, as definite as one where every contract
+        agreed, and it has to be able to move a dimension to ``MISMATCHED``.
+        What must not move a dimension is a chain that is *two things*: that is
+        ``mixed``, and it settles nothing.
+
+        Missing and unreadable rows disqualify either answer. A convention read
+        from half a chain is a convention read from half a chain.
+        """
         return (
             self.rows_inspected > 0
-            and self.matching_rows > 0
-            and self.mismatching_rows == 0
             and self.missing_rows == 0
             and self.non_finite_rows == 0
+            and not self.mixed
         )
 
     @property
@@ -203,6 +245,7 @@ class ChainCoverage:
             "missing_rows": self.missing_rows,
             "non_finite_rows": self.non_finite_rows,
             "coverage_ratio": self.coverage_ratio,
+            "settled": self.settled,
             "distinct_observed_values": list(self.distinct_observed_values),
             "maximum_deviation": self.maximum_deviation,
         }
@@ -336,7 +379,25 @@ class AdapterValidationReport:
         return self.manifest_hash == manifest_hash
 
     def semantic_payload(self) -> dict[str, Any]:
-        """The comparable content, so a re-derivation can be checked against it."""
+        """The comparable content, so a re-derivation can be checked against it.
+
+        ``pricing_observations`` belongs here, and until v2.1.7 it did not.
+        The omission mattered because ``assess_readiness`` and the trusted path
+        both accept a supplied report and refuse it unless re-deriving produces
+        the same payload -- so a field outside the payload was a field that
+        could be edited freely. The observations are precisely the values that
+        move a compatibility dimension:
+
+            replace(report, pricing_observations=(
+                replace(observation, observed_value="vendor_index_snapshot"),
+            ))
+
+        turned an observed ``MIXED_ACROSS_CHAIN`` into agreement, and the
+        re-derivation compared equal because it never looked.
+
+        The prose ``note`` is excluded, as it is on every other payload here: a
+        reworded explanation must not read as a different finding.
+        """
         return {
             "manifest_hash": self.manifest_hash,
             "schema_version": self.schema_version,
@@ -350,7 +411,23 @@ class AdapterValidationReport:
                 (check.semantic_payload() for check in self.checks),
                 key=lambda entry: entry["name"],
             ),
+            "pricing_observations": sorted(
+                (_observation_payload(o) for o in self.pricing_observations),
+                key=lambda entry: (entry["dimension"], entry["record_ids"]),
+            ),
         }
+
+    def observation_is_in_the_semantic_payload(self, observation: Any) -> bool:
+        """Whether this exact observation is one the report is committed to.
+
+        Asked by ``derive_post_capture_compatibility`` before an observation may
+        revise a dimension: an observation the equivalence check does not cover
+        is one nobody has re-derived.
+        """
+        return (
+            _observation_payload(observation)
+            in self.semantic_payload()["pricing_observations"]
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -601,11 +678,13 @@ class AdapterValidator:
                 ValidationCheck(
                     name=name,
                     # A chain-level convention that was measured and found to
-                    # vary has not been established, whatever value the
-                    # observation carries. v2.1.5 passed on the mere existence
-                    # of an observation.
+                    # *vary* has not been established, whatever value the
+                    # observation carries -- v2.1.5 passed on the mere existence
+                    # of an observation. A chain that uniformly *disagrees* is a
+                    # different case: the check did its job, and the dimension
+                    # it settles is MISMATCHED.
                     passed=observed is not None
-                    and (coverage is None or coverage.uniform),
+                    and (coverage is None or coverage.settled),
                     detail=detail,
                     coverage=coverage,
                     dimension=dimension,

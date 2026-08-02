@@ -177,15 +177,12 @@ def test_act_360_against_act_365f_stays_mismatched_after_a_capture():
 
 def test_the_trusted_calculation_reads_the_post_capture_report():
     """A disagreement found in the bytes has to reach the gate."""
-    from src.adapters.certification import (
-        AdapterValidator,
-        build_verified_calculation_context,
-    )
+    from src.adapters.certification import AdapterValidator
     from src.config.pipeline import PipelineConsistencyError
     from tests.certification_fixtures import (
         captured_chain,
-        verified_oi,
-        verified_spot,
+        context_for,
+        trusted_evidence,
     )
 
     # One fetch, through a transport whose greeks rows priced against something
@@ -195,19 +192,13 @@ def test_the_trusted_calculation_reads_the_post_capture_report():
     report = AdapterValidator.validate(
         manifest=taken.manifest, store=taken.store, pipeline=pipeline
     )
-    context = build_verified_calculation_context(
-        pipeline=pipeline,
-        manifest=taken.manifest,
-        store=taken.store,
-        validation=report,
-        spot=verified_spot(taken.store, taken.manifest),
-        open_interest=verified_oi(taken.store, taken.manifest),
-    )
-    effective = context.effective_pricing_compatibility
+    effective = context_for(taken, validation=report).effective_pricing_compatibility
     assert PricingDimension.UNDERLYING_SOURCE in effective.load_bearing_mismatches
 
     with pytest.raises(PipelineConsistencyError, match=r"(?i)mismatch|underlying"):
-        pipeline.compute_trusted_gex(taken.chain, context=context)
+        pipeline.compute_trusted_gex(
+            taken.chain, **trusted_evidence(taken, validation_report=report)
+        )
 
 
 # =============================================================================

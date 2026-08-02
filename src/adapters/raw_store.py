@@ -23,7 +23,7 @@ import re
 import tempfile
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -60,13 +60,13 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-PARSER_VERSION = "thetadata-v3-parser/2.1.6"
+PARSER_VERSION = "thetadata-v3-parser/2.1.7"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.6"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.7"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -132,6 +132,61 @@ DEFAULT_MINIMUM_FREE_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
+class CaptureIdentity:
+    """Everything about *this repository* that was true when a response arrived.
+
+    v2.1.6 put the pipeline fingerprint on the manifest and nowhere else. The
+    manifest is a document assembled after the fact, so relabelling a capture as
+    belonging to another pipeline was a one-field edit and the stored records --
+    the actual evidence -- had nothing to say about it.
+
+    These five values are decided when a capture session opens and stamped onto
+    every record it writes. Verification then asks the *records* which pipeline
+    they were captured under, which is a question a manifest cannot answer about
+    itself.
+
+    They travel together rather than as five parameters because they are one
+    claim. A record stamped with four of them and not the fifth would be a
+    record nobody could place.
+    """
+
+    session_id: str
+    pipeline_fingerprint: str = ""
+    capture_plan_fingerprint: str = ""
+    #: Digest of the canonical query parameters this session intends to send,
+    #: per endpoint. Binds a capture to the request that produced it, so a
+    #: capture taken at ``rate_value=4.2`` cannot be relabelled as one taken at
+    #: 3.1.
+    request_spec_fingerprint: str = ""
+    #: Digest of the recipe a normalized chain would be rebuilt under.
+    normalization_recipe_fingerprint: str = ""
+    #: Which transport produced the bytes. Never asserted by a caller.
+    capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+
+    @property
+    def complete(self) -> bool:
+        """Whether every claim was actually made. An empty one is not a claim."""
+        return all(
+            (
+                self.session_id,
+                self.pipeline_fingerprint,
+                self.capture_plan_fingerprint,
+                self.request_spec_fingerprint,
+                self.normalization_recipe_fingerprint,
+            )
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "capture_session_id": self.session_id,
+            "pipeline_fingerprint": self.pipeline_fingerprint,
+            "capture_plan_fingerprint": self.capture_plan_fingerprint,
+            "request_spec_fingerprint": self.request_spec_fingerprint,
+            "normalization_recipe_fingerprint": self.normalization_recipe_fingerprint,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RawResponseRecord:
     """One vendor response, with everything needed to reproduce and audit it."""
 
@@ -152,6 +207,24 @@ class RawResponseRecord:
     capture_complete: bool = True
     #: Which transport produced this. Stamped at capture, never asserted later.
     capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+    #: Which session wrote it, and what the repository looked like at the time.
+    #: Stamped here so a manifest cannot claim a pipeline the bytes never saw.
+    capture_session_id: str = ""
+    pipeline_fingerprint: str = ""
+    capture_plan_fingerprint: str = ""
+    request_spec_fingerprint: str = ""
+    normalization_recipe_fingerprint: str = ""
+
+    @property
+    def capture_identity(self) -> CaptureIdentity:
+        return CaptureIdentity(
+            session_id=self.capture_session_id,
+            pipeline_fingerprint=self.pipeline_fingerprint,
+            capture_plan_fingerprint=self.capture_plan_fingerprint,
+            request_spec_fingerprint=self.request_spec_fingerprint,
+            normalization_recipe_fingerprint=self.normalization_recipe_fingerprint,
+            capture_origin=self.capture_origin,
+        )
 
     @property
     def round_trip_seconds(self) -> float:
@@ -175,6 +248,11 @@ class RawResponseRecord:
             "request_sequence": self.request_sequence,
             "capture_complete": self.capture_complete,
             "capture_origin": self.capture_origin.value,
+            "capture_session_id": self.capture_session_id,
+            "pipeline_fingerprint": self.pipeline_fingerprint,
+            "capture_plan_fingerprint": self.capture_plan_fingerprint,
+            "request_spec_fingerprint": self.request_spec_fingerprint,
+            "normalization_recipe_fingerprint": self.normalization_recipe_fingerprint,
         }
 
 
@@ -183,10 +261,15 @@ def payload_hash(payload: str) -> str:
 
 
 def canonical_parameter_hash(params: Mapping[str, Any]) -> str:
-    """Hash of the request parameters, order-independent.
+    """Full SHA-256 of the request parameters, order-independent.
 
     Sorted keys, so the same effective request always produces the same digest
     however the query happened to be assembled.
+
+    v2.1.6 truncated this to sixteen hex characters. Sixty-four bits is a great
+    deal for an accident and not much for an audit identity, and there was no
+    reason to economise: the value is compared, never read. The short form
+    survives only in filenames, where length is a real constraint.
     """
     payload = json.dumps(
         {str(k): params[k] for k in sorted(params)},
@@ -194,7 +277,17 @@ def canonical_parameter_hash(params: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         default=str,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+#: How much of a digest a filename carries. Enough to keep record ids distinct
+#: on a filesystem; never enough to be an audit identity on its own.
+FILENAME_DIGEST_CHARS = 16
+
+
+def short_digest(digest: str) -> str:
+    """The filename-length prefix of a full digest. Display use only."""
+    return digest[:FILENAME_DIGEST_CHARS]
 
 
 def build_record_id(
@@ -216,7 +309,8 @@ def build_record_id(
     safe_endpoint = _safe_component(endpoint.strip("/").replace("/", "-"))
     return (
         f"{safe_session}-{sequence:04d}-{safe_endpoint}"
-        f"-{canonical_parameter_hash(query_params)}-{payload_hash(payload)[:12]}"
+        f"-{short_digest(canonical_parameter_hash(query_params))}"
+        f"-{payload_hash(payload)[:12]}"
     )
 
 
@@ -528,6 +622,7 @@ class RawResponseStore(Protocol):
         request_id: str = "",
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
+        identity: CaptureIdentity | None = None,
     ) -> RawResponseRecord: ...
 
     def get_payload(self, record_id: str) -> str: ...
@@ -565,6 +660,7 @@ class InMemoryRawStore:
         request_id: str = "",
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
+        identity: CaptureIdentity | None = None,
     ) -> RawResponseRecord:
         if record_id in self._records:
             raise RawStoreError(
@@ -584,7 +680,20 @@ class InMemoryRawStore:
             byte_length=len(payload.encode("utf-8")),
             request_id=request_id,
             request_sequence=request_sequence,
-            capture_origin=capture_origin,
+            capture_origin=(
+                identity.capture_origin if identity is not None else capture_origin
+            ),
+            capture_session_id=identity.session_id if identity else "",
+            pipeline_fingerprint=identity.pipeline_fingerprint if identity else "",
+            capture_plan_fingerprint=(
+                identity.capture_plan_fingerprint if identity else ""
+            ),
+            request_spec_fingerprint=(
+                identity.request_spec_fingerprint if identity else ""
+            ),
+            normalization_recipe_fingerprint=(
+                identity.normalization_recipe_fingerprint if identity else ""
+            ),
         )
         self._records[record_id] = record
         self._payloads[record_id] = payload
@@ -656,6 +765,7 @@ class FileRawStore:
         request_id: str = "",
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
+        identity: CaptureIdentity | None = None,
     ) -> RawResponseRecord:
         path = self._payload_path(record_id)
         if path.exists():
@@ -676,7 +786,20 @@ class FileRawStore:
             byte_length=len(payload.encode("utf-8")),
             request_id=request_id,
             request_sequence=request_sequence,
-            capture_origin=capture_origin,
+            capture_origin=(
+                identity.capture_origin if identity is not None else capture_origin
+            ),
+            capture_session_id=identity.session_id if identity else "",
+            pipeline_fingerprint=identity.pipeline_fingerprint if identity else "",
+            capture_plan_fingerprint=(
+                identity.capture_plan_fingerprint if identity else ""
+            ),
+            request_spec_fingerprint=(
+                identity.request_spec_fingerprint if identity else ""
+            ),
+            normalization_recipe_fingerprint=(
+                identity.normalization_recipe_fingerprint if identity else ""
+            ),
         )
         # Atomic write: temp file -> flush -> fsync -> rename. A crash midway
         # leaves either nothing or a complete file, never a truncated payload
@@ -937,6 +1060,17 @@ class FileRawStore:
                     capture_origin=CaptureOrigin(
                         data.get("capture_origin", CaptureOrigin.UNKNOWN_ORIGIN.value)
                     ),
+                    # The capture-time stamps. Absent from an index written by
+                    # an older release, which reads as "unstamped" -- and
+                    # verification refuses an unstamped record rather than
+                    # inventing a claim for it.
+                    capture_session_id=data.get("capture_session_id", ""),
+                    pipeline_fingerprint=data.get("pipeline_fingerprint", ""),
+                    capture_plan_fingerprint=data.get("capture_plan_fingerprint", ""),
+                    request_spec_fingerprint=data.get("request_spec_fingerprint", ""),
+                    normalization_recipe_fingerprint=data.get(
+                        "normalization_recipe_fingerprint", ""
+                    ),
                 )
             )
         return tuple(out)
@@ -959,6 +1093,7 @@ class NullRawStore:
         request_id: str = "",
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
+        identity: CaptureIdentity | None = None,
     ) -> RawResponseRecord:
         return RawResponseRecord(
             record_id=record_id,
@@ -973,7 +1108,20 @@ class NullRawStore:
             byte_length=len(payload.encode("utf-8")),
             request_id=request_id,
             request_sequence=request_sequence,
-            capture_origin=capture_origin,
+            capture_origin=(
+                identity.capture_origin if identity is not None else capture_origin
+            ),
+            capture_session_id=identity.session_id if identity else "",
+            pipeline_fingerprint=identity.pipeline_fingerprint if identity else "",
+            capture_plan_fingerprint=(
+                identity.capture_plan_fingerprint if identity else ""
+            ),
+            request_spec_fingerprint=(
+                identity.request_spec_fingerprint if identity else ""
+            ),
+            normalization_recipe_fingerprint=(
+                identity.normalization_recipe_fingerprint if identity else ""
+            ),
         )
 
     def get_payload(self, record_id: str) -> str:
@@ -1165,7 +1313,26 @@ class CaptureSession:
     #: Where this session's responses come from. Set by the client from the
     #: transport it is actually using, not by whoever opened the session.
     capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+    #: What the repository looked like when the session opened. Stamped onto
+    #: every record, so verification can ask the evidence which pipeline
+    #: produced it rather than believing a manifest's own summary.
+    pipeline_fingerprint: str = ""
+    capture_plan_fingerprint: str = ""
+    request_spec_fingerprint: str = ""
+    normalization_recipe_fingerprint: str = ""
     _sequence: int = 0
+
+    @property
+    def identity(self) -> CaptureIdentity:
+        """The immutable claim every record of this session carries."""
+        return CaptureIdentity(
+            session_id=self.session_id,
+            pipeline_fingerprint=self.pipeline_fingerprint,
+            capture_plan_fingerprint=self.capture_plan_fingerprint,
+            request_spec_fingerprint=self.request_spec_fingerprint,
+            normalization_recipe_fingerprint=self.normalization_recipe_fingerprint,
+            capture_origin=self.capture_origin,
+        )
 
     def next_sequence(self) -> int:
         self._sequence += 1
@@ -1213,7 +1380,11 @@ class CaptureSession:
             http_status=http_status,
             request_id=request_id,
             request_sequence=sequence,
-            capture_origin=capture_origin or self.capture_origin,
+            identity=(
+                self.identity
+                if capture_origin is None
+                else replace(self.identity, capture_origin=capture_origin)
+            ),
         )
         self.captured.append(record)
         return record
@@ -1252,6 +1423,28 @@ class ManifestRecord:
     parser_version: str = PARSER_VERSION
     vendor_schema_version: str | None = None
     capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+    #: How many bytes the vendor actually sent. In the hash because a payload
+    #: that hashes the same but is a different length is not the same payload.
+    byte_length: int = 0
+    capture_complete: bool = True
+    #: Copied from the record, not from the manifest. These are what let
+    #: verification refuse a capture relabelled as another pipeline's.
+    capture_session_id: str = ""
+    pipeline_fingerprint: str = ""
+    capture_plan_fingerprint: str = ""
+    request_spec_fingerprint: str = ""
+    normalization_recipe_fingerprint: str = ""
+
+    @property
+    def capture_identity(self) -> CaptureIdentity:
+        return CaptureIdentity(
+            session_id=self.capture_session_id,
+            pipeline_fingerprint=self.pipeline_fingerprint,
+            capture_plan_fingerprint=self.capture_plan_fingerprint,
+            request_spec_fingerprint=self.request_spec_fingerprint,
+            normalization_recipe_fingerprint=self.normalization_recipe_fingerprint,
+            capture_origin=self.capture_origin,
+        )
 
     @classmethod
     def of(cls, record: RawResponseRecord) -> ManifestRecord:
@@ -1268,6 +1461,13 @@ class ManifestRecord:
             parser_version=record.parser_version,
             vendor_schema_version=record.vendor_schema_version,
             capture_origin=record.capture_origin,
+            byte_length=record.byte_length,
+            capture_complete=record.capture_complete,
+            capture_session_id=record.capture_session_id,
+            pipeline_fingerprint=record.pipeline_fingerprint,
+            capture_plan_fingerprint=record.capture_plan_fingerprint,
+            request_spec_fingerprint=record.request_spec_fingerprint,
+            normalization_recipe_fingerprint=record.normalization_recipe_fingerprint,
         )
 
     def semantic_payload(self) -> dict[str, Any]:
@@ -1295,6 +1495,9 @@ class ManifestRecord:
             "parser_version": self.parser_version,
             "vendor_schema_version": self.vendor_schema_version,
             "capture_origin": self.capture_origin.value,
+            "byte_length": self.byte_length,
+            "capture_complete": self.capture_complete,
+            **self.capture_identity.as_dict(),
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -1330,8 +1533,43 @@ class RawCaptureManifest:
     #: reinterpreted -- v2.1.5's parallel arrays cannot express the per-record
     #: binding this one verifies.
     schema_version: str = MANIFEST_SCHEMA_VERSION
-    #: Where the responses came from. Derived from the transport, never asserted.
-    capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+    #: What the manifest *says* the origin was. Descriptive only: read
+    #: ``capture_origin``, which is derived from the records.
+    declared_capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN
+
+    @property
+    def capture_origin(self) -> CaptureOrigin:
+        """Where these bytes actually came from, according to the records.
+
+        Derived, because v2.1.6 stored it as a plain field on the manifest and
+        the manifest is a document: relabelling an offline fixture capture as
+        ``LIVE_HTTP_CAPTURE`` was one assignment, and every live-capture check
+        downstream read the relabelled value.
+
+        A mixed capture is ``UNKNOWN_ORIGIN`` rather than a majority vote. Two
+        transports in one session is not one session, and calling it either
+        would be a claim about bytes that came from somewhere else.
+        """
+        origins = {record.capture_origin for record in self.records}
+        if len(origins) == 1:
+            return origins.pop()
+        return CaptureOrigin.UNKNOWN_ORIGIN
+
+    @property
+    def origin_is_uniform(self) -> bool:
+        """False when the records disagree, or when there are none to ask."""
+        return len({record.capture_origin for record in self.records}) == 1
+
+    @property
+    def declared_origin_matches_records(self) -> bool:
+        """Whether the document's claim survives contact with the evidence.
+
+        An unmade claim (``UNKNOWN_ORIGIN``) is not a wrong one; a *different*
+        one is, and verification refuses it.
+        """
+        if self.declared_capture_origin is CaptureOrigin.UNKNOWN_ORIGIN:
+            return True
+        return self.declared_capture_origin is self.capture_origin
 
     @property
     def record_ids(self) -> tuple[str, ...]:
@@ -1384,6 +1622,7 @@ class RawCaptureManifest:
                 "parser_version": self.parser_version,
                 "pipeline_fingerprint": self.pipeline_fingerprint,
                 "capture_origin": self.capture_origin.value,
+                "declared_capture_origin": self.declared_capture_origin.value,
                 "records": sorted(
                     (record.semantic_payload() for record in self.records),
                     key=lambda entry: entry["record_id"],
@@ -1436,9 +1675,10 @@ class RawCaptureManifest:
             ),
             capture_plan_fingerprint=capture_plan_fingerprint,
             pipeline_fingerprint=pipeline_fingerprint,
-            # One origin, or none: a capture assembled from two transports is
-            # not one session, and calling it either would be a claim.
-            capture_origin=(
+            # Declared to match what the records say, so the two agree by
+            # construction here. Verification still checks, because a manifest
+            # can be edited after this function returns.
+            declared_capture_origin=(
                 origins.pop() if len(origins) == 1 else CaptureOrigin.UNKNOWN_ORIGIN
             ),
         )
@@ -1449,6 +1689,8 @@ class RawCaptureManifest:
             "session_id": self.session_id,
             "capture_enabled": self.capture_enabled,
             "capture_origin": self.capture_origin.value,
+            "declared_capture_origin": self.declared_capture_origin.value,
+            "origin_is_uniform": self.origin_is_uniform,
             "record_count": len(self.records),
             "records": [record.as_dict() for record in self.records],
             "record_ids": list(self.record_ids),

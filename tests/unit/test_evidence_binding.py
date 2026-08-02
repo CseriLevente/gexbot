@@ -37,46 +37,62 @@ from tests.certification_fixtures import (
     AS_OF,
     build_capture,
     captured_chain,
+    context_for,
     durable_store,
     plan_for,
     resolved_pipeline,
-    verified_oi,
-    verified_spot,
+    trusted_evidence,
+    unresolved_pipeline,
 )
-
-
-def context_for(taken, **overrides):
-    """The context that authorizes the chain ``taken`` actually produced.
-
-    Built from one fetch, so the chain and the manifest describe the same
-    responses. Deriving them separately would make every test here pass for the
-    uninteresting reason that two captures never share a hash.
-    """
-    payload = {
-        "pipeline": taken.pipeline,
-        "manifest": taken.manifest,
-        "store": taken.store,
-        "spot": verified_spot(taken.store, taken.manifest),
-        "open_interest": verified_oi(taken.store, taken.manifest),
-    }
-    payload.update(overrides)
-    return build_verified_calculation_context(**payload)
-
 
 # =============================================================================
 # §1 -- trusted calculation requires an independently verified context
 # =============================================================================
 
 
-def test_trusted_gex_requires_a_verified_calculation_context():
-    """The signature itself: there is no context-free trusted calculation."""
+def test_the_trusted_api_takes_evidence_rather_than_a_verdict():
+    """The signature itself.
+
+    v2.1.6 accepted a ``VerifiedCalculationContext``. It is a public frozen
+    dataclass whose ``context_hash`` any caller can recompute, so an edited
+    context with a freshly computed hash was internally consistent and said
+    whatever the caller wanted. A hash proves the fields agree with the digest;
+    it says nothing about who computed them.
+    """
     import inspect
 
     from src.config.pipeline import ThetaDataResearchPipeline
 
     signature = inspect.signature(ThetaDataResearchPipeline.compute_trusted_gex)
-    assert "context" in signature.parameters
-    assert signature.parameters["context"].default is inspect.Parameter.empty
+    assert "context" not in signature.parameters
+    for required in ("manifest", "store"):
+        assert signature.parameters[required].default is inspect.Parameter.empty
+
+
+def test_a_caller_edited_context_cannot_authorize_a_calculation():
+    """The regression. This exact sequence worked against v2.1.6."""
+    import dataclasses as dc
+
+    from src.config.compatibility import PricingCompatibilityReport
+
+    taken = captured_chain(unresolved_pipeline())
+    context = context_for(taken)
+
+    forged = dc.replace(
+        context,
+        effective_pricing_compatibility=PricingCompatibilityReport(),
+        context_hash="",
+    )
+    forged = dc.replace(forged, context_hash=forged.recomputed_hash())
+    assert forged.context_hash == forged.recomputed_hash()  # internally consistent
+
+    # And there is nowhere to put it. The trusted path has no parameter that
+    # would accept a verdict, and the unresolved pricing it tried to paper over
+    # still refuses.
+    with pytest.raises(TypeError):
+        taken.pipeline.compute_trusted_gex(taken.chain, context=forged)
+    with pytest.raises(PipelineConsistencyError, match=r"(?i)unknown|unresolved"):
+        taken.pipeline.compute_trusted_gex(taken.chain, **trusted_evidence(taken))
 
 
 def test_a_forged_chain_cannot_authorize_itself():
@@ -110,34 +126,30 @@ def test_a_forged_chain_cannot_authorize_itself():
         },
     )
     with pytest.raises(PipelineConsistencyError):
-        pipeline.compute_trusted_gex(forged, context=context_for(taken))
+        pipeline.compute_trusted_gex(forged, **trusted_evidence(taken))
 
 
-def test_a_context_from_another_pipeline_is_refused():
+def test_evidence_from_another_pipeline_is_refused():
     taken = captured_chain()
     other = captured_chain(resolved_pipeline(rate_value=3.1))
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)pipeline"):
-        taken.pipeline.compute_trusted_gex(taken.chain, context=context_for(other))
+    with pytest.raises(PipelineConsistencyError, match=r"(?i)pipeline|capture"):
+        taken.pipeline.compute_trusted_gex(taken.chain, **trusted_evidence(other))
 
 
-def test_a_context_for_another_capture_is_refused():
+def test_evidence_for_another_capture_is_refused():
     pipeline = resolved_pipeline()
     taken = captured_chain(pipeline)
     other = captured_chain(pipeline)
     with pytest.raises(PipelineConsistencyError, match=r"(?i)manifest"):
-        pipeline.compute_trusted_gex(taken.chain, context=context_for(other))
+        pipeline.compute_trusted_gex(taken.chain, **trusted_evidence(other))
 
 
-def test_the_context_cannot_be_hand_built():
-    """Only the builder produces one, and it recomputes everything."""
+def test_the_context_is_a_report_the_builder_produces():
+    """It still exists, and it is no longer an argument to anything."""
     from src.adapters.certification import VerifiedCalculationContext
 
     taken = captured_chain()
-    real = context_for(taken)
-    forged = dataclasses.replace(real, context_hash="whatever-i-like")
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)context"):
-        taken.pipeline.compute_trusted_gex(taken.chain, context=forged)
-    assert isinstance(real, VerifiedCalculationContext)
+    assert isinstance(context_for(taken), VerifiedCalculationContext)
 
 
 def test_the_builder_refuses_a_precomputed_verification():
@@ -152,10 +164,11 @@ def test_a_resolved_pipeline_with_real_evidence_can_compute():
     """The gate must leave a path through it."""
     taken = captured_chain()
     snapshot = taken.pipeline.compute_trusted_gex(
-        taken.chain, context=context_for(taken)
+        taken.chain, **trusted_evidence(taken)
     )
     assert snapshot.meta["trusted"] is True
     assert snapshot.meta["evidence_context_hash"]
+    assert snapshot.meta["normalized_chain_receipt"]["normalized_chain_hash"]
 
 
 def test_a_diagnostic_still_needs_no_context():
@@ -305,14 +318,14 @@ def test_the_manifest_carries_per_record_descriptors():
 
 def test_the_manifest_states_its_schema_version():
     _, manifest = build_capture()
-    assert manifest.schema_version == "raw-capture-manifest/2.1.6"
+    assert manifest.schema_version == "raw-capture-manifest/2.1.7"
     assert manifest.parser_version == PARSER_VERSION
 
 
 def test_an_old_schema_manifest_is_refused_rather_than_reinterpreted():
     pipeline = resolved_pipeline()
     store, manifest = build_capture(pipeline=pipeline)
-    stale = dataclasses.replace(manifest, schema_version="raw-capture-manifest/2.1.5")
+    stale = dataclasses.replace(manifest, schema_version="raw-capture-manifest/2.1.6")
     result = verified(stale, store, pipeline)
     assert not result.verified
     assert any("schema" in f.lower() for f in result.failures)
@@ -390,14 +403,74 @@ def test_an_offline_fixture_capture_is_labelled_as_one():
     )
 
 
-def test_the_origin_is_in_the_manifest_hash():
+def test_relabelling_the_manifest_does_not_change_what_the_records_say():
+    """v2.1.7: the origin is derived. A declaration is not evidence.
+
+    v2.1.6 stored it as a field on the manifest, so calling an offline fixture
+    a live capture was one assignment -- and every live-capture check
+    downstream read the relabelled value.
+    """
     from src.adapters.raw_store import CaptureOrigin
 
     _, manifest = build_capture()
     relabelled = dataclasses.replace(
-        manifest, capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE
+        manifest, declared_capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE
     )
+    assert relabelled.capture_origin is CaptureOrigin.OFFLINE_FIXTURE
+    assert not relabelled.declared_origin_matches_records
     assert relabelled.manifest_hash != manifest.manifest_hash
+
+
+def test_a_manifest_whose_declaration_contradicts_its_records_does_not_verify():
+    from src.adapters.raw_store import CaptureOrigin
+
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    relabelled = dataclasses.replace(
+        manifest, declared_capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE
+    )
+    result = verified(relabelled, store, pipeline)
+    assert not result.verified
+    assert any("origin" in f.lower() for f in result.failures)
+
+
+def test_relabelling_every_record_still_cannot_make_a_fixture_live():
+    """Even editing the records does not survive verification.
+
+    The descriptors would then agree with each other and with the declaration,
+    so the derived origin *does* read live -- and the store still holds the
+    original bytes, whose own ``capture_origin`` is what the record-level
+    comparison checks against.
+    """
+    from src.adapters.raw_store import CaptureOrigin
+
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    forged = dataclasses.replace(
+        manifest,
+        records=tuple(
+            dataclasses.replace(r, capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE)
+            for r in manifest.records
+        ),
+        declared_capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE,
+    )
+    assert forged.capture_origin is CaptureOrigin.LIVE_HTTP_CAPTURE
+    result = verified(forged, store, pipeline)
+    assert not result.verified
+    assert any("CAPTURE_ORIGIN_MISMATCH" in f for f in result.failures)
+
+
+def test_a_mixed_origin_capture_is_not_any_origin():
+    from src.adapters.raw_store import CaptureOrigin
+
+    _, manifest = build_capture()
+    records = list(manifest.records)
+    records[0] = dataclasses.replace(
+        records[0], capture_origin=CaptureOrigin.LIVE_HTTP_CAPTURE
+    )
+    mixed = dataclasses.replace(manifest, records=tuple(records))
+    assert mixed.capture_origin is CaptureOrigin.UNKNOWN_ORIGIN
+    assert not mixed.origin_is_uniform
 
 
 def test_an_offline_fixture_never_reads_as_a_live_capture():

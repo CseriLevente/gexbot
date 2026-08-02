@@ -69,14 +69,24 @@ def bare_interpreter(program: str) -> subprocess.CompletedProcess[str]:
     architecture test. Under ``-S`` the third-party packages are not merely
     unimported, they are *unimportable*, so an accidental ``import yaml`` inside
     the engine fails here even if it would succeed in the dev environment.
+
+    One exception since v2.1.7, and only one: a scratch directory holding the
+    IANA timezone database and nothing else -- see
+    ``tests.unit.test_core_isolation.tzdata_root``. ``import yaml`` still fails
+    here, which ``test_third_party_packages_really_are_unreachable_under_dash_s``
+    keeps honest.
     """
+    from tests.unit.test_core_isolation import tzdata_root
+
     environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith(("PYTHON", "VIRTUAL_ENV"))
     }
+    root = tzdata_root()
+    prelude = f"import sys; sys.path.insert(0, r'{root}');" if root else ""
     return subprocess.run(  # noqa: S603
-        [sys.executable, "-S", "-E", "-c", program],
+        [sys.executable, "-S", "-E", "-c", prelude + program],
         cwd=REPO,
         capture_output=True,
         text=True,
@@ -356,7 +366,7 @@ def test_the_release_procedure_is_documented():
     assert "git status --porcelain" in text
     # An archive nobody has extracted is an archive nobody knows works.
     assert "smoke test" in text.lower()
-    assert "git archive --format=zip --output=gex-bot-v2.1.6.zip HEAD" in text
+    assert "git archive --format=zip --output=gex-bot-v2.1.7.zip HEAD" in text
 
 
 def test_ci_runs_the_release_integrity_checks():

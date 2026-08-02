@@ -305,6 +305,94 @@ class FakeTransport:
         return [call.timeout_seconds for call in self.calls]
 
 
+class StoredPayloadTransport:
+    """Answers from a verified capture instead of from the vendor.
+
+    This is what makes a normalized chain *re-derivable*. Verification proves
+    things about raw records; the chain a caller hands to a trusted calculation
+    is the result of parsing and joining them, and until v2.1.7 nothing
+    connected the two. Rebuilding the chain by replaying the stored bytes
+    through the ordinary fetch path is the connection.
+
+    Replaying through the *same* code matters more than it looks. A second
+    implementation of normalization -- a "rebuilder" that re-read the CSVs
+    independently -- would be a second source of truth, and the two would drift.
+    Here the client, the parser, the join and the model are the production ones;
+    only the bytes come from a different place.
+
+    Records for one endpoint are replayed in capture order, so a session that
+    pulled an endpoint twice replays both, in the order it received them.
+    """
+
+    #: Not a live capture, and cannot be mistaken for one. Rebuilding never
+    #: writes to a store, but if a caller wires this to one, its records will
+    #: say what they are.
+    capture_origin = "OFFLINE_FIXTURE"
+
+    def __init__(self, responses: Mapping[str, list[str]]) -> None:
+        self._queues = {
+            endpoint: list(bodies) for endpoint, bodies in responses.items()
+        }
+        self._served: dict[str, int] = {}
+        self.calls: list[RecordedCall] = []
+
+    @classmethod
+    def from_capture(cls, *, manifest: Any, store: Any) -> StoredPayloadTransport:
+        """Every payload the manifest names, keyed by the endpoint that served it.
+
+        Ordered by the capture sequence rather than by record id, because the
+        order responses arrived in is part of what the session did.
+        """
+        records = {record.record_id: record for record in store.records()}
+        by_endpoint: dict[str, list[tuple[int, str]]] = {}
+        for entry in manifest.records:
+            record = records.get(entry.record_id)
+            if record is None:
+                continue
+            by_endpoint.setdefault(record.endpoint, []).append(
+                (record.request_sequence, store.get_payload(entry.record_id))
+            )
+        return cls(
+            {
+                endpoint: [payload for _, payload in sorted(items)]
+                for endpoint, items in by_endpoint.items()
+            }
+        )
+
+    def get(
+        self, url: str, params: Mapping[str, Any], timeout_seconds: float
+    ) -> HttpResponse:
+        self.calls.append(
+            RecordedCall(url=url, params=dict(params), timeout_seconds=timeout_seconds)
+        )
+        for endpoint, bodies in self._queues.items():
+            if endpoint not in url:
+                continue
+            index = self._served.get(endpoint, 0)
+            if index >= len(bodies):
+                # The capture holds fewer responses for this endpoint than the
+                # rebuild is asking for. Reusing the last one would silently
+                # fabricate a response the session never received.
+                raise TransportError(
+                    f"the capture holds {len(bodies)} response(s) for {endpoint} "
+                    f"and the rebuild asked for {index + 1}. A chain rebuilt "
+                    "from responses that were not captured is not the chain the "
+                    "capture produced."
+                )
+            self._served[endpoint] = index + 1
+            return HttpResponse(
+                status_code=200, text=bodies[index], url=url, request_id="replay"
+            )
+        raise TransportError(
+            f"the capture holds no response for {url!r}. Rebuilding a chain "
+            "requires every endpoint the session used."
+        )
+
+    @property
+    def endpoints(self) -> tuple[str, ...]:
+        return tuple(sorted(self._queues))
+
+
 def _unwrap(item: HttpResponse | Exception, url: str) -> HttpResponse:
     if isinstance(item, Exception):
         raise item
@@ -341,6 +429,24 @@ class RetryingTransport:
         self._random_unit = random_unit
         self._max_response_bytes = max_response_bytes
         self.sleeps: list[float] = []
+
+    @property
+    def inner(self) -> HttpTransport:
+        """The transport that actually fetches. Retrying is not an origin.
+
+        ``build_thetadata_client`` always wraps, so every production capture
+        looks at *this* object when it asks where its bytes came from. Without
+        this, ``capture_origin_of`` found no ``capture_origin`` on the wrapper
+        and stamped ``UNKNOWN_ORIGIN`` on every record of every real session --
+        which reads as "not live" and is not the same statement as "offline
+        fixture".
+        """
+        return self._inner
+
+    @property
+    def capture_origin(self) -> Any:
+        """Whatever the wrapped transport says. A wrapper adds no provenance."""
+        return getattr(self._inner, "capture_origin", None)
 
     def get(
         self, url: str, params: Mapping[str, Any], timeout_seconds: float

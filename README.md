@@ -20,11 +20,16 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 1685 tests, 94% coverage
+.venv/Scripts/python.exe -m pytest         # 2033 tests, 92% coverage
 ```
 
-The engine core (`src/gex`, `src/domain`, `src/synthetic`) imports **nothing**
-outside the standard library, so the maths is verifiable on a bare interpreter.
+The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no
+third-party code**, so the maths is verifiable on a bare interpreter. Its one
+runtime dependency is `tzdata` — the IANA timezone database, which ships data
+and no importable logic. Before v2.1.7 US Eastern was hand-written to avoid even
+that, and the hand-written zone could not represent the repeated hour of the
+autumn DST transition: it returned an instant an hour wrong. A wrong instant is
+worse than a data dependency.
 
 ---
 
@@ -104,6 +109,13 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Post-capture pricing compatibility | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; validated observations reach the gate, and a live mismatch blocks |
 | Chain-level convention coverage (every row, every record) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; one matching contract cannot characterise a chain |
 | One vendor timestamp interpretation (`src/domain/vendor_time.py`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; adapter and validator read the same string identically |
+| Trusted calculation bound to the re-derived chain | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; the stored payloads are normalized again and the two canonical hashes must agree |
+| Trusted API derives its own authority | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; it takes evidence, not a verdict |
+| Records stamped with pipeline, plan, request spec and recipe | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture cannot be relabelled as another pipeline's |
+| Canonical expected request per endpoint | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture taken at `rate_value=4.2` does not verify against a pipeline configured with 3.1 |
+| OI value evidence separated from OI settlement-date evidence | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a caller-assumed date blocks a trusted GEX and permits capture and diagnostics |
+| US Eastern via `zoneinfo` with pinned `tzdata` | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the repeated autumn hour is two instants |
+| `READY_FOR_ANALYTICAL_DATASET` as a separate axis | `PLANNED` — the requirements are written down; nothing consumes an analytical dataset yet, by design |
 | Graded provenance (PLANNED / OBSERVED / VALIDATED) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; derived from a named raw record, never asserted |
 | Typed pricing dimensions and attestations | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; no comparison has been run, so nothing carries `LIVE_COMPARISON` evidence |
 | Canonical pipeline API (`fetch_chain` / `compute_gex` / `capture_and_compute`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |

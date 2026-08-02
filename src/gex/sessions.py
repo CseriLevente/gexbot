@@ -1,38 +1,69 @@
 """US Eastern time and expiration-settlement clocks.
 
-Why this file exists instead of ``zoneinfo.ZoneInfo("America/New_York")``:
+US Eastern is ``zoneinfo.ZoneInfo("America/New_York")``, and ``tzdata`` is a
+pinned dependency so that Windows and minimal containers do not fall back on
+whatever the host happens to have.
 
-* Time-to-expiry drives gamma, and on 0DTE it dominates it. Being one hour out
-  on an SPXW expiration afternoon does not produce a slightly wrong number, it
-  produces a completely wrong one.
-* ``zoneinfo`` needs the ``tzdata`` package on Windows, and it raises
-  ``ZoneInfoNotFoundError`` when it is absent. A trading engine must not depend
-  on whether an optional data wheel happened to get installed.
+**This reverses a decision, and the reason is worth stating.** Until v2.1.6 the
+zone was implemented here by hand, to keep the engine core free of any wheel:
+the DST rule has been stable since 2007 and re-implementing it is twenty lines.
+The flaw is not the rule, it is the representation. A hand-written ``tzinfo``
+resolves its offset from the *wall clock*, and on the first Sunday in November
+the wall clock 01:30 happens twice -- once at ``-04:00`` and again an hour later
+at ``-05:00``. A wall-clock rule cannot tell them apart, so converting the
+second instant back into Eastern returned ``02:30-05:00``: the right offset on
+the wrong hour, an hour of error on an instant the IANA database has always had
+correct. ``fold`` is precisely the mechanism for this, and only a real zone
+implements it.
 
-So US Eastern is implemented here directly. The rule has been stable since the
-Energy Policy Act of 2005 took effect in 2007: DST runs from the second Sunday
-in March at 02:00 local standard time to the first Sunday in November at 02:00
-local daylight time. ``tests/unit/test_sessions.py`` cross-checks this against
-``ZoneInfo`` whenever ``tzdata`` *is* present, so the two can never silently
-diverge in production.
+Carrying a wrong instant to avoid a data dependency is the wrong trade. ``tzdata``
+ships no importable logic -- it is the IANA database and nothing else -- so the
+engine core still executes no third-party code, which is what the bare-interpreter
+check in CI actually protects.
 
-Pre-2007 dates use the same rule and are therefore wrong; the engine rejects
-them rather than pretending otherwise, since no research window for this system
-reaches back that far.
+Everything internal stays in UTC. Eastern is for display, for calendar rules and
+for settlement clocks, which is where a wall clock is the thing being described.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, tzinfo
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from src.domain.contracts import OptionRoot
 from src.domain.model_spec import ExpirationTimestampRule
 
-_EST = timedelta(hours=-5)
-_EDT = timedelta(hours=-4)
-_ZERO = timedelta(0)
+#: The venue's zone. SPX and SPXW trade on Cboe, whose clock follows the
+#: exchange rather than the reader's machine.
+EASTERN_ZONE_NAME = "America/New_York"
 
+#: Below this year the US DST rule differs from the current one. ``ZoneInfo``
+#: handles the historical rules correctly, so this is no longer a correctness
+#: boundary -- but no research window for this system reaches back that far, and
+#: a date that old is far more likely to be a mistake than a request.
 DST_RULE_VALID_FROM_YEAR = 2007
+
+
+def eastern_zone() -> ZoneInfo:
+    """The Eastern zone, or a message that says what to install.
+
+    ``ZoneInfoNotFoundError`` on its own says "No time zone found with key
+    America/New_York", which is true and unhelpful: the reader has to know that
+    ``tzdata`` is a separate wheel on Windows before that sentence means
+    anything.
+    """
+    try:
+        return ZoneInfo(EASTERN_ZONE_NAME)
+    except Exception as error:  # pragma: no cover - only without tzdata
+        raise RuntimeError(
+            f"the {EASTERN_ZONE_NAME} timezone database is unavailable: {error}. "
+            "It is a pinned dependency of this package (`tzdata`); install the "
+            "project rather than running from a bare interpreter. Every "
+            "time-to-expiry in this engine is measured against this zone."
+        ) from error
+
+
+EASTERN = eastern_zone()
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
@@ -43,7 +74,13 @@ def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
 
 
 def dst_start(year: int) -> datetime:
-    """Second Sunday in March, 02:00 local standard time (naive local)."""
+    """Second Sunday in March, 02:00 local standard time (naive local).
+
+    Kept because the *transition dates* are still worth naming -- the calendar
+    and the timestamp tests assert against them. The offset itself now comes
+    from ``ZoneInfo``; this is a statement about which Sunday, not about which
+    offset.
+    """
     day = _nth_weekday(year, 3, 6, 2)
     return datetime(day.year, day.month, day.day, 2, 0)
 
@@ -53,43 +90,6 @@ def dst_end(year: int) -> datetime:
     day = _nth_weekday(year, 11, 6, 1)
     return datetime(day.year, day.month, day.day, 2, 0)
 
-
-class USEastern(tzinfo):
-    """America/New_York, post-2007 rule, no external data required."""
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "USEastern()"
-
-    def _is_dst(self, dt: datetime) -> bool:
-        if dt.year < DST_RULE_VALID_FROM_YEAR:
-            raise ValueError(
-                f"US Eastern DST rule in this module is only valid from "
-                f"{DST_RULE_VALID_FROM_YEAR}; got {dt.year}"
-            )
-        naive = dt.replace(tzinfo=None)
-        # The gap hour (02:00-03:00 in March) and the repeated hour (01:00-02:00
-        # in November) are handled by treating the wall clock as monotonic. Both
-        # windows sit outside any US equity or index-option session, so the
-        # ambiguity never touches a real expiration or bar timestamp.
-        return dst_start(dt.year) <= naive < dst_end(dt.year)
-
-    def utcoffset(self, dt: datetime | None) -> timedelta:
-        if dt is None:
-            return _EST
-        return _EDT if self._is_dst(dt) else _EST
-
-    def dst(self, dt: datetime | None) -> timedelta:
-        if dt is None:
-            return _ZERO
-        return timedelta(hours=1) if self._is_dst(dt) else _ZERO
-
-    def tzname(self, dt: datetime | None) -> str:
-        if dt is None:
-            return "EST"
-        return "EDT" if self._is_dst(dt) else "EST"
-
-
-EASTERN = USEastern()
 
 # --- Session and settlement clocks -----------------------------------------
 
@@ -107,10 +107,23 @@ SETTLEMENT_TIME_ET: dict[OptionRoot, tuple[int, int]] = {
 
 
 def eastern(
-    year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 0,
+    minute: int = 0,
+    second: int = 0,
+    *,
+    fold: int = 0,
 ) -> datetime:
-    """Build a timezone-aware US Eastern datetime."""
-    return datetime(year, month, day, hour, minute, second, tzinfo=EASTERN)
+    """Build a timezone-aware US Eastern datetime.
+
+    ``fold`` selects between the two occurrences of a repeated wall clock on the
+    autumn transition Sunday: 0 is the first (daylight time), 1 the second
+    (standard time). It is meaningless on every other instant of the year, and
+    the default is the earlier reading.
+    """
+    return datetime(year, month, day, hour, minute, second, tzinfo=EASTERN, fold=fold)
 
 
 class NaiveTimestampError(ValueError):

@@ -255,8 +255,26 @@ EXPECTED_COMPONENT_SCORES = {
 #      void, root and confidence component is asserted individually below,
 #      and across the whole of v2.1.6 exactly two assertions in this file
 #      changed -- this digest and the model fingerprint.
+#   9. bd668a62 -> 3af3ef9c, from v2.1.7. Classification:
+#      VERSION_METADATA_ONLY, measured the same way: pinning ``model_version``
+#      back to ``gex-engine/2.1.6`` and reverting nothing else reproduces
+#      bd668a62... and faf0a9f5... exactly.
+#
+#      That measurement matters more here than in (8), because v2.1.7 changed
+#      the *clock*: US Eastern moved from a hand-written rule to
+#      ``zoneinfo.ZoneInfo("America/New_York")``. Time-to-expiry is measured
+#      in that zone and drives gamma, so a change there is exactly the kind
+#      that could move a number without anyone intending it.
+#
+#      It did not, and the reason is structural rather than lucky. The two
+#      implementations agree on every instant outside the two DST transition
+#      windows; they disagree only inside the repeated autumn hour, which the
+#      old zone rendered an hour late. This reference case is an ordinary
+#      March session. Every total, bucket, per-strike value, wall, void, root
+#      and confidence component below is a hand-typed literal and all of them
+#      held.
 EXPECTED_OUTPUT_HASH = (
-    "bd668a626632abadd4aa0dec4ee9b19689ed3b16ebb43db6ea7862de2de58586"
+    "3af3ef9c77944577211e28d68b634e19690b8dae4ea51541d9269f13fa879293"
 )
 # v2.1.3: 8b5b7454ba7c5500 -> ded3172bfee2682f. Classification: BEHAVIORAL.
 #
@@ -270,6 +288,15 @@ EXPECTED_OUTPUT_HASH = (
 # The fingerprint is *supposed* to move when the configuration does; a
 # config change that left it fixed would be the defect.
 EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
+# v2.1.7: faf0a9f595f2a93a -> 1b353ba18cefb0a2.
+# Classification: VERSION_METADATA_ONLY.
+#
+# The only input that changed is ``model_version``, gex-engine/2.1.6 ->
+# 2.1.7. Measured: pinning it back reproduces faf0a9f595f2a93a. Rate,
+# dividend, IV source, expiration rule, time floor, day count, underlying
+# price source and pricing model are all untouched -- v2.1.7 changed what
+# a trusted calculation must prove, not what one computes.
+#
 # v2.1.6: d3d458592b6f87e0 -> faf0a9f595f2a93a.
 # Classification: VERSION_METADATA_ONLY.
 #
@@ -309,7 +336,7 @@ EXPECTED_CONFIG_FINGERPRINT = "ded3172bfee2682f"
 # floor, day count or pricing model changed. The fingerprint is *supposed* to
 # move when the engine version does -- an engine change that left it fixed would
 # be undetectable in replay, which is the whole point of including it.
-EXPECTED_MODEL_FINGERPRINT = "faf0a9f595f2a93a"
+EXPECTED_MODEL_FINGERPRINT = "1b353ba18cefb0a2"
 
 # Tight but not exact: the last bit or two of a float sum can differ between
 # platforms without anything being wrong. A relative tolerance of 1e-12 still

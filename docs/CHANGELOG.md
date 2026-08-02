@@ -1,5 +1,76 @@
 # Changelog
 
+## 2.1.7 - normalized-evidence binding
+
+v2.1.6 bound a trusted calculation to *verified raw records*. v2.1.7 binds it to
+the **chain those records normalize to**.
+
+Those are different objects, and nothing connected them. The chain is the result
+of parsing and joining the records; verification proved a great deal about the
+bytes and asked nothing about the `ChainSnapshot` a caller then handed in. So:
+
+```python
+chain = pipeline.fetch_chain(...)          # honest
+tampered = dataclasses.replace(chain, quotes=(edited, *chain.quotes[1:]))
+pipeline.compute_trusted_gex(tampered, context=real_context)   # trusted=True
+```
+
+Adding 999,999 to one strike's open interest moved the unsigned total by about
+two orders of magnitude. Open interest is the linear weight on every GEX term.
+The result carried a verified manifest and `trusted=True`.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.6 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | The normalized chain was never checked against its records | Any calculation-relevant field could be edited after an honest fetch and the result stayed `trusted=True` | `NormalizationRecipe`, `canonical_chain_hash` over every calculation-relevant field, and `rebuild_chain_from_capture` replaying the stored bytes through the ordinary fetch path |
+| 2 | `compute_trusted_gex` accepted a derived verdict | `VerifiedCalculationContext` is public and its `context_hash` recomputable, so an edited context with a fresh hash was internally consistent and said whatever the caller wanted | The trusted API takes manifest, store and provenance, and derives verification, validation, compatibility and re-derivation itself. The context is what it *returns* |
+| 3 | `pricing_observations` was outside validator equivalence | Relabelling an observed `MIXED_ACROSS_CHAIN` as agreement survived re-derivation, because re-derivation never compared it | Observations are in `semantic_payload`, sorted, prose excluded |
+| 4 | A *failed* check could still revise a dimension | The loop never read `check.passed` | An observation is admitted only behind a passing, dimension-matching, manifest-matching, record-verified, settled check that is in the semantic payload |
+| 5 | An OI *value* observation graded an OI *date* as OBSERVED | An OI response carries a number and no settlement date; confirming the number said nothing about the session, and open interest is the weight on every term | `OpenInterestValueObservation` and `OpenInterestAsOfEvidence` with an `EvidenceKind`. `CALLER_ASSUMPTION` permits raw capture and diagnostics, never a trusted calculation |
+| 6 | Only the manifest carried the pipeline fingerprint | Relabelling a capture as another pipeline's was one field on a document the evidence could not contradict | `CaptureIdentity` stamped on every record at capture time: pipeline, plan, request specification, normalization recipe, session |
+| 7 | The request that produced a capture was never checked | `rate_value` reaches the vendor and changes the greeks it returns | A canonical `RequestSpec` per endpoint, recomputed at verification and compared against each record's stored parameters |
+| 8 | `capture_origin` was a mutable field on the manifest | Relabelling an offline fixture as `LIVE_HTTP_CAPTURE` was one assignment | Derived from the records; a contradicting declaration or a mixed capture fails verification |
+| 9 | `capture_origin_of` read the outermost transport | `build_thetadata_client` always wraps in `RetryingTransport`, so **every real capture** would have been stamped `UNKNOWN_ORIGIN` | The wrapper delegates |
+| 10 | The hand-written US Eastern zone ignored `fold` | 01:30 on the fall-back Sunday came back as `02:30-05:00`: an hour wrong on an instant IANA has always had right | `zoneinfo.ZoneInfo("America/New_York")` with `tzdata` pinned |
+| 11 | Parameter hashes were truncated to 16 hex characters | Sixty-four bits is a lot for an accident and little for an audit identity | Full SHA-256 for every audit identity; short forms only in filenames |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | -- |
+| `EXPECTED_MODEL_FINGERPRINT` | `faf0a9f595f2a93a` | `1b353ba18cefb0a2` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `bd668a62...` | `3af3ef9c...` | `VERSION_METADATA_ONLY` |
+
+Measured, and it mattered more here than usual: v2.1.7 changed the *clock*, and
+time-to-expiry drives gamma. Pinning `model_version` back to `gex-engine/2.1.6`
+and reverting nothing else reproduces both v2.1.6 digests exactly. The two zone
+implementations agree on every instant outside the DST transition windows, and
+the reference case is an ordinary March session.
+
+### Behavioural changes worth knowing
+
+* `compute_trusted_gex(chain, context=...)` is gone. It is
+  `compute_trusted_gex(chain, manifest=..., store=..., ...)`.
+* A **caller-assumed open-interest settlement date now blocks a trusted GEX.**
+  This is the honest state of the repository: ThetaData does not publish the
+  date (OD-26). Raw capture and diagnostics are unaffected.
+* `tzdata` is a runtime dependency. It is data, not code; the bare-interpreter
+  guarantee is narrowed from "no third-party packages" to "no third-party code"
+  and the CI job checks exactly that.
+* Captures written by v2.1.6 have unstamped records and will not verify. They
+  are refused rather than reinterpreted, as v2.1.6 manifests were before them.
+* `AnalyticalReadiness` is a new, separate axis from `CertificationState`.
+  Nothing consumes it yet; the requirements are written down so the gate exists
+  before something needs it.
+
 ## 2.1.6 - evidence binding and capture readiness
 
 v2.1.5 made the evidence derived. v2.1.6 makes the *authorization* independent

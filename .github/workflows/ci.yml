@@ -76,12 +76,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Compute a snapshot with nothing installed
-        # Deliberately NO `pip install`. If the engine core has acquired a
+      - name: Compute a snapshot with no third-party code installed
+        # Deliberately no `pip install -e .`. If the engine core has acquired a
         # third-party import, this job fails with ModuleNotFoundError -- a
         # stronger statement than the in-suite test, because here the packages
         # are absent from the machine rather than merely off sys.path.
+        #
+        # `tzdata` is installed and is the single exception: it is the IANA
+        # timezone database, it ships no importable logic, and since v2.1.7 the
+        # engine's Eastern clock is `zoneinfo` rather than a hand-written rule
+        # that could not represent the repeated autumn DST hour. The assertion
+        # below still fails on any package that is actually code.
+        #
+        # ubuntu-latest carries a system tz database, so this also proves the
+        # engine works when tzdata resolves either way.
         run: |
+          pip install "tzdata>=2024.1,<2026.0"
           python -c "
           import sys
           from src.gex.engine import compute_gex_snapshot
@@ -91,7 +101,7 @@ jobs:
               'yaml', 'httpx', 'numpy', 'scipy', 'pandas'
           }
           assert not third_party, third_party
-          print('engine core is dependency-free:', snapshot.total_unsigned_gex)
+          print('engine core runs no third-party code:', snapshot.total_unsigned_gex)
           "
 
   reproducible-build:
@@ -202,6 +212,12 @@ jobs:
 
       - name: One vendor timestamp interpretation
         run: python -m pytest tests/unit/test_vendor_timestamps.py -v
+
+      - name: Normalized-evidence binding -- the chain is re-derived
+        run: python -m pytest tests/unit/test_normalized_evidence_binding.py -v
+
+      - name: US Eastern comes from the IANA database
+        run: python -m pytest tests/unit/test_sessions.py tests/unit/test_timestamp_boundary.py -v
 
       - name: Current-GEX eligibility
         run: python -m pytest tests/unit/test_gex_eligibility.py -v

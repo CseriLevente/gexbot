@@ -40,9 +40,30 @@ NOW = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
 PIPELINE = "test-pipeline-fingerprint"
 
 
+#: The stamp this fixture's records carry. It builds a store by hand rather
+#: than through a pipeline, so these are stand-in values -- but they have to be
+#: *present*, because since v2.1.7 verification refuses an unstamped record
+#: rather than inventing a claim for it.
+TEST_REQUEST_SPEC = "test-request-spec"
+TEST_RECIPE = "test-normalization-recipe"
+
+
+def stamped_identity():
+    from src.adapters.raw_store import CaptureIdentity
+
+    return CaptureIdentity(
+        session_id="s",
+        pipeline_fingerprint=PIPELINE,
+        capture_plan_fingerprint=plan_for().fingerprint,
+        request_spec_fingerprint=TEST_REQUEST_SPEC,
+        normalization_recipe_fingerprint=TEST_RECIPE,
+    )
+
+
 def store_with(*endpoints: Endpoint) -> tuple[InMemoryRawStore, RawCaptureManifest]:
     from src.adapters.raw_store import ManifestRecord, build_record_id
 
+    identity = stamped_identity()
     store = InMemoryRawStore()
     records = []
     for sequence, endpoint in enumerate(endpoints, start=1):
@@ -63,6 +84,7 @@ def store_with(*endpoints: Endpoint) -> tuple[InMemoryRawStore, RawCaptureManife
                 response_received_at=NOW,
                 http_status=200,
                 request_sequence=sequence,
+                identity=identity,
             )
         )
     manifest = RawCaptureManifest(
@@ -83,6 +105,7 @@ def verified(manifest, store, **overrides):
     payload = {
         "plan": plan_for(),
         "expected_pipeline_fingerprint": PIPELINE,
+        "expected_identity": stamped_identity(),
     }
     payload.update(overrides)
     return verify_capture(manifest, store, **payload)

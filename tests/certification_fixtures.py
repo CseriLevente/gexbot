@@ -25,7 +25,6 @@ from typing import Any
 
 from src.adapters.raw_store import (
     CaptureOrigin,
-    CaptureSession,
     FileRawStore,
     RawCaptureManifest,
 )
@@ -238,9 +237,13 @@ def build_capture(
     # and a fixture that certifies against a volatile store is testing a
     # configuration the release refuses.
     raw_store = store if store is not None else durable_store()
-    session = CaptureSession(
+    # Opened through the pipeline, so the records carry the same capture-time
+    # stamps a real session would write. A fixture that skipped them would be
+    # testing a capture the production path cannot produce.
+    session = built.capture_session(
         store=raw_store,
         session_id=session_id,
+        as_of=AS_OF,
         # Fixture bytes, labelled as fixture bytes. Nothing here is evidence
         # about the vendor, and the manifest hash says so.
         capture_origin=CaptureOrigin.OFFLINE_FIXTURE,
@@ -296,12 +299,8 @@ def captured_chain(
     """
     built = pipeline if pipeline is not None else resolved_pipeline()
     raw_store = store if store is not None else durable_store()
-    from src.adapters.thetadata.client import capture_origin_of
-
-    session = CaptureSession(
-        store=raw_store,
-        session_id=f"fetch-{id(raw_store):x}",
-        capture_origin=capture_origin_of(built.runtime.client.transport),
+    session = built.capture_session(
+        store=raw_store, session_id=f"fetch-{id(raw_store):x}", as_of=AS_OF
     )
     mark = session.mark()
     chain = built.fetch_chain(as_of=AS_OF, capture=session)
@@ -316,12 +315,53 @@ def captured_chain(
     )
 
 
+def documented_oi_date(chain_date: date | None = None):
+    """Settlement-date evidence strong enough for a trusted calculation.
+
+    ``CALLER_ASSUMPTION`` -- the honest state of this repository today -- blocks
+    a trusted GEX by design, so a fixture that wants to exercise the *rest* of
+    the trusted path has to state a stronger kind explicitly. Doing so here, in
+    one named function, keeps the concession visible: nothing in the production
+    configuration produces this, and OD-26 is still open.
+    """
+    from src.adapters.open_interest import EvidenceKind, OpenInterestAsOfEvidence
+
+    return OpenInterestAsOfEvidence(
+        as_of=date(2026, 3, 16),
+        source="vendor_field",
+        evidence_kind=EvidenceKind.AUTHORITATIVE_VENDOR_DOCUMENTATION,
+        reference="tests/fixtures/vendor_conventions.md",
+        chain_date=chain_date or AS_OF.date(),
+    )
+
+
+def trusted_evidence(taken: CapturedChain, **overrides: Any) -> dict[str, Any]:
+    """The primitive evidence ``compute_trusted_gex`` derives its authority from.
+
+    Deliberately a mapping of raw inputs rather than a context object: since
+    v2.1.7 the trusted API takes evidence and does the deriving itself, because
+    a derived verdict is one a caller can construct.
+    """
+    payload: dict[str, Any] = {
+        "manifest": taken.manifest,
+        "store": taken.store,
+        "spot_provenance": verified_spot(taken.store, taken.manifest),
+        "open_interest_provenance": verified_oi(taken.store, taken.manifest),
+        "open_interest_as_of_evidence": documented_oi_date(),
+    }
+    payload.update(overrides)
+    return payload
+
+
 def context_for(taken: CapturedChain, **overrides: Any):
-    """The verified evidence that authorizes the chain ``taken`` produced.
+    """The verified evidence report for the chain ``taken`` produced.
 
     Built from one fetch, so the chain and the manifest describe the same
     responses. Deriving them from separate captures would make every gate test
     pass for the uninteresting reason that two captures never share a hash.
+
+    Since v2.1.7 this is a *report*: it is what the trusted path produces, not
+    what it accepts.
     """
     from src.adapters.certification import build_verified_calculation_context
 
@@ -331,6 +371,7 @@ def context_for(taken: CapturedChain, **overrides: Any):
         "store": taken.store,
         "spot": verified_spot(taken.store, taken.manifest),
         "open_interest": verified_oi(taken.store, taken.manifest),
+        "open_interest_as_of_evidence": documented_oi_date(),
     }
     payload.update(overrides)
     return build_verified_calculation_context(**payload)

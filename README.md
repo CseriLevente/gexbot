@@ -118,6 +118,16 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Chain completeness as a typed field | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; an architecture test fails the build when GEX code reads calculation-affecting data from `meta` |
 | Capture-bound expected contract universe | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; declared on the session, checked at replay, never adopted from the caller |
 | Exact record consumption on replay | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a second response per endpoint needs a plan that declares why |
+| Settlement rule chosen before the capture | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture that established none can never become trusted, because no later call accepts one |
+| Settlement dates derived from typed rule semantics | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; applied through the real trading calendar, weekends, holidays and Good Friday included |
+| Documentation bytes read and hashed at registration | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; a missing file or a mismatched hash is refused |
+| Resolved OI date through normalization, chain and replay | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; the trusted path refuses a chain carrying a different date, or none |
+| One authoritative `ExpectedContractUniverse` | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; an architecture test fails the build if a second definition appears |
+| Expected-universe evidence re-derived from its records | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; identities parsed out of the named bytes and compared |
+| Partial universes cannot claim full completeness | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; two distinct partial statuses, neither implying complete |
+| Operation digests recomputed from their own fields | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `OPERATION_FINGERPRINT_MISMATCH` on any edited field |
+| Field evidence rereads the exact named record | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; required before pagination or partitions can be certified |
+| Content-addressed artifact store | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the stamped digest is the lookup key, so replay recovers the object rather than only its name |
 | Trusted API derives its own authority | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; it takes evidence, not a verdict |
 | Records stamped with pipeline, plan, request spec and recipe | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture cannot be relabelled as another pipeline's |
 | Canonical expected request per endpoint | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture taken at `rate_value=4.2` does not verify against a pipeline configured with 3.1 |

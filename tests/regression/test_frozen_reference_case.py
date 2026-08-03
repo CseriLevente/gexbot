@@ -295,8 +295,26 @@ EXPECTED_COMPONENT_SCORES = {
 #      Neither is an input to any calculation. Every total, bucket,
 #      per-strike value, wall, void, root and confidence component below is
 #      a hand-typed literal, and all of them held.
+# v2.1.9: 128acd06... -> d0be7199.... Classification: REPRESENTATIONAL.
+#
+#      Measured, in the narrowest way available. The hash covers the serialised
+#      snapshot, which includes the chain-completeness *report*, and v2.1.9 adds
+#      one key to that report: ``expected_complete_for_request``. Removing that
+#      single key from the payload and re-hashing reproduces
+#      ``128acd06a9a00e12d7e19ff60eef55c3635bd7a9920b6a18ac8aa1db3dcb1e04``
+#      exactly, so nothing else in the snapshot moved.
+#
+#      Every numeric literal below is unchanged and all of them still hold:
+#      59,228,408,806.90227 unsigned, -24,836,100,698.992706 signed, 93.857
+#      confidence, 250 contracts, 1,263,165 open interest, 5039.1337825
+#      primary zero-gamma root.
+#
+#      The new key exists because a partial expected universe -- one page of a
+#      paginated listing -- must not report the whole chain complete, and a
+#      report that could not say which kind of expectation it measured against
+#      could not distinguish the two.
 EXPECTED_OUTPUT_HASH = (
-    "128acd06a9a00e12d7e19ff60eef55c3635bd7a9920b6a18ac8aa1db3dcb1e04"
+    "d0be719931de451dd8ef88a178ec8287bec899b93ed605e8f5be4275eedb1961"
 )
 # v2.1.3: 8b5b7454ba7c5500 -> ded3172bfee2682f. Classification: BEHAVIORAL.
 #
@@ -321,6 +339,16 @@ EXPECTED_OUTPUT_HASH = (
 EXPECTED_CONFIG_FINGERPRINT = (
     "ded3172bfee2682f7986dd9b7b65f2b582d216736da7c795c030554ac6b763b9"
 )
+# v2.1.9: 79f3abe506978342 -> 6accfab618292203c9af97789874a238786c8884446fe589
+# 8a1d845f59a5cc16. Classification: VERSION_METADATA_ONLY.
+#
+# The only input that changed is ``model_version``, gex-engine/2.1.8 -> 2.1.9.
+# Measured: pinning it back reproduces
+# ``79f3abe506978342c52b31481f16f7ff61ac6f4824b586d4d7020a37a4e73d83`` exactly.
+# Rate, dividend, IV source, expiration rule, time floor, day count, underlying
+# price source and pricing model are all untouched -- v2.1.9 changed where a
+# settlement date and an expected universe come from, not what a gamma is.
+#
 # v2.1.8: 1b353ba18cefb0a2 -> 79f3abe506978342c52b31481f16f7ff61ac6f4824b5
 # 86d4d7020a37a4e73d83. Classification: VERSION_METADATA_ONLY and
 # REPRESENTATIONAL, measured apart.
@@ -381,7 +409,7 @@ EXPECTED_CONFIG_FINGERPRINT = (
 # move when the engine version does -- an engine change that left it fixed would
 # be undetectable in replay, which is the whole point of including it.
 EXPECTED_MODEL_FINGERPRINT = (
-    "79f3abe506978342c52b31481f16f7ff61ac6f4824b586d4d7020a37a4e73d83"
+    "6accfab618292203c9af97789874a238786c8884446fe5898a1d845f59a5cc16"
 )
 
 # Tight but not exact: the last bit or two of a float sum can differ between

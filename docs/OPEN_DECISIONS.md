@@ -241,7 +241,26 @@ status is reported as `PARTIALLY_OBSERVED` — never `COMPLETE`.
 repository has verified. Inventing a URL and shipping it as though it were
 confirmed would be worse than reporting the limitation.
 
-**What v2.1.8 changed.** The universe is now a typed `ExpectedContractUniverse`
+**What v2.1.9 changed.** There is now exactly **one**
+`ExpectedContractUniverse` — there were two, and the one the engine read carried
+no provenance — and a universe is *resolved* before it can measure anything:
+`src/adapters/universe_resolvers.py` reopens the records it names, re-derives the
+contract identities from those bytes and compares. `source` was a string a caller
+typed and `source_record_ids` was read as a boolean, so a hand-written list
+labelled `vendor_contract_list` established `MEASURED_COMPLETE` exactly as a real
+listing would.
+
+`complete_for_request` is also read now. It existed on the type and nothing
+consulted it, so page one of a paginated listing whose members all arrived
+reported the entire chain complete. Two statuses distinguish the cases:
+`PARTIAL_UNIVERSE_ALL_LISTED_PRESENT` and
+`PARTIAL_UNIVERSE_MISSING_IDENTITIES`, neither of which implies completeness.
+
+A `CALLER_DECLARED` universe resolves — somebody really did state a list — and
+establishes nothing. It permits raw capture and diagnostics and cannot support
+measured completeness or analytical readiness.
+
+**What v2.1.8 changed.** The universe is a typed `ExpectedContractUniverse`
 declared on the *capture session*, and its hash is stamped on every record. A
 universe supplied only at calculation time is refused, and so is dropping one
 the capture declared.
@@ -815,6 +834,42 @@ OpenInterestAsOfEvidence(..., evidence_kind=AUTHORITATIVE_VENDOR_DOCUMENTATION,
 `VENDOR_FIELD` permits a trusted calculation, so that object did; the record was
 never opened. Documentation needed a non-empty `reference`, and `"lol"` is
 non-empty. Naming the kind of evidence you have is not the same as having it.
+
+**What v2.1.8 still got wrong, and v2.1.9 fixes.** The documentation resolver
+looked the rule up, confirmed it was *in force* on the caller's date, and
+returned **the caller's date**:
+
+```python
+if not rule.covers(evidence.as_of):
+    return failure
+return ResolvedSettlementDate(as_of=evidence.as_of, ...)
+```
+
+So one registered rule saying "prior trading session" authorized 2026-03-16,
+2026-03-15 and 2026-03-01 alike for a 2026-03-17 chain. `normalized_value: str`
+is why: free text cannot be applied to a session date, so the answer had to come
+from somewhere, and the only somewhere was the argument list.
+
+A rule now carries a typed `SettlementRule` — a kind, a session offset and a
+calendar id — and the resolver *applies* it:
+
+```python
+resolved = rule.resolve(chain_session_date)   # through the trading calendar
+```
+
+There is no `as_of` parameter anywhere in `resolve_settlement_date`. For a
+2026-03-17 chain the prior-session rule produces 2026-03-16 and nothing else;
+2026-04-06 produces 2026-04-02, over Good Friday and the weekend.
+
+The rule is also chosen **before the capture**, on `capture_session`, and a
+capture that established none can never become trusted — `compute_trusted_gex`
+accepts no settlement evidence at all. In v2.1.8 a capture stamped
+`open_interest_date_rule_fingerprint=""` still returned a trusted result if the
+*call* supplied documentation evidence.
+
+And registration now opens the document: `document_reference="/definitely/missing"`
+with `document_content_hash="0" * 64` registered cleanly in v2.1.8, because
+nothing read the file.
 
 **Current behaviour (v2.1.8).** Each kind has a *resolver*, in
 `src/adapters/evidence_resolvers.py`. The kind selects which check runs;

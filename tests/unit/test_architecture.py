@@ -315,6 +315,120 @@ def test_the_typed_completeness_field_is_in_the_canonical_chain_hash() -> None:
     )
 
 
+# =============================================================================
+# One type per concept, and no retroactive authority (v2.1.9)
+# =============================================================================
+
+
+def _class_definitions(name: str) -> list[str]:
+    """Every place ``src/`` defines a class of that name."""
+    found = []
+    for path in _python_files(SRC):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        found.extend(
+            f"{path.relative_to(SRC).as_posix()}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == name
+        )
+    return sorted(found)
+
+
+def test_exactly_one_expected_contract_universe_type_exists() -> None:
+    """The v2.1.8 defect: two classes of one name, and only one had evidence.
+
+    ``src.domain.completeness`` defined an ``ExpectedContractUniverse`` with a
+    free-text ``source``; ``src.domain.expected_universe`` defined another with
+    provenance and a hash. The engine read the first. So the object that decided
+    whether a chain was complete was the object nobody had verified.
+    """
+    definitions = _class_definitions("ExpectedContractUniverse")
+    assert len(definitions) == 1, (
+        f"ExpectedContractUniverse is defined in {definitions}. One concept, "
+        "one type: a second definition is how the engine and the capture path "
+        "ended up disagreeing about what a universe is."
+    )
+    assert definitions[0].startswith("domain/expected_universe.py")
+
+
+def test_the_gex_engine_takes_a_typed_expected_universe() -> None:
+    """``Any`` is what let two universe types coexist."""
+    import inspect
+
+    from src.gex.engine import compute_gex_snapshot, resolve_chain_completeness
+
+    for function in (compute_gex_snapshot, resolve_chain_completeness):
+        annotation = str(
+            inspect.signature(function).parameters["expected_universe"].annotation
+        )
+        assert "ExpectedContractUniverse" in annotation, (
+            f"{function.__name__} annotates expected_universe as {annotation!r}; "
+            "an untyped universe is one nothing can check"
+        )
+
+
+#: Arguments through which a caller could hand a trusted calculation the
+#: authority it is supposed to recover from the capture. Every one of these was
+#: a real parameter in some earlier release, and each was the whole of a defect.
+RETROACTIVE_AUTHORITY_ARGUMENTS = frozenset(
+    {
+        "context",  # v2.1.6: a derived verdict
+        "spot_provenance",  # v2.1.7: a claimed timestamp and tolerance
+        "open_interest_as_of_evidence",  # v2.1.8: a settlement date after the fact
+        "expected_universe",  # v2.1.8: what completeness is measured against
+        "settlement_rule",
+        "open_interest_as_of",
+        "expected_contract_ids",
+        "expected_source",
+        "capture_verification",
+        "validation",
+    }
+)
+
+
+def test_the_trusted_api_accepts_no_retroactive_authority() -> None:
+    """A capture decides what it established. A later call may not revise it.
+
+    The rule this expresses: **no public API accepts a derived verdict where it
+    could derive one.** Each name below was once a parameter here, and each time
+    the calculation could assert something the capture did not.
+    """
+    import inspect
+
+    from src.config.pipeline import ThetaDataResearchPipeline
+
+    parameters = set(
+        inspect.signature(ThetaDataResearchPipeline.compute_trusted_gex).parameters
+    )
+    offenders = sorted(parameters & RETROACTIVE_AUTHORITY_ARGUMENTS)
+    assert not offenders, (
+        f"compute_trusted_gex accepts {offenders}. Settlement authority and the "
+        "expected universe are recovered from the capture operation and "
+        "re-verified; an argument would let the calculation outvote the capture."
+    )
+
+
+def test_completeness_cannot_be_measured_from_a_caller_declared_universe() -> None:
+    """A list somebody typed is a legitimate thing to hold, and not evidence."""
+    from src.domain.completeness import ChainCompleteness
+    from src.domain.expected_universe import ExpectedUniverseSourceKind
+
+    assert (
+        ExpectedUniverseSourceKind.CALLER_DECLARED.value
+        in ChainCompleteness.NON_INDEPENDENT_SOURCES
+    )
+    assert not ExpectedUniverseSourceKind.CALLER_DECLARED.is_independent_evidence
+
+
+def test_the_settlement_date_is_a_typed_field_not_a_metadata_key() -> None:
+    """It weights every GEX term, so it may not live where anyone can write it."""
+    from src.domain.contracts import ContractTimestamps
+
+    assert "open_interest_as_of" in ContractTimestamps.__dataclass_fields__
+    # And it is in the canonical chain payload, so a rebuild has to agree on it.
+    source = (SRC / "domain" / "normalization.py").read_text(encoding="utf-8")
+    assert "open_interest_as_of" in source
+
+
 BANNED_EXECUTION_NAMES = frozenset(
     {
         "placeOrder",

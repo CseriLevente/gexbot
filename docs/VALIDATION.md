@@ -228,16 +228,18 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.8` | `pyproject.toml` | anything ships |
-| Parser version | `thetadata-v3-parser/2.1.8` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
-| Engine version | `gex-engine/2.1.8` | `src/domain/model_spec.py` | the numerics change |
-| Manifest schema | `raw-capture-manifest/2.1.8` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
-| Certification schema | `adapter-certification/2.1.8` | `src/adapters/certification.py` | what a readiness verdict means changes |
-| Validation schema | `adapter-validation/2.1.8` | `src/adapters/validation.py` | what a validation report means changes |
-| Normalization schema | `normalized-chain/2.1.8` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
-| Request-spec schema | `thetadata-request-spec/2.1.8` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
-| Capture-operation schema | `capture-operation/2.1.8` | `src/adapters/capture_operation.py` | what one capture operation fixes changes |
-| Expected-universe schema | `expected-universe/2.1.8` | `src/domain/expected_universe.py` | what a universe hash covers changes |
+| Package version | `2.1.9` | `pyproject.toml` | anything ships |
+| Parser version | `thetadata-v3-parser/2.1.9` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
+| Engine version | `gex-engine/2.1.9` | `src/domain/model_spec.py` | the numerics change |
+| Manifest schema | `raw-capture-manifest/2.1.9` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
+| Certification schema | `adapter-certification/2.1.9` | `src/adapters/certification.py` | what a readiness verdict means changes |
+| Validation schema | `adapter-validation/2.1.9` | `src/adapters/validation.py` | what a validation report means changes |
+| Normalization schema | `normalized-chain/2.1.9` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
+| Request-spec schema | `thetadata-request-spec/2.1.9` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
+| Capture-operation schema | `capture-operation/2.1.9` | `src/adapters/capture_operation.py` | what one capture operation fixes changes |
+| Expected-universe schema | `expected-universe/2.1.9` | `src/domain/expected_universe.py` | what a universe hash covers changes |
+| Settlement-evidence schema | `settlement-evidence/2.1.9` | `src/domain/settlement.py` | what a settlement rule *means* changes |
+| Capture-artifact envelope | `capture-artifact/2.1.9` | `src/adapters/artifact_store.py` | how a stored artifact is wrapped changes |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

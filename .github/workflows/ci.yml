@@ -219,8 +219,17 @@ jobs:
       - name: Capture-operation binding -- the chain does not choose its own inputs
         run: python -m pytest tests/unit/test_capture_operation_binding.py -v
 
-      - name: Settlement evidence is resolved, not declared
+      - name: Settlement evidence is derived, not declared
         run: python -m pytest tests/unit/test_settlement_evidence_resolution.py -v
+
+      - name: Expected universes are re-derived from their source records
+        run: python -m pytest tests/unit/test_expected_universe_evidence.py -v
+
+      - name: Operation digests are recomputed; field evidence names its record
+        run: python -m pytest tests/unit/test_operation_digest_and_records.py -v
+
+      - name: Capture artifacts survive the process that wrote them
+        run: python -m pytest tests/unit/test_artifact_store.py -v
 
       - name: US Eastern comes from the IANA database
         run: python -m pytest tests/unit/test_sessions.py tests/unit/test_timestamp_boundary.py -v

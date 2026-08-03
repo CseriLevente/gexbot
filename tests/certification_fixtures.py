@@ -138,6 +138,11 @@ def payloads(
 #: The agreeing set, for call sites that do not care about the variants.
 PAYLOADS = payloads()
 
+#: Distinguishes "no settlement rule, deliberately" from "did not say". The
+#: first is the honest production state and a thing tests must be able to ask
+#: for; the second should get the fixture's registered rule.
+_UNSET = object()
+
 
 def vendor_transport(**variants: bool) -> FakeTransport:
     """A transport that answers every endpoint the plan requires."""
@@ -286,6 +291,14 @@ class CapturedChain:
     store: Any
     manifest: RawCaptureManifest
     pipeline: ThetaDataResearchPipeline
+    #: Where the settlement rule and expected universe this capture was opened
+    #: under were written. Since v2.1.9 replay recovers the objects from here
+    #: rather than being handed them.
+    artifacts: Any = None
+    #: The artifact itself, so a test can assert on what the capture derived
+    #: without reaching back into the store.
+    settlement_artifact: Any = None
+    expected_universe: Any = None
 
 
 def captured_chain(
@@ -293,6 +306,8 @@ def captured_chain(
     *,
     store: Any = None,
     expected_universe: Any = None,
+    settlement_rule: Any = _UNSET,
+    as_of: Any = None,
 ) -> CapturedChain:
     """Fetch a chain and keep the manifest of the responses that built it.
 
@@ -300,20 +315,35 @@ def captured_chain(
     in ``chain.meta``, so the two agree by construction rather than by a fixture
     saying they do.
 
-    ``expected_universe`` is declared on the *session*, not on the calculation:
-    since v2.1.8 the universe a replay is measured against is the one the
-    capture operation was opened with.
+    ``expected_universe`` and ``settlement_rule`` are declared on the *session*,
+    not on the calculation: since v2.1.9 both are fixed before any response
+    arrives and neither can be supplied afterwards. The default settlement rule
+    is the registered fixture documentation rule, because most tests here are
+    about something else and would otherwise be blocked by OD-26. Passing
+    ``settlement_rule=None`` is how a test asks for the honest production state:
+    a capture that established no rule.
     """
+    from src.adapters.artifact_store import InMemoryArtifactStore
+
     built = pipeline if pipeline is not None else resolved_pipeline()
     raw_store = store if store is not None else durable_store()
+    moment = as_of if as_of is not None else AS_OF
+    artifacts = InMemoryArtifactStore()
+    rule = (
+        documented_settlement_rule(moment.date())
+        if settlement_rule is _UNSET
+        else settlement_rule
+    )
     session = built.capture_session(
         store=raw_store,
         session_id=f"fetch-{id(raw_store):x}",
-        as_of=AS_OF,
+        as_of=moment,
         expected_universe=expected_universe,
+        settlement_rule=rule,
+        artifact_store=artifacts,
     )
     mark = session.mark()
-    chain = built.fetch_chain(as_of=AS_OF, capture=session)
+    chain = built.fetch_chain(as_of=moment, capture=session)
     manifest = RawCaptureManifest.from_session(
         session,
         since=mark,
@@ -321,7 +351,13 @@ def captured_chain(
         pipeline_fingerprint=built.fingerprint(),
     )
     return CapturedChain(
-        chain=chain, store=raw_store, manifest=manifest, pipeline=built
+        chain=chain,
+        store=raw_store,
+        manifest=manifest,
+        pipeline=built,
+        artifacts=artifacts,
+        settlement_artifact=rule,
+        expected_universe=expected_universe,
     )
 
 
@@ -330,6 +366,24 @@ def captured_chain(
 #: than a plausible-looking constant.
 FIXTURE_OI_EVIDENCE_ID = "fixture-oi-settlement-convention"
 
+#: The document behind it. Read and hashed at registration since v2.1.9: a
+#: 64-character string in a dataclass field is a claim that somebody hashed
+#: something, and reading the bytes is the hashing.
+FIXTURE_DOCUMENT = "tests/fixtures/vendor_conventions.md"
+
+
+def fixture_settlement_rule():
+    """The typed convention the fixture document states.
+
+    Typed semantics, not free text. Until v2.1.9 a documentation rule carried
+    ``normalized_value: str``, which nothing could apply -- so the resolver
+    confirmed the rule was in force and then returned *the caller's* date, and
+    one rule would authorize 2026-03-16, 2026-03-15 and 2026-03-01 alike.
+    """
+    from src.domain.settlement import SettlementRule, SettlementRuleKind
+
+    return SettlementRule(kind=SettlementRuleKind.PRIOR_TRADING_SESSION)
+
 
 def register_fixture_documentation_rule():
     """Put one registered rule in the registry, bound to a real document.
@@ -337,8 +391,8 @@ def register_fixture_documentation_rule():
     Since v2.1.8 a documentation *reference* authorizes nothing: the resolver
     looks the id up in a registry and uses the rule it finds, so
     ``reference="lol"`` -- which satisfied v2.1.7 -- resolves to nothing at all.
-    Registering is a deliberate act, and this is the one place a test performs
-    it.
+    Since v2.1.9 registering also *opens the document*. Both are deliberate
+    acts, and this is the one place a test performs them.
     """
     import pathlib
 
@@ -352,40 +406,44 @@ def register_fixture_documentation_rule():
         DOCUMENTATION_RULES.register(
             DocumentationRule(
                 evidence_id=FIXTURE_OI_EVIDENCE_ID,
-                document_reference="tests/fixtures/vendor_conventions.md",
-                document_content_hash=content_hash_of(
-                    pathlib.Path("tests/fixtures/vendor_conventions.md")
-                ),
+                document_reference=FIXTURE_DOCUMENT,
+                document_content_hash=content_hash_of(pathlib.Path(FIXTURE_DOCUMENT)),
                 rule_identifier="open_interest_settles_on_the_prior_session",
                 effective_from=date(2020, 1, 1),
                 derivation_version="fixture/1",
-                normalized_value="prior_session",
+                rule=fixture_settlement_rule(),
                 observed_on=date(2026, 8, 1),
             )
         )
     return DOCUMENTATION_RULES.get(FIXTURE_OI_EVIDENCE_ID)
 
 
-def documented_oi_date(chain_date: date | None = None):
-    """Settlement-date evidence strong enough for a trusted calculation.
+def documented_settlement_rule(chain_date: date | None = None):
+    """A settlement artifact strong enough to open a trusted-capable capture.
 
-    ``CALLER_ASSUMPTION`` -- the honest state of this repository today -- blocks
-    a trusted GEX by design, so a fixture that wants to exercise the *rest* of
-    the trusted path has to state a stronger kind explicitly, and since v2.1.8
-    has to register the document behind it. Doing both here, in one named
-    function, keeps the concession visible: nothing in the production
-    configuration registers a ThetaData settlement rule, and OD-26 is open.
+    ``CALLER_ASSUMPTION`` -- the honest state of this repository today --
+    establishes no date at all, so a fixture that wants to exercise the *rest*
+    of the trusted path has to register a real documentation rule and let it
+    derive one. Keeping the concession in one named function keeps it visible:
+    nothing in the production configuration registers a ThetaData settlement
+    rule, and OD-26 is open.
+
+    The date is **derived**, never passed. That is the whole of §2.
     """
-    from src.adapters.open_interest import EvidenceKind, OpenInterestAsOfEvidence
+    from src.adapters.evidence_resolvers import (
+        resolve_settlement_date,
+        settlement_artifact_from,
+    )
+    from src.adapters.open_interest import EvidenceKind
 
     register_fixture_documentation_rule()
-    return OpenInterestAsOfEvidence(
-        as_of=date(2026, 3, 16),
-        source="vendor_field",
+    session = chain_date or AS_OF.date()
+    resolved = resolve_settlement_date(
+        chain_session_date=session,
         evidence_kind=EvidenceKind.AUTHORITATIVE_VENDOR_DOCUMENTATION,
-        reference=FIXTURE_OI_EVIDENCE_ID,
-        chain_date=chain_date or AS_OF.date(),
+        evidence_id=FIXTURE_OI_EVIDENCE_ID,
     )
+    return settlement_artifact_from(resolved, chain_session_date=session)
 
 
 def trusted_evidence(taken: CapturedChain, **overrides: Any) -> dict[str, Any]:
@@ -394,12 +452,16 @@ def trusted_evidence(taken: CapturedChain, **overrides: Any) -> dict[str, Any]:
     Deliberately a mapping of raw inputs rather than a context object: since
     v2.1.7 the trusted API takes evidence and does the deriving itself, because
     a derived verdict is one a caller can construct.
+
+    Since v2.1.9 it carries no settlement evidence and no expected universe.
+    Both are recovered from the capture operation; ``artifact_store`` is where
+    the objects the stamped digests name were written.
     """
     payload: dict[str, Any] = {
         "manifest": taken.manifest,
         "store": taken.store,
+        "artifact_store": taken.artifacts,
         "open_interest_provenance": verified_oi(taken.store, taken.manifest),
-        "open_interest_as_of_evidence": documented_oi_date(),
     }
     payload.update(overrides)
     return payload
@@ -429,7 +491,9 @@ def context_for(taken: CapturedChain, **overrides: Any):
             manifest=taken.manifest, store=taken.store
         ),
         "open_interest": verified_oi(taken.store, taken.manifest),
-        "open_interest_as_of_evidence": documented_oi_date(),
+        # Recovered from the capture, not chosen here. Since v2.1.9 the context
+        # takes the artifact the operation was opened under.
+        "settlement_artifact": taken.settlement_artifact,
     }
     payload.update(overrides)
     return build_verified_calculation_context(**payload)

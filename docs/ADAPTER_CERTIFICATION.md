@@ -608,3 +608,89 @@ A reference says where somebody looked. `DocumentationRule.document_content_hash
 says what was there. A vendor rewriting a page without renaming it changes the
 evidence fingerprint and therefore the pipeline fingerprint, which is the only
 way a claim about vendor behaviour can go stale visibly rather than quietly.
+
+---
+
+## v2.1.9: the two remaining inputs, derived rather than declared
+
+v2.1.8 bound every non-payload input to the capture operation. Two of them were
+bound to something nobody had checked.
+
+### A settlement rule is chosen before the capture, and applied
+
+Three changes, and the order matters because each closes what the previous one
+left:
+
+1. **Selected on `capture_session`.** A `SettlementDateRuleArtifact` is fixed
+   before any response arrives. A session opened without one produces a capture
+   that is fully usable for raw storage, diagnostic calculation and vendor-schema
+   research, and that can never become eligible for a trusted GEX — because
+   `compute_trusted_gex` accepts no settlement evidence at all. v2.1.8 stamped
+   `open_interest_date_rule_fingerprint=""` and then let the *call* supply the
+   evidence: the capture said no rule had been established, the calculation said
+   one had, and the calculation won because it held the argument.
+
+2. **Typed, so it computes.** `SettlementRule(kind, trading_session_offset,
+   calendar_id)` is applied through the real trading calendar:
+
+   | Chain session | Prior-session rule produces | Over |
+   |---|---|---|
+   | 2026-03-17 (Tue) | 2026-03-16 | — |
+   | 2026-03-16 (Mon) | 2026-03-13 | the weekend |
+   | 2026-04-06 (Mon) | 2026-04-02 | Good Friday, 2026-04-03 |
+   | 2026-01-02 | 2025-12-31 | New Year's Day |
+   | 2026-11-27 | 2026-11-25 | Thanksgiving |
+
+   `resolve_settlement_date` has no `as_of` parameter. The v2.1.8 signature took
+   one and returned it, so a single rule authorized every date.
+
+3. **Content-verified.** Registration reads the referenced file and compares its
+   SHA-256. A missing file, a mismatched hash, an absolute path or a URL is
+   refused. v2.1.8 accepted `"0" * 64` for `/definitely/missing`.
+
+The resolved date then travels: into `NormalizationRecipe.open_interest_as_of`,
+onto every contract's `timestamps.open_interest_as_of`, into the canonical chain
+hash, the receipt and the replay. The trusted path refuses a chain whose
+contracts carry a different date, carry none, or disagree among themselves.
+
+### An expected universe is re-derived from its source
+
+`source="vendor_contract_list"` was a string. `source_record_ids` was read as a
+boolean. There were also two `ExpectedContractUniverse` classes, and the engine
+read the one with no provenance.
+
+There is now one type and a resolver:
+
+| Source kind | What must actually happen |
+|---|---|
+| `VENDOR_CONTRACT_LIST` | Every named record is reopened, its payload hash re-checked and its contract identities parsed out again; the derived set must equal the claimed set exactly |
+| `CAPTURED_PAGINATION_METADATA` | The same, from the records that carried the metadata |
+| `AUTHORITATIVE_DOCUMENTATION` | A registered, content-verified documentation rule |
+| `CALLER_DECLARED` | Resolves, and establishes nothing — permits raw capture and diagnostics, never measured completeness |
+
+`complete_for_request` is read now. A partial listing gets
+`PARTIAL_UNIVERSE_ALL_LISTED_PRESENT` or
+`PARTIAL_UNIVERSE_MISSING_IDENTITIES`, and neither implies completeness: a page
+can prove a contract is *missing* and cannot prove none is.
+
+### Digests are recomputed, and the objects they name are stored
+
+`verify_capture` rebuilds `CaptureOperationIdentity` from the fields each record
+stores and recomputes the fingerprint —
+`OPERATION_FINGERPRINT_MISMATCH`. v2.1.8 compared the stored digests to each
+other, so editing `requested_as_of` on every record while leaving the digest
+alone verified cleanly. Every field the digest covers is stored explicitly,
+including the spot synchronization policy fingerprint.
+
+A digest also has to name something recoverable. The `ArtifactStore` is
+content-addressed by the artifact's own hash, so the digest stamped on a record
+*is* the lookup key — and a replay that cannot produce the artifact refuses
+rather than falling through to "no rule".
+
+### Field evidence names its record
+
+`observe_field` and `confirm_field` take a `record_id` and assert on it. Until
+v2.1.9 the first record for the endpoint was always opened, so a claim about
+page two was confirmed against page one's bytes. With one record per endpoint the
+two agree by accident; pagination, partitions and retained retries are exactly
+the cases this repository intends to certify.

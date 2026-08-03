@@ -367,14 +367,25 @@ def test_an_extra_unused_record_invalidates_replay():
     retry, a paginated sweep or a partitioned request all produce one. The
     capture plan has to *declare* why, and this one does not.
     """
+    from src.adapters.artifact_store import InMemoryArtifactStore
     from src.adapters.raw_store import RawCaptureManifest
     from src.adapters.thetadata.endpoints import Endpoint
-    from tests.certification_fixtures import CAPTURED_AT, PAYLOADS, durable_store
+    from tests.certification_fixtures import (
+        CAPTURED_AT,
+        PAYLOADS,
+        documented_settlement_rule,
+        durable_store,
+    )
 
     pipeline = resolved_pipeline()
     store = durable_store()
+    artifacts = InMemoryArtifactStore()
     session = pipeline.capture_session(
-        store=store, session_id="two-quote-responses", as_of=AS_OF
+        store=store,
+        session_id="two-quote-responses",
+        as_of=AS_OF,
+        settlement_rule=documented_settlement_rule(),
+        artifact_store=artifacts,
     )
     mark = session.mark()
     chain = pipeline.fetch_chain(as_of=AS_OF, capture=session)
@@ -400,12 +411,7 @@ def test_an_extra_unused_record_invalidates_replay():
 
     with pytest.raises(PipelineConsistencyError, match=r"(?i)never parsed|consume"):
         pipeline.compute_trusted_gex(
-            chain,
-            manifest=manifest,
-            store=store,
-            open_interest_as_of_evidence=__import__(
-                "tests.certification_fixtures", fromlist=["documented_oi_date"]
-            ).documented_oi_date(),
+            chain, manifest=manifest, store=store, artifact_store=artifacts
         )
 
 
@@ -482,22 +488,34 @@ def test_short_id_is_available_and_is_not_what_gets_compared():
 
 
 # =============================================================================
-# §6 -- an expected universe is capture-bound and replayable
+# §6 -- an expected universe is capture-bound (v2.1.9: and evidence-backed)
 # =============================================================================
+#
+# The verification half -- re-deriving a universe from the records it names --
+# lives in tests/unit/test_expected_universe_evidence.py. What is checked here
+# is the *binding*: which universe a replay is measured against.
 
 
-def universe_from(taken, *, identities=None, source="vendor_contract_list"):
-    from src.domain.expected_universe import ExpectedContractUniverse
+def universe_from(taken, *, identities=None, record_ids=None):
+    """A vendor-listed universe read out of this capture's quote response."""
+    from src.adapters.thetadata.endpoints import Endpoint
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
 
+    quote_records = taken.manifest.records_for(Endpoint.OPTION_QUOTE_SNAPSHOT.value)
     return ExpectedContractUniverse(
         identities=frozenset(
             identities
             if identities is not None
             else (q.contract.canonical_id for q in taken.chain.quotes)
         ),
-        source=source,
+        source_kind=ExpectedUniverseSourceKind.VENDOR_CONTRACT_LIST,
         observed_at=AS_OF,
-        source_record_ids=tuple(taken.manifest.record_ids[:1]),
+        source_record_ids=tuple(
+            record_ids if record_ids is not None else quote_records[:1]
+        ),
     )
 
 
@@ -505,22 +523,24 @@ def test_an_expected_universe_hashes_its_identities_and_provenance():
     taken = captured_chain()
     universe = universe_from(taken)
     assert len(universe.universe_hash) == 64
-    assert universe.independently_observed
 
-    smaller = universe_from(taken, identities=list(universe.identities)[:1])
+    smaller = universe_from(taken, identities=list(universe.identity_set)[:1])
     assert smaller.universe_hash != universe.universe_hash
 
-    relabelled = universe_from(taken, source="somewhere_else")
+    relabelled = dataclasses.replace(universe, complete_for_request=False)
     assert relabelled.universe_hash != universe.universe_hash
 
 
-def test_a_universe_must_say_where_it_came_from():
-    from src.domain.expected_universe import ExpectedContractUniverse
+def test_a_universe_from_records_must_name_them():
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
 
-    with pytest.raises(ValueError, match=r"(?i)source"):
+    with pytest.raises(ValueError, match=r"(?i)names no records"):
         ExpectedContractUniverse(
-            identities=frozenset({"SPXW:2026-03-20:5000:C"}),
-            source="  ",
+            identities=frozenset({"SPXW:2026-03-20:5000:call"}),
+            source_kind=ExpectedUniverseSourceKind.VENDOR_CONTRACT_LIST,
             observed_at=AS_OF,
         )
 
@@ -530,12 +550,13 @@ def test_a_measured_universe_survives_replay():
     from src.domain.completeness import CompletenessStatus
 
     taken = captured_chain()
-    universe = universe_from(taken)
+    universe = resolved_universe(taken)
     operation = taken.pipeline.resolve_operation(
         manifest=taken.manifest, store=taken.store
     )
     recipe = taken.pipeline.normalization_recipe(
         as_of=operation.effective_valuation_timestamp,
+        open_interest_as_of=taken.settlement_artifact.resolved_settlement_date,
         expected_universe_fingerprint=universe.universe_hash,
     )
     rebuilt, _ = taken.pipeline.rebuild_from_capture(
@@ -550,6 +571,18 @@ def test_a_measured_universe_survives_replay():
     assert rebuilt.completeness.missing_expected_count == 0
 
 
+def resolved_universe(taken, **changes):
+    """A universe this capture's records actually produce, marked verified."""
+    from src.adapters.universe_resolvers import resolve_expected_universe
+
+    declared = universe_from(taken, **changes)
+    resolved = resolve_expected_universe(
+        declared, manifest=taken.manifest, store=taken.store
+    )
+    assert resolved.established, resolved.failure
+    return resolved.universe
+
+
 def test_a_different_universe_produces_a_different_chain():
     """So it cannot be swapped for a quieter one between run and replay."""
     taken = captured_chain()
@@ -560,6 +593,7 @@ def test_a_different_universe_produces_a_different_chain():
     def rebuilt_with(universe):
         recipe = taken.pipeline.normalization_recipe(
             as_of=operation.effective_valuation_timestamp,
+            open_interest_as_of=taken.settlement_artifact.resolved_settlement_date,
             expected_universe_fingerprint=(
                 universe.universe_hash if universe else None
             ),
@@ -573,15 +607,15 @@ def test_a_different_universe_produces_a_different_chain():
         )
         return canonical_chain_hash(chain)
 
-    full = universe_from(taken)
-    partial = universe_from(taken, identities=list(full.identities)[:1])
+    full = resolved_universe(taken)
+    partial = universe_from(taken, identities=list(full.identity_set)[:1])
     assert rebuilt_with(full) != rebuilt_with(partial)
     assert rebuilt_with(full) != rebuilt_with(None)
 
 
 def test_the_universe_hash_reaches_the_receipt():
     taken = captured_chain()
-    universe = universe_from(taken)
+    universe = resolved_universe(taken)
     operation = taken.pipeline.resolve_operation(
         manifest=taken.manifest, store=taken.store
     )
@@ -654,86 +688,3 @@ def test_an_undeclared_second_response_is_named_as_such():
     declared = dataclasses.replace(report, declared_multiples=((quote, "PAGINATION"),))
     assert declared.undeclared_multiples == ()
     assert declared.exact
-
-
-def a_universe(identities, *, source="vendor_contract_list", record_ids=()):
-    from src.domain.expected_universe import ExpectedContractUniverse
-
-    return ExpectedContractUniverse(
-        identities=frozenset(identities),
-        source=source,
-        observed_at=AS_OF,
-        source_record_ids=tuple(record_ids),
-    )
-
-
-#: The three contracts the fixture payloads describe, as the parser names them.
-FIXTURE_IDENTITIES = (
-    "SPXW:2026-03-20:4990:C",
-    "SPXW:2026-03-20:5000:C",
-    "SPXW:2026-03-20:5010:C",
-)
-
-
-def test_a_capture_declares_the_universe_it_expects():
-    """Stamped on the records, so a replay recovers it rather than being told."""
-    declared = a_universe(FIXTURE_IDENTITIES)
-    taken = captured_chain(expected_universe=declared)
-
-    assert all(
-        r.expected_universe_fingerprint == declared.universe_hash
-        for r in taken.manifest.records
-    )
-    operation = taken.pipeline.resolve_operation(
-        manifest=taken.manifest, store=taken.store, expected_universe=declared
-    )
-    assert operation.expected_universe_fingerprint == declared.universe_hash
-
-
-def test_a_replay_cannot_substitute_a_different_universe():
-    """The §6 regression. v2.1.7 took the universe as a calculation argument.
-
-    Same bytes, two answers: ``MEASURED_COMPLETE`` against the universe the
-    capture expected, ``PARTIALLY_OBSERVED`` against a larger one invented
-    afterwards -- and nothing in the receipt distinguished them.
-    """
-    declared = a_universe(FIXTURE_IDENTITIES)
-    taken = captured_chain(expected_universe=declared)
-
-    inflated = a_universe([*FIXTURE_IDENTITIES, "SPXW:2026-03-20:9999:C"])
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)expected universe"):
-        taken.pipeline.resolve_operation(
-            manifest=taken.manifest, store=taken.store, expected_universe=inflated
-        )
-
-
-def test_a_replay_cannot_drop_the_universe_the_capture_expected():
-    declared = a_universe(FIXTURE_IDENTITIES)
-    taken = captured_chain(expected_universe=declared)
-
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)none was supplied"):
-        taken.pipeline.resolve_operation(manifest=taken.manifest, store=taken.store)
-
-
-def test_a_universe_cannot_be_introduced_after_the_capture():
-    """A universe produced afterwards can be shaped to whatever arrived."""
-    taken = captured_chain()
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)declared none"):
-        taken.pipeline.resolve_operation(
-            manifest=taken.manifest,
-            store=taken.store,
-            expected_universe=a_universe(FIXTURE_IDENTITIES),
-        )
-
-
-def test_the_trusted_path_refuses_a_substituted_universe():
-    """End to end, through the public API rather than the resolver."""
-    declared = a_universe(FIXTURE_IDENTITIES)
-    taken = captured_chain(expected_universe=declared)
-    inflated = a_universe([*FIXTURE_IDENTITIES, "SPXW:2026-03-20:9999:C"])
-
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)expected universe"):
-        taken.pipeline.compute_trusted_gex(
-            taken.chain,
-            **trusted_evidence(taken, expected_universe=inflated),
-        )

@@ -101,7 +101,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.8"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.9"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -657,6 +657,21 @@ def verify_capture(
             ):
                 problems.append(f"RECORD_NORMALIZATION_RECIPE_MISMATCH:{record_id}")
 
+        # -- the operation digest, recomputed from the fields it covers ------
+        #
+        # v2.1.8 compared the stored ``operation_fingerprint`` across records and
+        # required them equal. Equal to each other, and to nothing else: editing
+        # ``requested_as_of`` on every record while leaving the digest alone
+        # passed, because the digest was never recomputed from the fields it
+        # claims to cover. A stored hash is not self-validating.
+        #
+        # Both sides, because they are two documents. The stored record is the
+        # evidence; the manifest descriptor is what a reader consults, and a
+        # descriptor whose fields do not hash to the digest beside them is a
+        # summary that misdescribes its own capture.
+        problems.extend(_operation_digest_problems(record))
+        problems.extend(_operation_digest_problems(entry))
+
         # -- and the request it actually sent -------------------------------
         if expected_request_spec is not None:
             expected_params = expected_request_spec.parameters_for(record.endpoint)
@@ -836,7 +851,11 @@ class VerifiedCalculationContext:
     #: an OI response carries a number and no date, so confirming the number
     #: says nothing about the session -- and v2.1.6 graded the date OBSERVED on
     #: the strength of that confirmation.
-    open_interest_as_of_evidence: Any = None
+    #: The settlement rule this capture operation was opened under, recovered
+    #: from the artifact store and re-verified. ``None`` where the capture
+    #: established none -- which since v2.1.9 is permanent for that capture,
+    #: because no later call accepts one.
+    settlement_artifact: Any = None
     parser_version: str = PARSER_VERSION
     #: Everything that stopped this context from being usable. Empty is the
     #: only value a trusted calculation accepts.
@@ -879,9 +898,9 @@ class VerifiedCalculationContext:
                 if self.open_interest_provenance is not None
                 else None
             ),
-            "open_interest_as_of_evidence": (
-                self.open_interest_as_of_evidence.as_dict()
-                if self.open_interest_as_of_evidence is not None
+            "settlement_artifact": (
+                self.settlement_artifact.as_dict()
+                if self.settlement_artifact is not None
                 else None
             ),
             "raw_store_description": self.raw_store_description,
@@ -904,6 +923,71 @@ class VerifiedCalculationContext:
                 self.effective_pricing_compatibility.as_dict()
             ),
         }
+
+
+def _operation_digest_problems(record: Any) -> list[str]:
+    """Recompute a record's operation fingerprint from its own semantic fields.
+
+    Every field the digest covers is stored on the record, so the digest is a
+    *derivable* value rather than an opaque token -- and a derivable value that
+    nobody derives is a value nobody has checked. Until v2.1.9 verification
+    compared the stored digests to each other and stopped there.
+
+    Silent on a record that names no operation: pre-v2.1.8 captures are refused
+    elsewhere, with a message about what they lack, and duplicating that here
+    would report the same absence twice under a less informative code.
+    """
+    from src.adapters.capture_operation import (
+        CaptureOperationIdentity,
+        ValuationTimestampRule,
+    )
+    from src.domain.digests import short_id
+
+    if not record.operation_id or not record.operation_fingerprint:
+        return []
+    if record.requested_as_of is None or record.effective_valuation_timestamp is None:
+        return [
+            f"OPERATION_FIELDS_INCOMPLETE:{record.record_id}: the record names "
+            "an operation and carries no valuation instants, so its fingerprint "
+            "cannot be recomputed"
+        ]
+    try:
+        recomputed = CaptureOperationIdentity(
+            operation_id=record.operation_id,
+            session_id=record.capture_session_id,
+            pipeline_fingerprint=record.pipeline_fingerprint,
+            capture_plan_fingerprint=record.capture_plan_fingerprint,
+            request_spec_fingerprint=record.request_spec_fingerprint,
+            normalization_recipe_hash=record.normalization_recipe_hash,
+            requested_as_of=record.requested_as_of,
+            effective_valuation_timestamp=record.effective_valuation_timestamp,
+            valuation_timestamp_rule=ValuationTimestampRule(
+                record.valuation_timestamp_rule
+            ),
+            spot_synchronization_policy_fingerprint=(
+                record.spot_synchronization_policy_fingerprint
+            ),
+            open_interest_date_rule_fingerprint=(
+                record.open_interest_date_rule_fingerprint or None
+            ),
+            expected_universe_fingerprint=(
+                record.expected_universe_fingerprint or None
+            ),
+            parser_version=record.parser_version,
+        )
+    except (ValueError, TypeError) as error:
+        return [
+            f"OPERATION_FIELDS_INVALID:{record.record_id}: the stored operation "
+            f"fields do not form an identity: {error}"
+        ]
+    if recomputed.operation_fingerprint != record.operation_fingerprint:
+        return [
+            f"OPERATION_FINGERPRINT_MISMATCH:{record.record_id}: the record's "
+            f"fields hash to {short_id(recomputed.operation_fingerprint)}... and "
+            f"it is stamped {short_id(record.operation_fingerprint)}.... A "
+            "stored digest is not evidence about the fields beside it."
+        ]
+    return []
 
 
 def _expected_identity(pipeline: Any, *, manifest: RawCaptureManifest) -> Any:
@@ -941,7 +1025,7 @@ def build_verified_calculation_context(
     validation: AdapterValidationReport | None = None,
     spot: SpotProvenance | None = None,
     open_interest: OpenInterestProvenance | None = None,
-    open_interest_as_of_evidence: Any = None,
+    settlement_artifact: Any = None,
 ) -> VerifiedCalculationContext:
     """Verify a capture from scratch and package what it authorizes.
 
@@ -1038,40 +1122,31 @@ def build_verified_calculation_context(
     # number proves the vendor sent it; it proves nothing about which session it
     # settled in, and v2.1.6 promoted a caller's assumption to OBSERVED on
     # exactly that confirmation.
-    evidence = open_interest_as_of_evidence
-    if evidence is None and open_interest is not None and open_interest.as_of:
-        from src.adapters.open_interest import EvidenceKind, OpenInterestAsOfEvidence
-
-        # No evidence supplied means nobody stated one, which is a caller
-        # assumption whether or not it was framed as such.
-        evidence = OpenInterestAsOfEvidence(
-            as_of=open_interest.as_of,
-            source=str(getattr(open_interest.source, "value", open_interest.source)),
-            chain_date=open_interest.chain_date,
-            evidence_kind=EvidenceKind.CALLER_ASSUMPTION,
+    # The artifact comes from the capture operation, not from this call. v2.1.8
+    # accepted ``open_interest_as_of_evidence`` here, so a capture stamped with
+    # no settlement rule could be handed documentation evidence at calculation
+    # time and return a trusted result: the capture said no rule had been
+    # established, the calculation said one had, and the calculation won because
+    # it was the one holding the argument.
+    if settlement_artifact is None:
+        failures.append(
+            "OPEN_INTEREST_AS_OF:this capture established no settlement rule. "
+            "The rule is selected when the capture session opens, so this is a "
+            "permanent property of the capture rather than a missing argument. "
+            "Raw storage and diagnostic calculation are unaffected. See "
+            "OPEN_DECISIONS OD-26."
         )
-    # Resolved, not classified. v2.1.7 asked the *enum* whether evidence
-    # permitted a trusted calculation, so ``VENDOR_FIELD`` with
-    # ``record_ids=("fake-record",)`` did, and
-    # ``AUTHORITATIVE_VENDOR_DOCUMENTATION`` with ``reference="lol"`` did. The
-    # kind now selects which check runs; supplying it does not pass the check.
-    if evidence is not None:
-        from src.adapters.evidence_resolvers import resolve_settlement_date
-
-        resolved = resolve_settlement_date(evidence, manifest=manifest, store=store)
-        if not resolved.established:
-            failures.append(f"OPEN_INTEREST_AS_OF:{resolved.failure}")
-        elif not resolved.permits_trusted_calculation:
-            failures.append(f"OPEN_INTEREST_AS_OF:{evidence.blocker}")
-        elif open_interest is not None and open_interest.as_of != resolved.as_of:
-            # The value's provenance and the date's evidence have to agree. Two
-            # settlement dates in one calculation is not a milder version of
-            # one; it is two different markets, averaged by accident.
-            failures.append(
-                f"OPEN_INTEREST_AS_OF:the open-interest provenance says "
-                f"{open_interest.as_of} and the settlement evidence resolves "
-                f"to {resolved.as_of}"
-            )
+    elif open_interest is not None and (
+        open_interest.as_of != settlement_artifact.resolved_settlement_date
+    ):
+        # The value's provenance and the capture's rule have to agree. Two
+        # settlement dates in one calculation is not a milder version of one; it
+        # is two different markets, averaged by accident.
+        failures.append(
+            f"OPEN_INTEREST_AS_OF:the open-interest provenance says "
+            f"{open_interest.as_of} and the capture-bound rule derives "
+            f"{settlement_artifact.resolved_settlement_date}"
+        )
 
     context = VerifiedCalculationContext(
         pipeline_fingerprint=pipeline.fingerprint(),
@@ -1082,7 +1157,7 @@ def build_verified_calculation_context(
         effective_pricing_compatibility=effective,
         spot_provenance=spot,
         open_interest_provenance=open_interest,
-        open_interest_as_of_evidence=evidence,
+        settlement_artifact=settlement_artifact,
         raw_store_description=type(store).__name__,
         context_hash="",
         parser_version=PARSER_VERSION,

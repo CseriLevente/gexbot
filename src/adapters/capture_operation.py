@@ -46,7 +46,7 @@ __all__ = [
 #: Bumped when the *meaning* of an operation identity changes, so a stamp taken
 #: under older rules is refused rather than compared field by field against
 #: newer ones.
-CAPTURE_OPERATION_SCHEMA_VERSION = "capture-operation/2.1.8"
+CAPTURE_OPERATION_SCHEMA_VERSION = "capture-operation/2.1.9"
 
 
 class ValuationTimestampRule(str, Enum):

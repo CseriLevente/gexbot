@@ -60,11 +60,11 @@ __all__ = [
 ]
 
 #: Bumped when the *meaning* of a validation report changes.
-VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.8"
+VALIDATION_SCHEMA_VERSION = "adapter-validation/2.1.9"
 
 #: Bumped when the validator's own logic changes, so two reports that disagree
 #: can be told apart by which code produced them.
-VALIDATOR_VERSION = "adapter-validator/2.1.8"
+VALIDATOR_VERSION = "adapter-validator/2.1.9"
 
 #: Parser versions whose output this validator understands. A payload read by
 #: something else is not evidence this code can interpret.
@@ -485,12 +485,22 @@ class AdapterValidator:
         endpoint: Endpoint,
         field_path: str,
         row_index: int = 0,
+        record_id: str | None = None,
     ) -> VerifiedFieldObservation:
         """Read one field out of one stored payload.
 
         Four separate refusals, because they mean different things: the endpoint
         cannot carry the field, the manifest holds no record for the endpoint,
         the store does not have the record, or the payload has no such column.
+
+        ``record_id`` names *which* response to open. Until v2.1.9 this method
+        always took ``records_for(endpoint)[0]``, so evidence citing the second
+        page of a paginated sweep was confirmed against the first -- and
+        ``confirm_field`` compared the claim to whatever that first record
+        happened to say. With one record per endpoint the two agree by accident;
+        pagination, partitions and retained retries are exactly the cases where
+        they would not, and all three are things this repository intends to
+        certify.
         """
         expected = FIELD_ENDPOINTS.get(field_path)
         if expected is not None and expected is not endpoint:
@@ -513,7 +523,15 @@ class AdapterValidator:
                 f"in this capture could have supplied {field_path!r}"
             )
 
-        record_id = record_ids[0]
+        if record_id is None:
+            record_id = record_ids[0]
+        elif record_id not in record_ids:
+            raise ThetaDataProvenanceError(
+                f"record {record_id!r} is not one of this capture's "
+                f"{endpoint.value} responses ({list(record_ids)}). Reading a "
+                "different record and reporting it under the requested id is "
+                "how evidence about one response becomes a claim about another."
+            )
         records = {r.record_id: r for r in store.records()}
         record = records.get(record_id)
         if record is None:
@@ -576,7 +594,15 @@ class AdapterValidator:
             store=store,
             endpoint=endpoint,
             field_path=observation.field_path,
+            # The record the claim names, not the endpoint's first record.
+            record_id=observation.record_id,
         )
+        if actual.record_id != observation.record_id:
+            raise ThetaDataProvenanceError(
+                f"the observation claims record {observation.record_id!r} and "
+                f"the reread opened {actual.record_id!r}. Confirming a claim "
+                "against different bytes than it names is not confirmation."
+            )
         if actual.observed_value_hash != observation.observed_value_hash:
             raise ThetaDataProvenanceError(
                 f"{observation.field_path!r} in record {observation.record_id!r} "

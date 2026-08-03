@@ -792,6 +792,163 @@ def _open_interest_as_of(chain: Any) -> Any:
     return dates.pop() if len(dates) == 1 else None
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveredCaptureArtifacts:
+    """What a capture was opened under, read back and re-verified.
+
+    A typed result rather than a tuple, because the interesting case is the one
+    where an artifact is absent *and* that absence is not a failure: a capture
+    with no settlement rule recovers ``None`` and no complaint, and is refused
+    later by ``_settlement_refusals`` with a message about what it would take.
+    """
+
+    settlement_artifact: Any = None
+    expected_universe: Any = None
+    failures: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "settlement_artifact": (
+                self.settlement_artifact.as_dict()
+                if self.settlement_artifact is not None
+                else None
+            ),
+            "expected_universe": (
+                self.expected_universe.as_dict()
+                if self.expected_universe is not None
+                else None
+            ),
+            "failures": list(self.failures),
+        }
+
+
+def _iso_date(value: Any) -> Any:
+    from datetime import date as _date
+
+    return _date.fromisoformat(str(value))
+
+
+def _iso_instant(value: Any) -> Any:
+    from datetime import datetime as _datetime
+
+    return _datetime.fromisoformat(str(value))
+
+
+def _settlement_artifact(value: Any) -> Any:
+    """Narrow a caller's ``settlement_rule`` to an artifact, or refuse it.
+
+    Typed rather than "an optional string" on purpose. v2.1.8 took
+    ``open_interest_date_rule_fingerprint: str | None``, so a capture could be
+    stamped with a digest naming an object nobody kept and nothing could
+    re-derive the date it stood for.
+    """
+    if value is None:
+        return None
+    from src.adapters.evidence_resolvers import SettlementDateRuleArtifact
+
+    if not isinstance(value, SettlementDateRuleArtifact):
+        raise PipelineConsistencyError(
+            f"settlement_rule must be a SettlementDateRuleArtifact, got "
+            f"{type(value).__name__}. A fingerprint or a date would be a claim "
+            "that a rule was established; the artifact is the establishing."
+        )
+    return value
+
+
+def _declared_universe(value: Any) -> Any:
+    """Narrow a caller's ``expected_universe``, or refuse it.
+
+    There is exactly one such type since v2.1.9. Accepting ``Any`` is how two
+    of them coexisted: the engine read one, the capture path built the other,
+    and only the second carried provenance.
+    """
+    if value is None:
+        return None
+    from src.domain.expected_universe import ExpectedContractUniverse
+
+    if not isinstance(value, ExpectedContractUniverse):
+        raise PipelineConsistencyError(
+            f"expected_universe must be an ExpectedContractUniverse, got "
+            f"{type(value).__name__}"
+        )
+    return value
+
+
+def _universe_for_fetch(
+    session: Any, expected_contract_ids: Any, expected_source: str
+) -> tuple[Any, Any, str, bool]:
+    """What a fetch should measure completeness against.
+
+    A session that owns a universe supplies it. Passing one alongside is
+    refused: v2.1.8 required a caller to repeat ``expected_contract_ids`` and
+    ``expected_source`` on every fetch after having already declared a universe
+    on the session, so the two could differ and the fetch quietly won.
+    """
+    owned = getattr(session, "expected_universe", None) if session is not None else None
+    supplied = expected_contract_ids is not None or expected_source != "none"
+    if owned is None:
+        return None, expected_contract_ids, expected_source, True
+    if supplied:
+        raise PipelineConsistencyError(
+            f"this capture session was opened with expected universe "
+            f"{owned.display_id!r} and the fetch supplied another "
+            f"({expected_source!r}). Whether a chain is complete is decided "
+            "against the universe the capture was opened with; a second one "
+            "passed here would be a choice about which answer to get."
+        )
+    return (
+        owned,
+        tuple(sorted(owned.identity_set)),
+        owned.source,
+        owned.complete_for_request,
+    )
+
+
+def _settlement_date_for_fetch(session: Any, open_interest_as_of: Any) -> Any:
+    """The settlement date a fetch stamps on every contract.
+
+    Derived by the session's rule, never supplied. A capture with no settlement
+    artifact produces contracts carrying ``None``, which is the honest state and
+    what keeps such a capture out of a trusted calculation.
+    """
+    if session is None:
+        return open_interest_as_of
+    artifact = getattr(session, "settlement_artifact", None)
+    if artifact is None:
+        return open_interest_as_of
+    if (
+        open_interest_as_of is not None
+        and open_interest_as_of != artifact.resolved_settlement_date
+    ):
+        raise PipelineConsistencyError(
+            f"this capture session derived settlement date "
+            f"{artifact.resolved_settlement_date.isoformat()} from "
+            f"{artifact.normalized_rule.describe()}, and the fetch supplied "
+            f"{open_interest_as_of.isoformat()}. Open interest is the linear "
+            "weight on every GEX term, so which session it settled in is not a "
+            "per-fetch argument."
+        )
+    return artifact.resolved_settlement_date
+
+
+def _persist_artifacts(store: Any, *, settlement: Any, universe: Any) -> None:
+    """Write the objects the stamped digests name, so replay can recover them."""
+    from src.adapters.artifact_store import ArtifactKind
+
+    if settlement is not None:
+        store.put(
+            ArtifactKind.SETTLEMENT_RULE,
+            settlement.semantic_payload(),
+            sources=(settlement.evidence_id,) if settlement.evidence_id else (),
+        )
+    if universe is not None:
+        store.put(
+            ArtifactKind.EXPECTED_UNIVERSE,
+            universe.semantic_payload(),
+            sources=tuple(universe.source_record_ids),
+        )
+
+
 def _first_field_difference(supplied: Any, rederived: Any) -> str:
     """Name the first field that differs, so a refusal is actionable.
 
@@ -1019,6 +1176,12 @@ class ThetaDataResearchPipeline:
     ) -> ChainSnapshot:
         """Fetch the chain this session is configured for, spot included.
 
+        A capture session opened with an expected universe or a settlement rule
+        **supplies them itself**. Repeating them here is refused rather than
+        merged: a caller who could pass a second universe alongside a session
+        that owns one would be choosing which of the two the chain is measured
+        against, which is the binding the session exists to make.
+
         Takes no ``spot``. Under ``underlying_price_source:
         vendor_index_snapshot`` the underlying is the vendor's to give, and
         every gamma in the snapshot is computed against it -- so this fetches
@@ -1049,6 +1212,10 @@ class ThetaDataResearchPipeline:
             if capture is not None
             else self._new_capture_session(as_of, store=store)
         )
+        universe, expected_contract_ids, expected_source, complete_for_request = (
+            _universe_for_fetch(session, expected_contract_ids, expected_source)
+        )
+        open_interest_as_of = _settlement_date_for_fetch(session, open_interest_as_of)
         mark = session.mark() if session is not None else 0
         spot, spot_timestamp, observation = self._capture_index_spot(
             as_of=as_of, capture=session
@@ -1062,6 +1229,8 @@ class ThetaDataResearchPipeline:
             open_interest_as_of=open_interest_as_of,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
+            expected_complete_for_request=complete_for_request,
+            expected_universe=universe,
             capture=session,
             mark=mark,
         )
@@ -1091,6 +1260,10 @@ class ThetaDataResearchPipeline:
             if capture is not None
             else self._new_capture_session(as_of, store=store)
         )
+        universe, expected_contract_ids, expected_source, complete_for_request = (
+            _universe_for_fetch(session, expected_contract_ids, expected_source)
+        )
+        open_interest_as_of = _settlement_date_for_fetch(session, open_interest_as_of)
         mark = session.mark() if session is not None else 0
         return self._assemble(
             as_of=as_of,
@@ -1101,6 +1274,8 @@ class ThetaDataResearchPipeline:
             open_interest_as_of=open_interest_as_of,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
+            expected_complete_for_request=complete_for_request,
+            expected_universe=universe,
             capture=session,
             mark=mark,
         )
@@ -1141,35 +1316,71 @@ class ThetaDataResearchPipeline:
         session_id: str,
         as_of: datetime,
         capture_origin: Any = None,
-        open_interest_as_of: date | None = None,
         expected_universe: Any = None,
-        open_interest_date_rule_fingerprint: str | None = None,
+        settlement_rule: Any = None,
+        artifact_store: Any = None,
     ) -> Any:
         """A capture session stamped with this pipeline's identity.
 
         The one way to open a session that produces verifiable records. The
-        five capture-time claims are computed here, from the pipeline, and are
+        capture-time claims are computed here, from the pipeline, and are
         immutable for the life of the session -- so every record it writes can
-        be asked which pipeline, plan, request specification and normalization
-        recipe were in force when the bytes arrived.
+        be asked which pipeline, plan, request specification, normalization
+        recipe, settlement rule and expected universe were in force when the
+        bytes arrived.
+
+        ``settlement_rule`` is a :class:`SettlementDateRuleArtifact` or
+        ``None``, and the choice is made **here**, before any response exists.
+        A session opened without one produces a capture that is fully usable for
+        raw storage, diagnostic calculation and vendor-schema research, and that
+        can never become eligible for a trusted GEX -- because since v2.1.9
+        there is no argument through which a later caller can supply one.
+
+        v2.1.8 stamped ``open_interest_date_rule_fingerprint=""`` on an ordinary
+        capture and then let ``compute_trusted_gex(...,
+        open_interest_as_of_evidence=documented)`` return a trusted result. The
+        capture said no rule had been established; the calculation said one had.
+
+        ``open_interest_as_of`` is gone as a parameter. The settlement date is
+        what the artifact's rule *derives* from the session date, so passing one
+        alongside would be offering the answer to a question the rule exists to
+        answer.
         """
         from src.adapters.raw_store import CaptureOrigin, CaptureSession
         from src.adapters.thetadata.client import capture_origin_of
+
+        artifact = _settlement_artifact(settlement_rule)
+        open_interest_as_of = (
+            artifact.resolved_settlement_date if artifact is not None else None
+        )
+        if artifact is not None and artifact.chain_session_date != as_of.date():
+            raise PipelineConsistencyError(
+                f"the settlement artifact was derived for chain session "
+                f"{artifact.chain_session_date.isoformat()} and this capture is "
+                f"for {as_of.date().isoformat()}. A rule applied to a different "
+                "session produced a different date; open interest is the linear "
+                "weight on every GEX term."
+            )
+        universe = _declared_universe(expected_universe)
 
         recipe = self.normalization_recipe(
             as_of=as_of,
             open_interest_as_of=open_interest_as_of,
             expected_universe_fingerprint=(
-                expected_universe.universe_hash if expected_universe else None
+                universe.universe_hash if universe else None
             ),
         )
         operation = self.begin_operation(
             requested_as_of=as_of,
             session_id=session_id,
             open_interest_as_of=open_interest_as_of,
-            expected_universe=expected_universe,
-            open_interest_date_rule_fingerprint=open_interest_date_rule_fingerprint,
+            expected_universe=universe,
+            open_interest_date_rule_fingerprint=(
+                artifact.artifact_hash if artifact is not None else None
+            ),
         )
+        if artifact_store is not None:
+            _persist_artifacts(artifact_store, settlement=artifact, universe=universe)
         return CaptureSession(
             store=store,
             session_id=session_id,
@@ -1199,12 +1410,19 @@ class ThetaDataResearchPipeline:
             # under. Stamped rather than passed at calculation time, so a replay
             # is measured against the universe the capture expected instead of
             # whichever one the caller happens to hold.
-            expected_universe_fingerprint=(
-                expected_universe.universe_hash if expected_universe else ""
-            ),
+            expected_universe_fingerprint=(universe.universe_hash if universe else ""),
             open_interest_date_rule_fingerprint=(
-                open_interest_date_rule_fingerprint or ""
+                artifact.artifact_hash if artifact is not None else ""
             ),
+            spot_synchronization_policy_fingerprint=(
+                self.spot_synchronization_policy_fingerprint
+            ),
+            # The artifacts themselves, carried on the session so that
+            # ``fetch_chain(capture=session)`` needs no repetition of what the
+            # session already knows, and so replay recovers the objects rather
+            # than only the digests that name them.
+            settlement_artifact=artifact,
+            expected_universe=universe,
         )
 
     def _capture_index_spot(
@@ -1233,6 +1451,8 @@ class ThetaDataResearchPipeline:
         expected_source: str,
         capture: Any,
         mark: int,
+        expected_complete_for_request: bool = True,
+        expected_universe: Any = None,
     ) -> ChainSnapshot:
         from dataclasses import replace as _replace
 
@@ -1249,6 +1469,7 @@ class ThetaDataResearchPipeline:
             capture=capture,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
+            expected_complete_for_request=expected_complete_for_request,
             pipeline=self,
             manifest_since=mark,
             capture_plan_fingerprint=self.capture_plan.fingerprint,
@@ -1827,8 +2048,7 @@ class ThetaDataResearchPipeline:
         store: Any,
         validation_report: Any = None,
         open_interest_provenance: Any = None,
-        open_interest_as_of_evidence: Any = None,
-        expected_universe: Any = None,
+        artifact_store: Any = None,
     ) -> Any:
         """Compute only when this call has itself derived the authority to.
 
@@ -1863,6 +2083,21 @@ class ThetaDataResearchPipeline:
         are now derived: the timestamp from the verified index record, the
         tolerance from the pipeline configuration.
 
+        **And since v2.1.9, no settlement evidence and no expected universe.**
+        Both were arguments in v2.1.8, and both decide what a number means: the
+        settlement date is the session whose open interest weights every term,
+        and the universe is what completeness -- and therefore the confidence
+        score -- is measured against. A capture stamped
+        ``open_interest_date_rule_fingerprint=""`` would nonetheless return a
+        trusted result if the *call* supplied documentation evidence. The
+        capture said no rule had been established and the calculation said one
+        had; the calculation won, because it was the one holding the argument.
+
+        Both are now recovered from the capture operation and re-verified
+        against their evidence. ``artifact_store`` is where the objects those
+        stamped digests name were written; it is a store rather than an object,
+        so nothing here accepts an artifact a caller has chosen.
+
         The returned snapshot carries the ``VerifiedCalculationContext`` this
         call produced. It remains a serialisable *report* of what was checked.
         """
@@ -1870,6 +2105,13 @@ class ThetaDataResearchPipeline:
 
         self.validate_integrity()
         _require_a_chain(chain, mode="trusted")
+
+        # Recovered from the capture, before anything is computed. A capture
+        # that established no settlement rule cannot be argued into one here.
+        recovered = self.recover_capture_artifacts(
+            manifest=manifest, store=store, artifact_store=artifact_store
+        )
+        expected_universe = recovered.expected_universe
 
         # Derived here, from the bytes, before anything else looks at it.
         spot_provenance = self.derive_spot_provenance(manifest=manifest, store=store)
@@ -1880,7 +2122,12 @@ class ThetaDataResearchPipeline:
             validation=validation_report,
             spot=spot_provenance,
             open_interest=open_interest_provenance,
-            open_interest_as_of_evidence=open_interest_as_of_evidence,
+            settlement_artifact=recovered.settlement_artifact,
+        )
+        settlement_date = (
+            recovered.settlement_artifact.resolved_settlement_date
+            if recovered.settlement_artifact is not None
+            else None
         )
         receipt = self._rederivation_refusals(
             chain,
@@ -1888,8 +2135,14 @@ class ThetaDataResearchPipeline:
             store=store,
             context=context,
             expected_universe=expected_universe,
+            settlement_date=settlement_date,
         )
-        refusals = [*self._context_refusals(chain, context), *receipt]
+        refusals = [
+            *recovered.failures,
+            *self._settlement_refusals(chain, recovered.settlement_artifact),
+            *self._context_refusals(chain, context),
+            *receipt,
+        ]
         if refusals:
             raise PipelineConsistencyError(
                 "the evidence does not authorize a trusted calculation for this "
@@ -1927,7 +2180,7 @@ class ThetaDataResearchPipeline:
                     # by the time this runs -- the refusal above checked -- and
                     # taking it from the operation says which one is the source.
                     as_of=operation.effective_valuation_timestamp,
-                    open_interest_as_of=_open_interest_as_of(chain),
+                    open_interest_as_of=settlement_date,
                     expected_universe_fingerprint=(
                         expected_universe.universe_hash
                         if expected_universe is not None
@@ -1940,7 +2193,7 @@ class ThetaDataResearchPipeline:
                     store=store,
                     recipe=self.normalization_recipe(
                         as_of=operation.effective_valuation_timestamp,
-                        open_interest_as_of=_open_interest_as_of(chain),
+                        open_interest_as_of=settlement_date,
                     ),
                     operation=operation,
                     expected_universe=expected_universe,
@@ -1949,6 +2202,180 @@ class ThetaDataResearchPipeline:
             ).as_dict(),
             capture_operation=operation.as_dict(),
         )
+
+    def recover_capture_artifacts(
+        self, *, manifest: Any, store: Any, artifact_store: Any = None
+    ) -> RecoveredCaptureArtifacts:
+        """The settlement rule and expected universe this capture was opened under.
+
+        Recovered, then re-verified. The digests on the records say *which*
+        artifacts; the artifact store holds them; the resolvers check that each
+        one still follows from its evidence -- the rule from its typed semantics
+        and the chain session, the universe from the records it names.
+
+        A capture that declared neither recovers neither, and that is a complete
+        answer rather than a missing one: it is what makes such a capture
+        permanently a raw-capture-and-diagnostics capture.
+        """
+        from src.adapters.artifact_store import ArtifactKind
+        from src.adapters.evidence_resolvers import SettlementDateRuleArtifact
+        from src.adapters.universe_resolvers import resolve_expected_universe
+        from src.domain.expected_universe import ExpectedContractUniverse
+        from src.domain.settlement import SettlementRule
+
+        stamped = self._stamped_operation(manifest)
+        settlement_key = stamped["open_interest_date_rule_fingerprint"]
+        universe_key = stamped["expected_universe_fingerprint"]
+        failures: list[str] = []
+        settlement: Any = None
+        universe: Any = None
+
+        if settlement_key:
+            payload = (
+                artifact_store.payload_of(settlement_key)
+                if artifact_store is not None
+                else None
+            )
+            if payload is None:
+                failures.append(
+                    f"this capture was opened under settlement artifact "
+                    f"{short_id(settlement_key)}... and no artifact store holds "
+                    "it, so the rule that derived the open-interest date cannot "
+                    "be produced. A digest naming an object nobody kept is not "
+                    "evidence about anything."
+                )
+            else:
+                try:
+                    settlement = SettlementDateRuleArtifact(
+                        evidence_kind=payload["evidence_kind"],
+                        rule_fingerprint=payload["rule_fingerprint"],
+                        evidence_id=payload["evidence_id"],
+                        normalized_rule=SettlementRule(
+                            kind=payload["normalized_rule"]["kind"],
+                            trading_session_offset=payload["normalized_rule"][
+                                "trading_session_offset"
+                            ],
+                            calendar_id=payload["normalized_rule"]["calendar_id"],
+                        ),
+                        chain_session_date=_iso_date(payload["chain_session_date"]),
+                        resolved_settlement_date=_iso_date(
+                            payload["resolved_settlement_date"]
+                        ),
+                        documentation_content_hash=payload[
+                            "documentation_content_hash"
+                        ],
+                        derivation_version=payload["derivation_version"],
+                    )
+                except Exception as error:
+                    failures.append(
+                        f"the stored settlement artifact does not reconstruct: {error}"
+                    )
+                else:
+                    # Recomputed, not trusted. The artifact re-derives its own
+                    # date in __post_init__; this checks it is the one stamped.
+                    if settlement.artifact_hash != settlement_key:
+                        failures.append(
+                            f"the recovered settlement artifact hashes to "
+                            f"{short_id(settlement.artifact_hash)}... and the "
+                            f"records were stamped {short_id(settlement_key)}..."
+                        )
+                        settlement = None
+
+        if universe_key:
+            payload = (
+                artifact_store.payload_of(universe_key)
+                if artifact_store is not None
+                else None
+            )
+            if payload is None:
+                failures.append(
+                    f"this capture was opened against expected universe "
+                    f"{short_id(universe_key)}... and no artifact store holds "
+                    "it, so what the chain should have contained cannot be "
+                    "produced"
+                )
+            else:
+                declared = ExpectedContractUniverse(
+                    identities=frozenset(payload["identities"]),
+                    source_kind=payload["source_kind"],
+                    observed_at=_iso_instant(payload["observed_at"]),
+                    source_record_ids=tuple(payload["source_record_ids"]),
+                    complete_for_request=payload["complete_for_request"],
+                    documentation_evidence_id=payload["documentation_evidence_id"],
+                    evidence_fingerprint=payload["evidence_fingerprint"],
+                )
+                if declared.universe_hash != universe_key:
+                    failures.append(
+                        f"the recovered universe hashes to "
+                        f"{short_id(declared.universe_hash)}... and the records "
+                        f"were stamped {short_id(universe_key)}..."
+                    )
+                else:
+                    resolved = resolve_expected_universe(
+                        declared, manifest=manifest, store=store
+                    )
+                    if not resolved.established:
+                        failures.append(
+                            f"the capture-bound expected universe does not "
+                            f"follow from its source: {resolved.failure}"
+                        )
+                    else:
+                        universe = declared
+
+        _ = ArtifactKind  # imported for the kind names used when persisting
+        return RecoveredCaptureArtifacts(
+            settlement_artifact=settlement,
+            expected_universe=universe,
+            failures=tuple(failures),
+        )
+
+    def _settlement_refusals(
+        self, chain: ChainSnapshot, artifact: Any
+    ) -> tuple[str, ...]:
+        """Whether this chain may claim the settlement date the capture derived.
+
+        Three separate things, because they fail differently: the capture must
+        have established a date at all, the chain's contracts must carry it, and
+        they must all carry the same one.
+        """
+        if artifact is None:
+            return (
+                "this capture established no open-interest settlement rule, so "
+                "no trusted calculation can rest on it. Open interest is the "
+                "linear weight on every GEX term, and which session it settled "
+                "in decides what that weight means. The rule is chosen when the "
+                "capture session opens; it cannot be supplied afterwards. See "
+                "OPEN_DECISIONS OD-26.",
+            )
+        dates = {
+            quote.timestamps.open_interest_as_of
+            for quote in getattr(chain, "quotes", ())
+        }
+        expected = artifact.resolved_settlement_date
+        if dates == {None}:
+            return (
+                f"the capture derived settlement date {expected.isoformat()} and "
+                "every contract in this chain carries none. A chain whose open "
+                "interest belongs to no stated session cannot borrow a date from "
+                "the capture's metadata.",
+            )
+        if len(dates) != 1:
+            return (
+                f"the chain's contracts carry {len(dates)} different "
+                "open-interest settlement dates; open interest settles per "
+                "session, so a chain spanning several was assembled from "
+                "responses that do not describe one market.",
+            )
+        carried = dates.pop()
+        if carried != expected:
+            return (
+                f"the capture derived settlement date {expected.isoformat()} from "
+                f"{artifact.normalized_rule.describe()} and the chain's contracts "
+                f"carry {carried.isoformat()}. The number every gamma is weighted "
+                "by would be from a different session than the one the evidence "
+                "establishes.",
+            )
+        return ()
 
     def derive_spot_provenance(self, *, manifest: Any, store: Any) -> Any:
         """The underlying, its clock and its tolerance -- all from evidence.
@@ -1986,6 +2413,7 @@ class ThetaDataResearchPipeline:
         store: Any,
         context: Any,
         expected_universe: Any = None,
+        settlement_date: Any = None,
     ) -> tuple[str, ...]:
         """Whether this chain is the one those raw records normalize to.
 
@@ -2028,9 +2456,13 @@ class ThetaDataResearchPipeline:
                 "cannot differ.",
             )
 
+        # The settlement date the *capture* derived, not the one the chain
+        # carries. Reading it off the chain would make the rebuild agree with
+        # whatever the chain said, which is the shape of every defect this
+        # release and the last one closed.
         recipe = self.normalization_recipe(
             as_of=valuation,
-            open_interest_as_of=_open_interest_as_of(chain),
+            open_interest_as_of=settlement_date,
             expected_universe_fingerprint=(
                 expected_universe.universe_hash if expected_universe else None
             ),

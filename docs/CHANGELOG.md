@@ -1,5 +1,110 @@
 # Changelog
 
+## 2.1.9 - settlement-date and expected-universe evidence
+
+v2.1.8 bound every non-payload input to the capture operation. Two of those
+inputs turned out to be bound to something that had never been checked.
+
+**The settlement date.** v2.1.8 replaced an authorizing enum with resolvers,
+which was right, and stopped one step short:
+
+```python
+rule = rules.get(evidence.reference)
+if not rule.covers(evidence.as_of):
+    return failure
+return ResolvedSettlementDate(as_of=evidence.as_of, ...)
+```
+
+The date still came from the caller. The rule was consulted only to confirm it
+was *in force* on the day already chosen, so one registered rule saying "prior
+trading session" would authorize 2026-03-16, 2026-03-15 and 2026-03-01 alike for
+a 2026-03-17 chain. `normalized_value: str` is why: free text cannot be applied
+to a session date, so the answer had to come from the argument list.
+
+And a `DocumentationRule` could carry any 64-character string as a content hash,
+because nothing ever opened the file. `document_reference="/definitely/missing"`
+with `document_content_hash="0" * 64` registered cleanly.
+
+Worse, a capture stamped `open_interest_date_rule_fingerprint=""` — no rule
+established — would still return a trusted result if the *call* supplied
+documentation evidence. The capture said no rule had been established and the
+calculation said one had; the calculation won, because it was the one holding
+the argument.
+
+**The expected universe.** `source="vendor_contract_list"` was a string a caller
+typed, and `source_record_ids` was read as a boolean — non-empty meant
+"independently observed". No record was ever opened. There were also **two**
+`ExpectedContractUniverse` classes, and the one the engine read carried no
+provenance at all. `complete_for_request` existed on the type and was read
+nowhere, so page one of a paginated listing whose members all arrived reported
+the entire chain `MEASURED_COMPLETE`.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.8 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | A settlement rule could be supplied *after* the capture | A capture that established nothing became trusted on the strength of an argument | `capture_session(settlement_rule=...)` takes a `SettlementDateRuleArtifact` before any response exists. `compute_trusted_gex` accepts no settlement evidence at all |
+| 2 | A documented rule *approved* a date instead of deriving one | One rule authorized every date, because the rule was never applied to anything | Typed `SettlementRule` semantics — kind, session offset, calendar — applied through the real trading calendar. There is no `as_of` parameter anywhere in the resolver |
+| 3 | A content hash was a 64-character string nobody computed | A vendor page could be missing entirely and the rule still registered | Registration opens the file, hashes the bytes and compares. Missing files, hash mismatches, absolute paths and URLs are all refused |
+| 4 | The resolved OI date reached nothing | It weights every GEX term, and the chain could carry a different one — or none | It flows into the recipe, every contract's timestamps, the chain hash, the receipt and replay, and the trusted path refuses when the chain disagrees with the capture |
+| 5 | Two `ExpectedContractUniverse` classes | The engine read the one with no provenance | One authoritative type, with an architecture test that fails the build if a second appears |
+| 6 | A universe was a label, not evidence | A typed list called `vendor_contract_list` established `MEASURED_COMPLETE` exactly as a real listing would | `resolve_expected_universe` reopens the named records, re-derives the identities and compares. Fake ids, wrong identities and non-enumerating endpoints all fail |
+| 7 | `complete_for_request` was read nowhere | One page of a listing reported the whole chain complete | Two new statuses — `PARTIAL_UNIVERSE_ALL_LISTED_PRESENT` and `PARTIAL_UNIVERSE_MISSING_IDENTITIES` — and `implies_complete` is false for both |
+| 8 | The operation fingerprint was compared, never recomputed | Editing `requested_as_of` and leaving the digest alone verified cleanly | `verify_capture` rebuilds the identity from the stored fields and recomputes the digest: `OPERATION_FINGERPRINT_MISMATCH` |
+| 9 | `observe_field` always read `records_for(endpoint)[0]` | Evidence about page two was confirmed against page one's bytes | Both `observe_field` and `confirm_field` take and assert `record_id` |
+| 10 | A stamped digest named an object nobody stored | Replay worked only while the caller still held the original in memory | A content-addressed `ArtifactStore`, keyed by the artifact's own hash so the stamped digest *is* the lookup key |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | — |
+| `EXPECTED_MODEL_FINGERPRINT` | `79f3abe506978342` | `6accfab618292203` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `128acd06...` | `d0be7199...` | `REPRESENTATIONAL` |
+
+Both measured rather than asserted, and separately.
+
+Pinning `model_version` back to `gex-engine/2.1.8` reproduces
+`79f3abe506978342c52b31481f16f7ff61ac6f4824b586d4d7020a37a4e73d83` exactly, so
+the model fingerprint moved on the version string.
+
+The output hash covers the serialised snapshot, which includes the
+chain-completeness *report*, and v2.1.9 adds one key to it:
+`expected_complete_for_request`. Removing that single key from the payload and
+re-hashing reproduces `128acd06...` exactly — so nothing else moved. Every
+numeric literal in the reference case is unchanged and all of them still hold:
+59,228,408,806.90227 unsigned, −24,836,100,698.992706 signed, 93.857 confidence,
+250 contracts, 1,263,165 open interest, 5039.1337825 primary zero-gamma root.
+
+### Behavioural changes worth knowing
+
+* **`compute_trusted_gex` takes neither settlement evidence nor an expected
+  universe.** It takes `manifest`, `store`, `artifact_store` and an optional
+  `open_interest_provenance`, and recovers the rest from the capture operation.
+* **A capture opened without a settlement rule can never produce a trusted GEX.**
+  It remains fully usable for raw storage, diagnostic calculation and
+  vendor-schema research. This is the shipped production state: no ThetaData
+  settlement document has been read (OD-26).
+* `capture_session` takes `settlement_rule` and `artifact_store`, and no longer
+  takes `open_interest_as_of` — the date is what the rule derives.
+* `fetch_chain` uses the session's universe and settlement date automatically.
+  Passing `expected_contract_ids` alongside a session that owns a universe is
+  refused rather than merged.
+* `ExpectedContractUniverse` moved to `src.domain.expected_universe` and takes a
+  `source_kind` rather than a `source` string. The copy in
+  `src.domain.completeness` is gone.
+* `ScheduleDerivation` no longer carries `derived_settlement_date`. A derivation
+  that stated its own answer would be the same defect one level down.
+* Captures written by v2.1.8 do not carry
+  `spot_synchronization_policy_fingerprint` and so cannot have their operation
+  digest recomputed; they are refused rather than exempted.
+
 ## 2.1.8 - capture-operation and normalization-input binding
 
 v2.1.7 re-derived the chain from the raw bytes and compared the two. That closed

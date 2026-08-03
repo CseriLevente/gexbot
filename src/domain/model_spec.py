@@ -28,7 +28,7 @@ from src.domain.iv import IVSource
 # 2.1.0: an explicitly configured zero rate or dividend is now honoured rather
 # than falling through to the snapshot value. That genuinely changes numbers for
 # any config that relied on the old behaviour, so the version moves with it.
-MODEL_VERSION = "gex-engine/2.1.8"
+MODEL_VERSION = "gex-engine/2.1.9"
 
 SECONDS_PER_DAY = 86_400.0
 

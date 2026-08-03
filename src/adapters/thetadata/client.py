@@ -1091,6 +1091,10 @@ class ChainAssemblyInputs:
     #: one, completeness is only partially observed -- see ChainCompleteness.
     expected_contract_ids: tuple[str, ...] | None = None
     expected_source: str = "none"
+    #: Whether that source enumerated the whole request or one page of it. A
+    #: page can still find a hole in what it listed; it cannot say the chain is
+    #: whole, and v2.1.8 carried this on the universe and read it nowhere.
+    expected_complete_for_request: bool = True
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1326,6 +1330,7 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
         received_iv_count=len(inputs.first_order_rows),
         received_greeks_count=len(inputs.second_order_rows),
         expected_contract_ids=inputs.expected_contract_ids,
+        expected_complete_for_request=inputs.expected_complete_for_request,
         received_contract_ids=tuple(sorted(joined_ids)),
         expected_source=inputs.expected_source,
         missing_by_source={
@@ -1627,6 +1632,7 @@ class ThetaDataClient:
         capture: CaptureSession | None = None,
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
+        expected_complete_for_request: bool = True,
     ) -> ChainSnapshot:
         """Pull and join a full chain.
 
@@ -1671,6 +1677,7 @@ class ThetaDataClient:
                 duplicate_policy=duplicate_policy,
                 expected_contract_ids=expected_contract_ids,
                 expected_source=expected_source,
+                expected_complete_for_request=expected_complete_for_request,
                 meta={"thetadata_request": self.effective_request_parameters()},
             )
         )

@@ -136,13 +136,20 @@ def test_an_integer_override_cannot_claim_completeness():
 
 
 def test_a_typed_universe_can_establish_measured_completeness():
-    from src.domain.completeness import ExpectedContractUniverse
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
 
     identities = tuple(cid(k) for k in (4900, 4910))
     universe = ExpectedContractUniverse(
         identities=frozenset(identities),
-        source="contract_list",
+        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
         observed_at=datetime.now(tz=AS_OF.tzinfo),
+        documentation_evidence_id="fixture-listed-universe",
+        # Verified: these tests are about identity arithmetic, and an
+        # unverified universe establishes nothing by design.
+        evidence_fingerprint="v" * 64,
     )
     snapshot = compute_gex_snapshot(
         assemble_chain(build([4900, 4910])), expected_universe=universe
@@ -151,12 +158,19 @@ def test_a_typed_universe_can_establish_measured_completeness():
 
 
 def test_a_typed_universe_with_wrong_identities_stays_incomplete():
-    from src.domain.completeness import ExpectedContractUniverse
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
 
     universe = ExpectedContractUniverse(
         identities=frozenset(cid(k) for k in (5100, 5110)),
-        source="contract_list",
+        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
         observed_at=datetime.now(tz=AS_OF.tzinfo),
+        documentation_evidence_id="fixture-listed-universe",
+        # Verified: these tests are about identity arithmetic, and an
+        # unverified universe establishes nothing by design.
+        evidence_fingerprint="v" * 64,
     )
     snapshot = compute_gex_snapshot(
         assemble_chain(build([4900, 4910])), expected_universe=universe
@@ -214,7 +228,11 @@ def test_missing_identities_are_listed_per_source():
 
 
 def test_equivalent_strike_spellings_produce_one_expected_identity():
-    from src.domain.completeness import ExpectedContractUniverse, contract_identity
+    from src.domain.completeness import contract_identity
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
 
     a = contract_identity(
         symbol="SPXW", expiry="2026-03-20", strike="5000", right="call"
@@ -224,9 +242,12 @@ def test_equivalent_strike_spellings_produce_one_expected_identity():
     )
     assert a == b
     universe = ExpectedContractUniverse(
-        identities=frozenset({a, b}), source="contract_list", observed_at=AS_OF
+        identities=frozenset({a, b}),
+        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
+        observed_at=AS_OF,
+        documentation_evidence_id="fixture-listed-universe",
     )
-    assert len(universe.identities) == 1
+    assert len(universe.identity_set) == 1
 
 
 def test_expected_and_received_identities_use_the_same_form():
@@ -251,7 +272,11 @@ def test_a_bad_expected_strike_is_refused(strike):
 def test_formatting_cannot_manufacture_a_false_missing_identity():
     """The failure this normalisation prevents: an expected "5000.00" and a
     received "5000" reading as one missing and one unexpected."""
-    from src.domain.completeness import ExpectedContractUniverse, contract_identity
+    from src.domain.completeness import contract_identity
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
 
     universe = ExpectedContractUniverse(
         identities=frozenset(
@@ -261,8 +286,10 @@ def test_formatting_cannot_manufacture_a_false_missing_identity():
                 )
             }
         ),
-        source="contract_list",
+        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
         observed_at=AS_OF,
+        documentation_evidence_id="fixture-listed-universe",
+        evidence_fingerprint="v" * 64,
     )
     snapshot = compute_gex_snapshot(
         assemble_chain(build([4900])), expected_universe=universe

@@ -11,10 +11,10 @@ Anything added here that breaks purity breaks the replay test along with it.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any
 
 from src.domain.completeness import ChainCompleteness
 from src.domain.contracts import ChainSnapshot
+from src.domain.expected_universe import ExpectedContractUniverse
 from src.domain.gex import ExpiryBucket, GexSnapshot, IVConvention
 from src.domain.model_spec import (
     SENSITIVITY_FLOORS_MINUTES,
@@ -46,23 +46,34 @@ from src.gex.zero_gamma import compute_zero_gamma
 
 
 def resolve_chain_completeness(
-    snapshot: ChainSnapshot, expected_universe: Any = None
+    snapshot: ChainSnapshot, expected_universe: ExpectedContractUniverse | None = None
 ) -> ChainCompleteness:
     """The identity measure this snapshot will be scored against.
 
-    A caller-supplied ``ExpectedContractUniverse`` takes precedence: it is an
-    independent statement of which contracts should have arrived, which is
-    exactly what the adapter usually lacks. Otherwise the adapter's own measure
-    is reused, and failing that an unmeasured one is built so the scorer sees
+    An ``ExpectedContractUniverse`` takes precedence: it is an independent
+    statement of which contracts should have arrived, which is exactly what the
+    adapter usually lacks. Otherwise the adapter's own measure is reused, and
+    failing that an unmeasured one is built so the scorer sees
     ``PARTIALLY_OBSERVED`` rather than nothing.
 
     v2.1.2 accepted ``expected_contract_count: int`` here. A count cannot say
     *which* contracts were expected, so no integer -- however large -- could
     establish that the right ones arrived.
+
+    Typed since v2.1.9, and the annotation is load-bearing rather than
+    decorative: while this was ``Any`` there were two ``ExpectedContractUniverse``
+    classes in the repository with different fields, and this function read the
+    one that carried no provenance.
     """
     received = tuple(sorted(q.contract.canonical_id for q in snapshot.quotes))
 
     if expected_universe is not None:
+        if not isinstance(expected_universe, ExpectedContractUniverse):
+            raise TypeError(
+                f"expected_universe must be an ExpectedContractUniverse, got "
+                f"{type(expected_universe).__name__}. Two types of that name "
+                "coexisted until v2.1.9 and only one of them carried evidence."
+            )
         return ChainCompleteness(
             received_quote_count=len(snapshot.quotes),
             received_oi_count=sum(1 for q in snapshot.quotes if q.open_interest),
@@ -70,9 +81,10 @@ def resolve_chain_completeness(
             received_greeks_count=sum(
                 1 for q in snapshot.quotes if q.gamma is not None
             ),
-            expected_contract_ids=tuple(sorted(expected_universe.identities)),
+            expected_contract_ids=tuple(sorted(expected_universe.identity_set)),
             received_contract_ids=received,
             expected_source=expected_universe.source,
+            expected_complete_for_request=expected_universe.complete_for_request,
         )
 
     # The typed field, not ``meta``. Until v2.1.8 this read
@@ -117,7 +129,7 @@ def compute_gex_snapshot(
     snapshot: ChainSnapshot,
     config: GexEngineConfig | None = None,
     *,
-    expected_universe: Any = None,
+    expected_universe: ExpectedContractUniverse | None = None,
     flow_adjusted_signed_gex: float | None = None,
 ) -> GexSnapshot:
     """Run all five GEX views, the universe accounting and the confidence score.

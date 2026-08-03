@@ -60,13 +60,13 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-PARSER_VERSION = "thetadata-v3-parser/2.1.8"
+PARSER_VERSION = "thetadata-v3-parser/2.1.9"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.8"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.9"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -182,6 +182,10 @@ class CaptureIdentity:
     #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
     expected_universe_fingerprint: str = ""
     open_interest_date_rule_fingerprint: str = ""
+    #: The remaining field the operation digest covers. Stored explicitly since
+    #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
+    #: rather than comparing stored digests to each other and calling it checked.
+    spot_synchronization_policy_fingerprint: str = ""
 
     @property
     def names_an_operation(self) -> bool:
@@ -230,6 +234,9 @@ class CaptureIdentity:
             "open_interest_date_rule_fingerprint": (
                 self.open_interest_date_rule_fingerprint
             ),
+            "spot_synchronization_policy_fingerprint": (
+                self.spot_synchronization_policy_fingerprint
+            ),
         }
 
 
@@ -276,6 +283,10 @@ class RawResponseRecord:
     #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
     expected_universe_fingerprint: str = ""
     open_interest_date_rule_fingerprint: str = ""
+    #: The remaining field the operation digest covers. Stored explicitly since
+    #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
+    #: rather than comparing stored digests to each other and calling it checked.
+    spot_synchronization_policy_fingerprint: str = ""
 
     @property
     def capture_identity(self) -> CaptureIdentity:
@@ -295,6 +306,9 @@ class RawResponseRecord:
             expected_universe_fingerprint=self.expected_universe_fingerprint,
             open_interest_date_rule_fingerprint=(
                 self.open_interest_date_rule_fingerprint
+            ),
+            spot_synchronization_policy_fingerprint=(
+                self.spot_synchronization_policy_fingerprint
             ),
         )
 
@@ -790,6 +804,9 @@ class InMemoryRawStore:
             open_interest_date_rule_fingerprint=(
                 identity.open_interest_date_rule_fingerprint if identity else ""
             ),
+            spot_synchronization_policy_fingerprint=(
+                identity.spot_synchronization_policy_fingerprint if identity else ""
+            ),
         )
         self._records[record_id] = record
         self._payloads[record_id] = payload
@@ -913,6 +930,9 @@ class FileRawStore:
             ),
             open_interest_date_rule_fingerprint=(
                 identity.open_interest_date_rule_fingerprint if identity else ""
+            ),
+            spot_synchronization_policy_fingerprint=(
+                identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
         )
         # Atomic write: temp file -> flush -> fsync -> rename. A crash midway
@@ -1199,6 +1219,9 @@ class FileRawStore:
                     open_interest_date_rule_fingerprint=data.get(
                         "open_interest_date_rule_fingerprint", ""
                     ),
+                    spot_synchronization_policy_fingerprint=data.get(
+                        "spot_synchronization_policy_fingerprint", ""
+                    ),
                 )
             )
         return tuple(out)
@@ -1267,6 +1290,9 @@ class NullRawStore:
             ),
             open_interest_date_rule_fingerprint=(
                 identity.open_interest_date_rule_fingerprint if identity else ""
+            ),
+            spot_synchronization_policy_fingerprint=(
+                identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
         )
 
@@ -1483,7 +1509,32 @@ class CaptureSession:
     #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
     expected_universe_fingerprint: str = ""
     open_interest_date_rule_fingerprint: str = ""
+    #: The remaining field the operation digest covers. Stored explicitly since
+    #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
+    #: rather than comparing stored digests to each other and calling it checked.
+    spot_synchronization_policy_fingerprint: str = ""
+    #: The artifacts those two digests name. Carried on the session so a fetch
+    #: needs no repetition of what the session already knows, and so replay
+    #: recovers the objects rather than only the digests naming them.
+    #:
+    #: ``settlement_artifact is None`` is the honest state of every capture this
+    #: repository can currently take, and it is what makes such a capture
+    #: permanently ineligible for a trusted GEX: since v2.1.9 nothing downstream
+    #: accepts a settlement rule, so there is no later opportunity to supply one.
+    settlement_artifact: Any = None
+    expected_universe: Any = None
     _sequence: int = 0
+
+    @property
+    def establishes_a_settlement_date(self) -> bool:
+        """Whether a trusted calculation on this capture is even possible."""
+        return self.settlement_artifact is not None
+
+    @property
+    def settlement_date(self) -> Any:
+        """The date this operation's rule derived, or ``None``."""
+        artifact = self.settlement_artifact
+        return artifact.resolved_settlement_date if artifact is not None else None
 
     @property
     def identity(self) -> CaptureIdentity:
@@ -1504,6 +1555,9 @@ class CaptureSession:
             expected_universe_fingerprint=self.expected_universe_fingerprint,
             open_interest_date_rule_fingerprint=(
                 self.open_interest_date_rule_fingerprint
+            ),
+            spot_synchronization_policy_fingerprint=(
+                self.spot_synchronization_policy_fingerprint
             ),
         )
 
@@ -1622,6 +1676,10 @@ class ManifestRecord:
     #: capture could be scored MEASURED_COMPLETE and replayed PARTIALLY_OBSERVED.
     expected_universe_fingerprint: str = ""
     open_interest_date_rule_fingerprint: str = ""
+    #: The remaining field the operation digest covers. Stored explicitly since
+    #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
+    #: rather than comparing stored digests to each other and calling it checked.
+    spot_synchronization_policy_fingerprint: str = ""
 
     @property
     def capture_identity(self) -> CaptureIdentity:
@@ -1641,6 +1699,9 @@ class ManifestRecord:
             expected_universe_fingerprint=self.expected_universe_fingerprint,
             open_interest_date_rule_fingerprint=(
                 self.open_interest_date_rule_fingerprint
+            ),
+            spot_synchronization_policy_fingerprint=(
+                self.spot_synchronization_policy_fingerprint
             ),
         )
 
@@ -1675,6 +1736,9 @@ class ManifestRecord:
             expected_universe_fingerprint=record.expected_universe_fingerprint,
             open_interest_date_rule_fingerprint=(
                 record.open_interest_date_rule_fingerprint
+            ),
+            spot_synchronization_policy_fingerprint=(
+                record.spot_synchronization_policy_fingerprint
             ),
         )
 

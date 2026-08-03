@@ -29,6 +29,21 @@ resolved dimension. Every attestation referencing this file uses
 | `MINIMUM_TIME_FLOOR` | the vendor floors time to expiry at 60 minutes |
 | `SOLVER_VERSION` | the vendor exposes no solver version |
 
+## Settlement convention (also fabricated)
+
+| Rule | Invented answer |
+| --- | --- |
+| open-interest settlement session | the prior trading session, on the US equity/index-option calendar |
+
+Registered by `tests/certification_fixtures.py` as a `DocumentationRule` with
+typed `SettlementRule` semantics, so the tests exercise the production path that
+*derives* a settlement date from a session date. Since v2.1.9 a documentation
+rule cannot supply a date; it can only state a convention that computes one.
+
+`src/adapters/evidence_resolvers.py::DOCUMENTATION_RULES` is empty in
+production, and `test_the_production_registry_holds_no_thetadata_settlement_rule`
+fails the build if a rule about ThetaData appears there.
+
 When a real comparison is eventually run, its output replaces this file and the
 attestations move to `LIVE_COMPARISON`. Until then, every number this repository
 produces from vendor IV carries the caveat recorded in

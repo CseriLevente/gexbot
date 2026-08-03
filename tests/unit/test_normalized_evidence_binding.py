@@ -61,14 +61,38 @@ def refuses(taken, chain, match=r"(?i)re-derived|rederiv"):
 
 
 def test_the_chain_is_rebuilt_from_the_stored_bytes_and_matches():
-    """The gate must leave a path through it, and the path is re-derivation."""
+    """The gate must leave a path through it, and the path is re-derivation.
+
+    The recipe carries the settlement date the *capture* derived. Since v2.1.9
+    that date is stamped on every contract, so a rebuild that omitted it would
+    produce a chain differing from the original in exactly that field -- which
+    is the check working, not a fixture detail.
+    """
     taken = captured_chain()
-    recipe = taken.pipeline.normalization_recipe(as_of=taken.chain.as_of)
+    recipe = taken.pipeline.normalization_recipe(
+        as_of=taken.chain.as_of,
+        open_interest_as_of=taken.settlement_artifact.resolved_settlement_date,
+    )
     rebuilt = taken.pipeline.rebuild_chain_from_capture(
         manifest=taken.manifest, store=taken.store, recipe=recipe
     )
     assert canonical_chain_hash(rebuilt) == canonical_chain_hash(taken.chain)
     assert len(rebuilt.quotes) == len(taken.chain.quotes)
+
+
+def test_the_rebuilt_chain_carries_the_captures_settlement_date():
+    """§4. The resolved date reaches every contract, original and replay alike."""
+    taken = captured_chain()
+    expected = taken.settlement_artifact.resolved_settlement_date
+    assert {q.timestamps.open_interest_as_of for q in taken.chain.quotes} == {expected}
+
+    recipe = taken.pipeline.normalization_recipe(
+        as_of=taken.chain.as_of, open_interest_as_of=expected
+    )
+    rebuilt = taken.pipeline.rebuild_chain_from_capture(
+        manifest=taken.manifest, store=taken.store, recipe=recipe
+    )
+    assert {q.timestamps.open_interest_as_of for q in rebuilt.quotes} == {expected}
 
 
 def test_the_reproduced_regression_adding_999999_open_interest():
@@ -329,8 +353,12 @@ def test_an_oi_value_cannot_be_a_fraction_or_negative():
 
 
 def test_a_caller_assumed_settlement_date_blocks_a_trusted_calculation():
-    """The regression. v2.1.6 graded this OBSERVED by confirming the *value*."""
-    taken = captured_chain()
+    """The regression. v2.1.6 graded this OBSERVED by confirming the *value*.
+
+    Expressed differently since v2.1.9 and blocking for the same reason: a
+    caller assumption is not something a capture can be opened under, so a
+    capture resting on one has no settlement artifact at all.
+    """
     assumed = OpenInterestAsOfEvidence(
         as_of=date(2026, 3, 16),
         source="caller",
@@ -338,23 +366,18 @@ def test_a_caller_assumed_settlement_date_blocks_a_trusted_calculation():
         chain_date=AS_OF.date(),
     )
     assert not assumed.permits_trusted_calculation
-    with pytest.raises(PipelineConsistencyError, match=r"(?i)settlement date"):
-        taken.pipeline.compute_trusted_gex(
-            taken.chain,
-            **trusted_evidence(taken, open_interest_as_of_evidence=assumed),
-        )
+
+    taken = captured_chain(settlement_rule=None)
+    with pytest.raises(PipelineConsistencyError, match=r"(?i)settlement rule"):
+        taken.pipeline.compute_trusted_gex(taken.chain, **trusted_evidence(taken))
 
 
 def test_no_settlement_date_evidence_is_treated_as_an_assumption():
     """Silence is not a vendor statement."""
-    taken = captured_chain()
-    context = context_for(taken, open_interest_as_of_evidence=None)
-    assert context.open_interest_as_of_evidence is not None
-    assert (
-        context.open_interest_as_of_evidence.evidence_kind
-        is EvidenceKind.CALLER_ASSUMPTION
-    )
-    assert any("settlement date" in f for f in context.failures)
+    taken = captured_chain(settlement_rule=None)
+    context = context_for(taken, settlement_artifact=None)
+    assert context.settlement_artifact is None
+    assert any("settlement rule" in f for f in context.failures)
 
 
 def test_a_caller_assumption_still_permits_a_diagnostic():

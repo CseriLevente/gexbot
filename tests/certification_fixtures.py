@@ -305,7 +305,8 @@ def captured_chain(
     pipeline: ThetaDataResearchPipeline | None = None,
     *,
     store: Any = None,
-    expected_universe: Any = None,
+    verified_expected_universe: Any = None,
+    declared_expected_universe: Any = None,
     settlement_rule: Any = _UNSET,
     as_of: Any = None,
 ) -> CapturedChain:
@@ -315,13 +316,16 @@ def captured_chain(
     in ``chain.meta``, so the two agree by construction rather than by a fixture
     saying they do.
 
-    ``expected_universe`` and ``settlement_rule`` are declared on the *session*,
-    not on the calculation: since v2.1.9 both are fixed before any response
-    arrives and neither can be supplied afterwards. The default settlement rule
-    is the registered fixture documentation rule, because most tests here are
-    about something else and would otherwise be blocked by OD-26. Passing
-    ``settlement_rule=None`` is how a test asks for the honest production state:
-    a capture that established no rule.
+    The universe and the settlement rule are fixed on the *session*, before any
+    response arrives, and neither can be supplied afterwards. The default
+    settlement rule is the registered fixture documentation rule, because most
+    tests here are about something else and would otherwise be blocked by OD-26.
+    Passing ``settlement_rule=None`` asks for the honest production state: a
+    capture that established no rule.
+
+    Two universe parameters since v2.1.10. ``verified_expected_universe`` takes
+    a resolved artifact; ``declared_expected_universe`` takes an unresolved
+    declaration and records it as diagnostic-only.
     """
     from src.adapters.artifact_store import InMemoryArtifactStore
 
@@ -329,8 +333,10 @@ def captured_chain(
     raw_store = store if store is not None else durable_store()
     moment = as_of if as_of is not None else AS_OF
     artifacts = InMemoryArtifactStore()
+    from src.gex.sessions import market_session_date
+
     rule = (
-        documented_settlement_rule(moment.date())
+        documented_settlement_rule(market_session_date(moment))
         if settlement_rule is _UNSET
         else settlement_rule
     )
@@ -338,7 +344,8 @@ def captured_chain(
         store=raw_store,
         session_id=f"fetch-{id(raw_store):x}",
         as_of=moment,
-        expected_universe=expected_universe,
+        verified_expected_universe=verified_expected_universe,
+        declared_expected_universe=declared_expected_universe,
         settlement_rule=rule,
         artifact_store=artifacts,
     )
@@ -357,7 +364,7 @@ def captured_chain(
         pipeline=built,
         artifacts=artifacts,
         settlement_artifact=rule,
-        expected_universe=expected_universe,
+        expected_universe=verified_expected_universe,
     )
 
 
@@ -435,9 +442,10 @@ def documented_settlement_rule(chain_date: date | None = None):
         settlement_artifact_from,
     )
     from src.adapters.open_interest import EvidenceKind
+    from src.gex.sessions import market_session_date
 
     register_fixture_documentation_rule()
-    session = chain_date or AS_OF.date()
+    session = chain_date or market_session_date(AS_OF)
     resolved = resolve_settlement_date(
         chain_session_date=session,
         evidence_kind=EvidenceKind.AUTHORITATIVE_VENDOR_DOCUMENTATION,

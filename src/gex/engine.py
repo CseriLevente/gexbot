@@ -14,13 +14,13 @@ from collections import Counter
 
 from src.domain.completeness import ChainCompleteness
 from src.domain.contracts import ChainSnapshot
-from src.domain.expected_universe import ExpectedContractUniverse
 from src.domain.gex import ExpiryBucket, GexSnapshot, IVConvention
 from src.domain.model_spec import (
     SENSITIVITY_FLOORS_MINUTES,
     FloorSensitivityEntry,
     FloorSensitivityReport,
 )
+from src.domain.universe_artifact import VerifiedExpectedUniverseArtifact
 from src.gex.confidence import (
     ConfidenceInputs,
     compare_root_topology,
@@ -46,7 +46,8 @@ from src.gex.zero_gamma import compute_zero_gamma
 
 
 def resolve_chain_completeness(
-    snapshot: ChainSnapshot, expected_universe: ExpectedContractUniverse | None = None
+    snapshot: ChainSnapshot,
+    expected_universe: VerifiedExpectedUniverseArtifact | None = None,
 ) -> ChainCompleteness:
     """The identity measure this snapshot will be scored against.
 
@@ -68,11 +69,13 @@ def resolve_chain_completeness(
     received = tuple(sorted(q.contract.canonical_id for q in snapshot.quotes))
 
     if expected_universe is not None:
-        if not isinstance(expected_universe, ExpectedContractUniverse):
+        if not isinstance(expected_universe, VerifiedExpectedUniverseArtifact):
             raise TypeError(
-                f"expected_universe must be an ExpectedContractUniverse, got "
-                f"{type(expected_universe).__name__}. Two types of that name "
-                "coexisted until v2.1.9 and only one of them carried evidence."
+                f"expected_universe must be a VerifiedExpectedUniverseArtifact, "
+                f"got {type(expected_universe).__name__}. An "
+                "ExpectedContractUniverse is a *declaration* -- what somebody "
+                "expects -- and until v2.1.10 the engine measured against it as "
+                "though a resolver had checked it."
             )
         return ChainCompleteness(
             received_quote_count=len(snapshot.quotes),
@@ -84,7 +87,12 @@ def resolve_chain_completeness(
             expected_contract_ids=tuple(sorted(expected_universe.identity_set)),
             received_contract_ids=received,
             expected_source=expected_universe.source,
-            expected_complete_for_request=expected_universe.complete_for_request,
+            # Typed evidence, so independence follows from what a resolver
+            # established rather than from how the source was spelled.
+            universe_artifact_hash=expected_universe.artifact_hash,
+            universe_evidence_fingerprint=expected_universe.evidence_fingerprint,
+            coverage_status=expected_universe.coverage_status.value,
+            resolver_version=expected_universe.resolver_version,
         )
 
     # The typed field, not ``meta``. Until v2.1.8 this read
@@ -129,7 +137,7 @@ def compute_gex_snapshot(
     snapshot: ChainSnapshot,
     config: GexEngineConfig | None = None,
     *,
-    expected_universe: ExpectedContractUniverse | None = None,
+    expected_universe: VerifiedExpectedUniverseArtifact | None = None,
     flow_adjusted_signed_gex: float | None = None,
 ) -> GexSnapshot:
     """Run all five GEX views, the universe accounting and the confidence score.

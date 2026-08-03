@@ -209,13 +209,31 @@ class ChainCompleteness:
     expected_contract_ids: tuple[str, ...] | None = None
     #: Identities that actually joined into contracts.
     received_contract_ids: tuple[str, ...] = ()
+    #: Human-readable label only. **Nothing decides anything from this.** Until
+    #: v2.1.10 independence was inferred from it -- a chain carrying
+    #: ``expected_source="VENDOR_CONTRACT_LIST"`` was independently observed on
+    #: the strength of the string -- which is a check on how a value was spelled.
     expected_source: str = "none"
     missing_by_source: dict[str, int] = field(default_factory=dict)
-    #: Whether the source claimed to enumerate the *whole* request. False for a
-    #: page of a paginated listing. v2.1.8 carried this on the universe and read
-    #: it nowhere, so a page-one listing whose members all arrived reported
-    #: ``MEASURED_COMPLETE`` for the entire chain.
-    expected_complete_for_request: bool = True
+
+    # -- typed evidence, from the verified artifact --------------------------
+    #
+    # These four are what independence and completeness are now decided from.
+    # They arrive together, from ``VerifiedExpectedUniverseArtifact``, and there
+    # is no way to set them by describing a universe: the artifact type refuses
+    # a coverage status its source kind cannot support.
+
+    #: Hash of the verified artifact this was measured against. ``None`` when
+    #: no artifact was resolved, which is the honest common case.
+    universe_artifact_hash: str | None = None
+    #: Digest of what established that artifact -- which bytes, which pages.
+    universe_evidence_fingerprint: str | None = None
+    #: How much of the *request* the source enumerated. The replacement for
+    #: v2.1.9's ``complete_for_request: bool``, which was a caller argument.
+    coverage_status: str = "UNKNOWN_COVERAGE"
+    #: Which resolver produced the coverage state, so a state established under
+    #: older rules is refused rather than compared against newer ones.
+    resolver_version: str | None = None
 
     #: Identity lists are truncated in serialised metadata at this length. A
     #: 5,000-contract mismatch is a real possibility on a full SPX chain, and a
@@ -292,31 +310,46 @@ class ChainCompleteness:
     def completeness_ratio(self) -> float | None:
         return self.identity_completeness_ratio
 
-    #: Expected-source labels that are not independent statements about the
-    #: vendor. ``quote_response`` takes the expectation from the thing being
-    #: judged; ``CALLER_DECLARED`` is somebody's list, which is a legitimate
-    #: thing to hold and not evidence about what the vendor sent.
-    #:
-    #: ``snapshot_declared`` is deliberately *not* here. It is set only where a
-    #: snapshot already carries a measured status -- a synthetic chain that
-    #: constructed its own universe, which really does know it -- and the engine
-    #: is reconstructing that measure rather than inventing one.
-    NON_INDEPENDENT_SOURCES = frozenset({"none", "quote_response", "CALLER_DECLARED"})
+    #: A synthetic chain that constructed its own universe really does know it,
+    #: and the engine reconstructs that measure rather than inventing one. It is
+    #: the one label that still carries weight, and it never comes from a
+    #: vendor capture.
+    SYNTHETIC_DECLARED_SOURCE = "snapshot_declared"
+
+    @property
+    def _coverage(self) -> Any:
+        from src.domain.expected_universe import UniverseCoverageStatus
+
+        try:
+            return UniverseCoverageStatus(self.coverage_status)
+        except ValueError:
+            return UniverseCoverageStatus.UNKNOWN_COVERAGE
 
     @property
     def independently_observed(self) -> bool:
-        """False when the expectation came from the response, or from a caller."""
-        return (
-            self.expected_contract_ids is not None
-            and self.expected_source not in self.NON_INDEPENDENT_SOURCES
-        )
+        """Whether a *verified artifact* backed the expectation.
+
+        Typed since v2.1.10. It used to be ``expected_source not in
+        {"none", "quote_response", "CALLER_DECLARED"}`` -- a check on how a
+        string was spelled, so a chain labelled ``VENDOR_CONTRACT_LIST`` with no
+        artifact behind it was independently observed.
+
+        The synthetic exception is deliberate and narrow: a generated chain
+        constructed its own universe, so it genuinely knows it, and no vendor
+        capture can produce that label.
+        """
+        if self.expected_contract_ids is None:
+            return False
+        if self.expected_source == self.SYNTHETIC_DECLARED_SOURCE:
+            return True
+        return bool(self.universe_artifact_hash) and self._coverage.is_verified
 
     @property
     def status(self) -> CompletenessStatus:
         """Measurement or absence. Never "complete" on the strength of counts."""
         if not self.independently_observed:
-            # An expectation taken from the response being judged, or typed by
-            # the caller, is not an independent expectation. Rows arrived and
+            # An expectation taken from the response being judged, typed by the
+            # caller, or never verified against anything. Rows arrived and
             # joined; whether more were owed is unknowable from here.
             return (
                 CompletenessStatus.UNKNOWN
@@ -326,7 +359,15 @@ class ChainCompleteness:
         if not self._expected:
             # A universe was supplied and claimed nothing. Nothing is measured.
             return CompletenessStatus.UNKNOWN
-        if not self.expected_complete_for_request:
+
+        coverage = self._coverage
+        synthetic = self.expected_source == self.SYNTHETIC_DECLARED_SOURCE
+        if not synthetic and not coverage.establishes_completeness:
+            if not coverage.detects_missing_identities:
+                # An observed subset: every identity in it arrived, and it never
+                # claimed to be exhaustive. Useful for diagnostics, and it
+                # cannot report on contracts it never listed.
+                return CompletenessStatus.PARTIALLY_OBSERVED
             # A page, not the request. It can still find a hole in what it
             # listed, and it cannot say the chain is whole.
             return (
@@ -362,7 +403,10 @@ class ChainCompleteness:
         return {
             "status": self.status.value,
             "expected_source": self.expected_source,
-            "expected_complete_for_request": self.expected_complete_for_request,
+            "coverage_status": self.coverage_status,
+            "universe_artifact_hash": self.universe_artifact_hash,
+            "universe_evidence_fingerprint": self.universe_evidence_fingerprint,
+            "resolver_version": self.resolver_version,
             "independently_observed": self.independently_observed,
             "expected_contract_ids": (
                 sorted(self.expected_contract_ids)
@@ -389,7 +433,10 @@ class ChainCompleteness:
         return {
             "expected_contract_count": self.expected_contract_count,
             "expected_source": self.expected_source,
-            "expected_complete_for_request": self.expected_complete_for_request,
+            "coverage_status": self.coverage_status,
+            "universe_artifact_hash": self.universe_artifact_hash,
+            "universe_evidence_fingerprint": self.universe_evidence_fingerprint,
+            "resolver_version": self.resolver_version,
             "received_quote_count": self.received_quote_count,
             "received_oi_count": self.received_oi_count,
             "received_iv_count": self.received_iv_count,

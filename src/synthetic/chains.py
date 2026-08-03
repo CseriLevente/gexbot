@@ -37,7 +37,7 @@ from src.domain.model_spec import ModelSpec
 from src.domain.timestamps import ContractTimestamps
 from src.gex.pricing import BlackScholesInputs
 from src.gex.pricing import gamma as bs_gamma
-from src.gex.sessions import eastern, seconds_to_expiry
+from src.gex.sessions import eastern, market_session_date, seconds_to_expiry
 
 # A Tuesday, mid-session. 2026-03-20 is the third Friday of that month, so the
 # fixture naturally contains both an AM-settled SPX standard series and several
@@ -276,7 +276,7 @@ def build_single_contract_chain(
                     greeks_timestamp=as_of,
                     iv_timestamp=as_of,
                     underlying_timestamp=as_of,
-                    open_interest_as_of=as_of.date(),
+                    open_interest_as_of=market_session_date(as_of),
                     normalized_at=as_of,
                 ),
                 bid=10.0,

@@ -241,7 +241,48 @@ status is reported as `PARTIALLY_OBSERVED` — never `COMPLETE`.
 repository has verified. Inventing a URL and shipping it as though it were
 confirmed would be worse than reporting the limitation.
 
-**What v2.1.9 changed.** There is now exactly **one**
+**What v2.1.10 changed.** Coverage is a *resolver output*, and the resolver
+refuses what it cannot establish.
+
+The v2.1.9 resolver re-derived identities from the records a universe named --
+necessary, and not the question. Proving a set of identities occurs in stored
+records is not proving those records enumerate the **complete universe the
+request should have returned**, and a truncated response enumerates its own rows
+perfectly. So an `/v3/option/snapshot/quote` response, labelled
+`VENDOR_CONTRACT_LIST`, established `MEASURED_COMPLETE` for the whole chain.
+
+`UniverseCoverageStatus` names what a source actually reached:
+
+| Status | What may rest on it |
+|---|---|
+| `FULL_REQUEST_ENUMERATED` | `MEASURED_COMPLETE`, and analytical readiness |
+| `PARTIAL_PAGE` | a missing listed contract is a finding; completeness is not |
+| `OBSERVED_SUBSET` | diagnostics. The rows arrived; nothing says which were owed |
+| `UNKNOWN_COVERAGE` | nothing |
+
+A caller may record what it *expected* (`declared_coverage`) and nothing reads
+it. `complete_for_request: bool` is gone: it was a constructor argument hashed
+into the universe, which made an assertion look like a finding.
+
+**Which sources can reach which state today.** `ResponseCapabilities` separates
+four questions a response was previously asked as one — does it enumerate rows,
+does it enumerate the *request's* universe, does it carry pagination metadata,
+is it a dedicated listing endpoint. Every ThetaData snapshot answers yes to the
+first and no to the rest, so:
+
+* `VENDOR_CONTRACT_LIST` — **unsupported**. No verified listing endpoint exists;
+* `CAPTURED_PAGINATION_METADATA` — **unsupported**. No verified response returns
+  a page, a total or a continuation token, and v2.1.9's resolver for this kind
+  read none of them;
+* `AUTHORITATIVE_DOCUMENTATION` — supported, and the registry is empty;
+* `OBSERVED_SNAPSHOT_ROWS` — supported, reaching `OBSERVED_SUBSET`. Honest,
+  useful, and not completeness.
+
+**So no production capture can measure completeness**, and the shipped profile
+is `NOT_READY_FOR_ANALYTICAL_DATASET`. That is the same limitation this decision
+has always recorded, now stated by a check rather than by prose.
+
+**What v2.1.9 changed.** There is exactly **one**
 `ExpectedContractUniverse` — there were two, and the one the engine read carried
 no provenance — and a universe is *resolved* before it can measure anything:
 `src/adapters/universe_resolvers.py` reopens the records it names, re-derives the
@@ -275,9 +316,11 @@ shaped to fit whatever arrived.
 
 **What would settle it.** A live account, one call to whatever list endpoint the
 subscription actually exposes, and its response shape recorded as a fixture.
-Then build an `ExpectedContractUniverse` from those identities, naming the
-records it was read from, pass it to `capture_session(expected_universe=...)`,
-and completeness becomes measurable.
+Then mark that endpoint `is_dedicated_contract_list=True` in
+`RESPONSE_CAPABILITIES`, capture it, resolve it with
+`resolve_expected_universe`, and pass the resulting artifact to
+`capture_session(verified_expected_universe=...)`. Completeness becomes
+measurable at that point and not before.
 
 ---
 

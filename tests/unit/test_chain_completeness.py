@@ -87,6 +87,26 @@ def greek_row(strike: int, right: str = "call") -> dict[str, str]:
     }
 
 
+#: The typed evidence a verified artifact supplies. Filled in whenever a test
+#: names an independent ``source``, because since v2.1.10 the label alone
+#: establishes nothing -- the artifact hash and the coverage status are what
+#: independence is decided from. A test wanting the unverified case passes
+#: ``source="none"`` and gets no evidence, which is the default.
+#: Labels that stand for a genuinely independent source in these tests.
+#: ``quote_response`` is deliberately absent: taking the expectation from the
+#: response being judged means there is no independent source, which is the v2
+#: defect this file exists for, and since v2.1.10 that shows up as the absence
+#: of a verified artifact rather than as a label on a denylist.
+INDEPENDENT_SOURCES = frozenset({"contract_list"})
+
+VERIFIED_EVIDENCE = {
+    "universe_artifact_hash": "a" * 64,
+    "universe_evidence_fingerprint": "e" * 64,
+    "coverage_status": "FULL_REQUEST_ENUMERATED",
+    "universe_resolver_version": "universe-resolver/2.1.10",
+}
+
+
 def build(strikes, *, expected=None, source="none") -> ChainAssemblyInputs:
     return ChainAssemblyInputs(
         as_of=AS_OF,
@@ -97,6 +117,7 @@ def build(strikes, *, expected=None, source="none") -> ChainAssemblyInputs:
         open_interest_as_of=date(2026, 3, 16),
         expected_contract_ids=expected,
         expected_source=source,
+        **(VERIFIED_EVIDENCE if source in INDEPENDENT_SOURCES else {}),
     )
 
 
@@ -288,6 +309,16 @@ def test_the_client_passes_an_independent_universe_through(monkeypatch):
         open_interest_as_of=date(2026, 3, 16),
         expected_contract_ids=tuple(cid(k) for k in (4950, 4960, 4970)),
         expected_source="contract_list",
+        # The typed evidence a verified artifact supplies. Since v2.1.10 the
+        # label alone leaves the chain PARTIALLY_OBSERVED, which is the point of
+        # the release -- what this test checks is that the client passes the
+        # expectation through rather than inventing one.
+        universe_evidence={
+            "universe_artifact_hash": "a" * 64,
+            "universe_evidence_fingerprint": "e" * 64,
+            "coverage_status": "FULL_REQUEST_ENUMERATED",
+            "universe_resolver_version": "universe-resolver/2.1.10",
+        },
     )
     payload = snapshot.meta["chain_completeness"]
     assert payload["expected_contract_count"] == 3

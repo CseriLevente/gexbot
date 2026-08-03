@@ -227,9 +227,14 @@ def test_the_four_readiness_questions_stay_four_questions():
     # Not ready to be believed.
     assert not result.calculation_trusted
     assert result.calculation_blockers
-    # Not ready to be built on, and the requirements are written down rather
-    # than enforced -- which is the honest state and says so.
+    # Not ready to be built on. Four of the five requirements are written down
+    # rather than enforced -- they need a live session -- and the fifth is
+    # checked, because v2.1.10 made coverage checkable.
     assert AnalyticalReadiness.NOT_ANALYTICALLY_READY.value == "NOT_ANALYTICALLY_READY"
     assert len(ANALYTICAL_DATASET_REQUIREMENTS) == 5
+    assert any(
+        "FULL_REQUEST_ENUMERATED" in requirement
+        for requirement in ANALYTICAL_DATASET_REQUIREMENTS
+    )
     # And certification is unreachable offline, by construction.
     assert result.state is not CertificationState.ADAPTER_CERTIFIED

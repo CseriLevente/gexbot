@@ -101,7 +101,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.9"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.10"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -1235,11 +1235,41 @@ ANALYTICAL_DATASET_REQUIREMENTS = (
     "assumed by this repository (OPEN_DECISIONS OD-26)",
     "pricing compatibility resolved: no load-bearing dimension UNKNOWN or "
     "MISMATCHED in the post-capture report",
-    "chain completeness measured against an independent contract universe, or "
-    "the limitation explicitly modelled (OPEN_DECISIONS OD-11)",
+    "a verified expected universe whose coverage is FULL_REQUEST_ENUMERATED, or "
+    "an explicit written policy for building on a chain known to be incomplete "
+    "(OPEN_DECISIONS OD-11)",
     "no material source exclusions: contracts dropped by validation accounted "
     "for rather than silently absent",
 )
+
+
+def analytical_readiness_of(completeness: Any) -> AnalyticalReadiness:
+    """Whether a chain's completeness could support an analytical dataset.
+
+    One of the five requirements above, checked rather than described --
+    because it is the one v2.1.10 made checkable. The others still depend on a
+    live session and stay prose.
+
+    **Raw-capture readiness deliberately does not consult this.** Bytes are
+    worth collecting whatever their coverage; the whole reason
+    ``AnalyticalReadiness`` is a separate axis is that conflating the two would
+    block the first capture on a question only a capture can answer.
+    """
+    from src.domain.expected_universe import UniverseCoverageStatus
+
+    if completeness is None:
+        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+    try:
+        coverage = UniverseCoverageStatus(
+            getattr(completeness, "coverage_status", "UNKNOWN_COVERAGE")
+        )
+    except ValueError:
+        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+    if not coverage.establishes_completeness:
+        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+    if not getattr(completeness, "independently_observed", False):
+        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+    return AnalyticalReadiness.READY_FOR_ANALYTICAL_DATASET
 
 
 @dataclass(frozen=True, slots=True)

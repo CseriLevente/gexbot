@@ -1091,10 +1091,14 @@ class ChainAssemblyInputs:
     #: one, completeness is only partially observed -- see ChainCompleteness.
     expected_contract_ids: tuple[str, ...] | None = None
     expected_source: str = "none"
-    #: Whether that source enumerated the whole request or one page of it. A
-    #: page can still find a hole in what it listed; it cannot say the chain is
-    #: whole, and v2.1.8 carried this on the universe and read it nowhere.
-    expected_complete_for_request: bool = True
+    #: Typed evidence from the verified universe artifact, where one exists.
+    #: v2.1.9 carried a caller-supplied Boolean here; since v2.1.10 coverage is
+    #: what a resolver established, and independence is decided from these
+    #: rather than from the ``expected_source`` label.
+    universe_artifact_hash: str | None = None
+    universe_evidence_fingerprint: str | None = None
+    coverage_status: str = "UNKNOWN_COVERAGE"
+    universe_resolver_version: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1330,7 +1334,10 @@ def assemble_chain(inputs: ChainAssemblyInputs) -> ChainSnapshot:
         received_iv_count=len(inputs.first_order_rows),
         received_greeks_count=len(inputs.second_order_rows),
         expected_contract_ids=inputs.expected_contract_ids,
-        expected_complete_for_request=inputs.expected_complete_for_request,
+        universe_artifact_hash=inputs.universe_artifact_hash,
+        universe_evidence_fingerprint=inputs.universe_evidence_fingerprint,
+        coverage_status=inputs.coverage_status,
+        resolver_version=inputs.universe_resolver_version,
         received_contract_ids=tuple(sorted(joined_ids)),
         expected_source=inputs.expected_source,
         missing_by_source={
@@ -1632,7 +1639,7 @@ class ThetaDataClient:
         capture: CaptureSession | None = None,
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
-        expected_complete_for_request: bool = True,
+        universe_evidence: dict[str, Any] | None = None,
     ) -> ChainSnapshot:
         """Pull and join a full chain.
 
@@ -1677,7 +1684,7 @@ class ThetaDataClient:
                 duplicate_policy=duplicate_policy,
                 expected_contract_ids=expected_contract_ids,
                 expected_source=expected_source,
-                expected_complete_for_request=expected_complete_for_request,
+                **(universe_evidence or {}),
                 meta={"thetadata_request": self.effective_request_parameters()},
             )
         )

@@ -17,7 +17,7 @@ expected, so no integer override can establish measured completeness.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 import pytest
 
@@ -31,6 +31,37 @@ from tests.unit.test_chain_completeness import build, cid
 from tests.unit.test_completeness_confidence import confidence_inputs
 
 AS_OF = eastern(2026, 3, 17, 11, 0)
+
+
+def documented_universe(identities):
+    """A verified artifact standing for a documented contract listing.
+
+    These tests are about identity *arithmetic*: whether two missing and two
+    unexpected cancel, whether ``5000`` and ``5000.00`` are one contract. Since
+    v2.1.10 only a ``VerifiedExpectedUniverseArtifact`` measures completeness,
+    so the artifact is built here rather than resolved -- and its coverage is
+    ``FULL_REQUEST_ENUMERATED`` because a documented listing is the one source
+    kind that could reach it.
+    """
+    from src.domain.expected_universe import (
+        ExpectedUniverseSourceKind,
+        UniverseCoverageStatus,
+    )
+    from src.domain.universe_artifact import VerifiedExpectedUniverseArtifact
+    from src.domain.universe_scope import UniverseRequestScope
+
+    return VerifiedExpectedUniverseArtifact(
+        identities=frozenset(identities),
+        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
+        coverage_status=UniverseCoverageStatus.FULL_REQUEST_ENUMERATED,
+        source_operation_fingerprint="",
+        source_record_ids=(),
+        source_request_spec_fingerprint="",
+        source_scope=UniverseRequestScope(root="SPXW", requested_at=AS_OF),
+        observed_at=AS_OF,
+        evidence_fingerprint="v" * 64,
+        documentation_evidence_id="fixture-listed-universe",
+    )
 
 
 def score_for(snapshot, **overrides):
@@ -136,21 +167,8 @@ def test_an_integer_override_cannot_claim_completeness():
 
 
 def test_a_typed_universe_can_establish_measured_completeness():
-    from src.domain.expected_universe import (
-        ExpectedContractUniverse,
-        ExpectedUniverseSourceKind,
-    )
-
     identities = tuple(cid(k) for k in (4900, 4910))
-    universe = ExpectedContractUniverse(
-        identities=frozenset(identities),
-        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
-        observed_at=datetime.now(tz=AS_OF.tzinfo),
-        documentation_evidence_id="fixture-listed-universe",
-        # Verified: these tests are about identity arithmetic, and an
-        # unverified universe establishes nothing by design.
-        evidence_fingerprint="v" * 64,
-    )
+    universe = documented_universe(identities)
     snapshot = compute_gex_snapshot(
         assemble_chain(build([4900, 4910])), expected_universe=universe
     )
@@ -158,20 +176,7 @@ def test_a_typed_universe_can_establish_measured_completeness():
 
 
 def test_a_typed_universe_with_wrong_identities_stays_incomplete():
-    from src.domain.expected_universe import (
-        ExpectedContractUniverse,
-        ExpectedUniverseSourceKind,
-    )
-
-    universe = ExpectedContractUniverse(
-        identities=frozenset(cid(k) for k in (5100, 5110)),
-        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
-        observed_at=datetime.now(tz=AS_OF.tzinfo),
-        documentation_evidence_id="fixture-listed-universe",
-        # Verified: these tests are about identity arithmetic, and an
-        # unverified universe establishes nothing by design.
-        evidence_fingerprint="v" * 64,
-    )
+    universe = documented_universe(cid(k) for k in (5100, 5110))
     snapshot = compute_gex_snapshot(
         assemble_chain(build([4900, 4910])), expected_universe=universe
     )
@@ -229,10 +234,6 @@ def test_missing_identities_are_listed_per_source():
 
 def test_equivalent_strike_spellings_produce_one_expected_identity():
     from src.domain.completeness import contract_identity
-    from src.domain.expected_universe import (
-        ExpectedContractUniverse,
-        ExpectedUniverseSourceKind,
-    )
 
     a = contract_identity(
         symbol="SPXW", expiry="2026-03-20", strike="5000", right="call"
@@ -241,12 +242,7 @@ def test_equivalent_strike_spellings_produce_one_expected_identity():
         symbol="SPXW", expiry="2026-03-20", strike="5000.00", right="call"
     )
     assert a == b
-    universe = ExpectedContractUniverse(
-        identities=frozenset({a, b}),
-        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
-        observed_at=AS_OF,
-        documentation_evidence_id="fixture-listed-universe",
-    )
+    universe = documented_universe({a, b})
     assert len(universe.identity_set) == 1
 
 
@@ -273,23 +269,13 @@ def test_formatting_cannot_manufacture_a_false_missing_identity():
     """The failure this normalisation prevents: an expected "5000.00" and a
     received "5000" reading as one missing and one unexpected."""
     from src.domain.completeness import contract_identity
-    from src.domain.expected_universe import (
-        ExpectedContractUniverse,
-        ExpectedUniverseSourceKind,
-    )
 
-    universe = ExpectedContractUniverse(
-        identities=frozenset(
-            {
-                contract_identity(
-                    symbol="SPXW", expiry="2026-03-20", strike="4900.00", right="call"
-                )
-            }
-        ),
-        source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
-        observed_at=AS_OF,
-        documentation_evidence_id="fixture-listed-universe",
-        evidence_fingerprint="v" * 64,
+    universe = documented_universe(
+        {
+            contract_identity(
+                symbol="SPXW", expiry="2026-03-20", strike="4900.00", right="call"
+            )
+        }
     )
     snapshot = compute_gex_snapshot(
         assemble_chain(build([4900])), expected_universe=universe

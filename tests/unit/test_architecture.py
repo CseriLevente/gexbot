@@ -350,8 +350,13 @@ def test_exactly_one_expected_contract_universe_type_exists() -> None:
     assert definitions[0].startswith("domain/expected_universe.py")
 
 
-def test_the_gex_engine_takes_a_typed_expected_universe() -> None:
-    """``Any`` is what let two universe types coexist."""
+def test_the_gex_engine_takes_a_verified_universe_artifact() -> None:
+    """``Any`` let two universe types coexist. A *declaration* is the next one.
+
+    An ``ExpectedContractUniverse`` says what somebody expects. Until v2.1.10
+    the engine measured against it as though a resolver had checked it, so the
+    annotation has to name the verified artifact and nothing else.
+    """
     import inspect
 
     from src.gex.engine import compute_gex_snapshot, resolve_chain_completeness
@@ -360,10 +365,90 @@ def test_the_gex_engine_takes_a_typed_expected_universe() -> None:
         annotation = str(
             inspect.signature(function).parameters["expected_universe"].annotation
         )
-        assert "ExpectedContractUniverse" in annotation, (
+        assert "VerifiedExpectedUniverseArtifact" in annotation, (
             f"{function.__name__} annotates expected_universe as {annotation!r}; "
-            "an untyped universe is one nothing can check"
+            "only a resolver-produced artifact may measure completeness"
         )
+        assert "ExpectedContractUniverse" not in annotation
+
+
+def test_no_snapshot_endpoint_is_a_dedicated_contract_list() -> None:
+    """The central v2.1.9 defect, as a rule rather than one deleted branch.
+
+    Its universe resolver accepted any endpoint returning a row per contract as
+    a ``VENDOR_CONTRACT_LIST``, so an ``/v3/option/snapshot/quote`` response
+    established ``MEASURED_COMPLETE`` for the whole request. Having one row per
+    returned contract is not listing every contract the request owed: a
+    truncated response enumerates its own rows perfectly.
+    """
+    from src.adapters.thetadata.endpoints import RESPONSE_CAPABILITIES, Endpoint
+
+    for endpoint, capability in RESPONSE_CAPABILITIES.items():
+        if endpoint.value.startswith(("/v3/option/snapshot", "/v3/index/snapshot")):
+            assert not capability.is_dedicated_contract_list, (
+                f"{endpoint.value} is marked a dedicated contract list. A "
+                "market-data snapshot returns what the vendor sent."
+            )
+            assert not capability.enumerates_request_universe
+    # And the derived set is empty, which is the honest state (OD-11).
+    from src.adapters.thetadata.endpoints import DEDICATED_CONTRACT_LIST_ENDPOINTS
+
+    assert frozenset() == DEDICATED_CONTRACT_LIST_ENDPOINTS
+    assert Endpoint.OPTION_QUOTE_SNAPSHOT.value not in (
+        DEDICATED_CONTRACT_LIST_ENDPOINTS
+    )
+
+
+def test_completeness_independence_is_not_inferred_from_a_string() -> None:
+    """It used to be ``expected_source not in {...}`` -- a spelling check."""
+    source = (SRC / "domain" / "completeness.py").read_text(encoding="utf-8")
+    assert "NON_INDEPENDENT_SOURCES" not in source, (
+        "independence is decided from the verified artifact and its coverage "
+        "status, not from a set of accepted source labels"
+    )
+    assert "universe_artifact_hash" in source
+    assert "coverage_status" in source
+
+
+def test_complete_for_request_is_not_a_caller_argument() -> None:
+    """A Boolean a caller passes is not a coverage measurement.
+
+    v2.1.9 took ``complete_for_request: bool`` in the universe constructor and
+    hashed it, which made an assertion look like a finding.
+    """
+    import inspect
+
+    from src.domain.expected_universe import ExpectedContractUniverse
+
+    parameters = set(inspect.signature(ExpectedContractUniverse).parameters)
+    assert "complete_for_request" not in parameters
+    # What replaces it is explicitly labelled a claim.
+    assert "declared_coverage" in parameters
+
+
+def test_settlement_documentation_cannot_be_universe_documentation() -> None:
+    """Two registries, because they are verified to say different things.
+
+    A content-verified document about open-interest settlement says nothing
+    about which option contracts exist, and v2.1.9's universe resolver looked
+    its evidence id up in the settlement registry.
+    """
+    from src.adapters.evidence_resolvers import DOCUMENTATION_RULES
+    from src.adapters.universe_evidence import UNIVERSE_DOCUMENTATION_RULES
+
+    assert DOCUMENTATION_RULES is not UNIVERSE_DOCUMENTATION_RULES
+    assert type(DOCUMENTATION_RULES) is not type(UNIVERSE_DOCUMENTATION_RULES)
+
+    source = (SRC / "adapters" / "universe_resolvers.py").read_text(encoding="utf-8")
+    assert "DOCUMENTATION_RULES" not in source.replace(
+        "UNIVERSE_DOCUMENTATION_RULES", ""
+    ), "the universe resolver must not consult the settlement rule registry"
+
+
+def test_exactly_one_verified_universe_artifact_type_exists() -> None:
+    definitions = _class_definitions("VerifiedExpectedUniverseArtifact")
+    assert len(definitions) == 1, definitions
+    assert definitions[0].startswith("domain/universe_artifact.py")
 
 
 #: Arguments through which a caller could hand a trusted calculation the
@@ -409,14 +494,37 @@ def test_the_trusted_api_accepts_no_retroactive_authority() -> None:
 
 def test_completeness_cannot_be_measured_from_a_caller_declared_universe() -> None:
     """A list somebody typed is a legitimate thing to hold, and not evidence."""
-    from src.domain.completeness import ChainCompleteness
-    from src.domain.expected_universe import ExpectedUniverseSourceKind
-
-    assert (
-        ExpectedUniverseSourceKind.CALLER_DECLARED.value
-        in ChainCompleteness.NON_INDEPENDENT_SOURCES
+    from src.domain.expected_universe import (
+        ExpectedUniverseSourceKind,
+        UniverseCoverageStatus,
     )
-    assert not ExpectedUniverseSourceKind.CALLER_DECLARED.is_independent_evidence
+
+    kind = ExpectedUniverseSourceKind.CALLER_DECLARED
+    assert not kind.is_independent_evidence
+    # And the most it could ever reach is the state that measures nothing.
+    assert kind.best_possible_coverage is UniverseCoverageStatus.UNKNOWN_COVERAGE
+    assert not kind.best_possible_coverage.establishes_completeness
+
+
+def test_a_chain_capture_cannot_take_an_unresolved_universe_as_evidence() -> None:
+    """The lifecycle: resolve, persist, *then* open the chain operation.
+
+    v2.1.9 took the declaration on ``capture_session`` and verified it at
+    replay, so the chain operation was stamped with the hash of a claim nobody
+    had checked.
+    """
+    import inspect
+
+    from src.config.pipeline import ThetaDataResearchPipeline
+
+    parameters = set(
+        inspect.signature(ThetaDataResearchPipeline.capture_session).parameters
+    )
+    assert "verified_expected_universe" in parameters
+    assert "declared_expected_universe" in parameters
+    # The ambiguous name is gone, so no call site can be unclear about which it
+    # is handing over.
+    assert "expected_universe" not in parameters
 
 
 def test_the_settlement_date_is_a_typed_field_not_a_metadata_key() -> None:

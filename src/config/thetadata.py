@@ -1242,7 +1242,7 @@ class ThetaDataRuntime:
         capture: Any = None,
         expected_contract_ids: tuple[str, ...] | None = None,
         expected_source: str = "none",
-        expected_complete_for_request: bool = True,
+        universe_evidence: dict[str, Any] | None = None,
         pipeline: Any = None,
         manifest_since: int = 0,
         capture_plan_fingerprint: str = "",
@@ -1295,7 +1295,7 @@ class ThetaDataRuntime:
             capture=capture,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
-            expected_complete_for_request=expected_complete_for_request,
+            universe_evidence=universe_evidence,
         )
 
         # Link the normalized chain to the exact raw records it came from.

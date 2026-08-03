@@ -694,3 +694,109 @@ v2.1.9 the first record for the endpoint was always opened, so a claim about
 page two was confirmed against page one's bytes. With one record per endpoint the
 two agree by accident; pagination, partitions and retained retries are exactly
 the cases this repository intends to certify.
+
+---
+
+## v2.1.10: coverage, not identities
+
+v2.1.9 made an expected universe re-derive its identities from the records it
+named. That check is necessary and it answers the wrong question.
+
+Proving a set of identities occurs in stored records does not prove those records
+**enumerate the complete universe the request should have returned**. A truncated
+response enumerates its own rows perfectly. So a quote snapshot, one page of a
+paged response, or a document about something else could be labelled
+`VENDOR_CONTRACT_LIST`, pass every v2.1.9 check, and establish
+`MEASURED_COMPLETE` for the entire chain.
+
+### Coverage is a state, and the caller does not get to pick it
+
+| `UniverseCoverageStatus` | Means | Supports |
+|---|---|---|
+| `FULL_REQUEST_ENUMERATED` | the source listed every contract the request owed | `MEASURED_COMPLETE`, analytical readiness |
+| `PARTIAL_PAGE` | a verified slice, with the rest unenumerated | finding a *missing* listed contract |
+| `OBSERVED_SUBSET` | rows that arrived; nothing about what was owed | diagnostics |
+| `UNKNOWN_COVERAGE` | nothing was established | nothing |
+
+`ExpectedContractUniverse.complete_for_request: bool` is gone. It was a
+constructor argument, hashed into the universe and read by the engine — hashing
+an assertion is not verifying it. A caller may still record what it *expected*
+via `declared_coverage`; no completeness decision reads that field.
+
+### Four questions a response was previously asked as one
+
+`ResponseCapabilities` separates them:
+
+| Question | Field |
+|---|---|
+| Does it list its own rows? | `enumerates_rows` |
+| Does it enumerate the *request's* universe? | `enumerates_request_universe` |
+| Does it carry page / total / continuation metadata? | `carries_pagination_metadata` |
+| Is it a dedicated contract-list endpoint? | `is_dedicated_contract_list` |
+
+Every ThetaData option snapshot answers **yes to the first and no to the other
+three**. `DEDICATED_CONTRACT_LIST_ENDPOINTS` is therefore empty, an unknown
+endpoint gets the empty capability rather than a default, and an index endpoint
+supplies no identities at all.
+
+That has a blunt consequence, and it is the honest one: **no capture this
+repository can currently perform reaches `FULL_REQUEST_ENUMERATED`.** The
+`VENDOR_CONTRACT_LIST` and `CAPTURED_PAGINATION_METADATA` source kinds resolve to
+a refusal naming what is missing, rather than to a simulated success. v2.1.9's
+pagination resolver read no pagination metadata whatsoever — it re-derived
+identities and trusted a Boolean.
+
+### A declaration and a finding are different types
+
+`ExpectedContractUniverse` is what somebody believes.
+`VerifiedExpectedUniverseArtifact` is what `resolve_expected_universe`
+established, and it is the only thing `resolve_chain_completeness` accepts — passing a declaration raises
+`TypeError` rather than degrading quietly. The artifact refuses at construction
+to carry a coverage its own source kind cannot reach
+(`ExpectedUniverseSourceKind.best_possible_coverage`), so no amount of downstream
+checking promotes a snapshot into a listing.
+
+`observed_at` is derived from `max(response_received_at)` over the source
+records. v2.1.9 took it from the caller, so a stale listing could be presented as
+current.
+
+### The source has to be about this request
+
+`UniverseRequestScope` carries root, expirations, `max_dte`, strike range,
+rights, request filters and `requested_at`. A *wider* listing serves a narrower
+chain; a narrower one cannot serve a wider chain, and an unbounded request means
+everything. Ordering is checked too — a universe observed after the chain
+describes a different market — along with staleness against
+`DEFAULT_MAX_UNIVERSE_AGE`.
+
+Universe documentation lives in its own registry, separate from the settlement
+one. Both are content-verified; they are verified to say *different things*, so
+an OI settlement convention plus an arbitrary option identity no longer
+establishes a universe.
+
+### Verified before the operation opens
+
+`capture_session` takes either `verified_expected_universe=` (resolved, compared
+against the chain request scope, refused before a single response is fetched) or
+`declared_expected_universe=` (recorded as diagnostic, and it can never establish
+measured completeness). The chain operation is never stamped with an unresolved
+claim, and `recover_capture_artifacts()` returns the re-derived artifact rather
+than the caller's object.
+
+`ChainCompleteness` now carries `universe_artifact_hash`,
+`universe_evidence_fingerprint`, `coverage_status` and `resolver_version`, and
+`independently_observed` reads those. The `NON_INDEPENDENT_SOURCES` string set is
+gone: independence was decided by comparing `expected_source` against a list of
+labels, so inventing a new label bought independence.
+
+### What this changes about the shipped state
+
+Nothing about raw capture. A session with no universe at all still captures,
+stores, verifies and replays — §12's point is that raw capture must not require a
+universe it cannot have.
+
+`analytical_readiness_of` now requires `FULL_REQUEST_ENUMERATED` **and**
+`independently_observed`. Since no verified source reaches that state today, the
+shipped profile is `READY_FOR_RAW_CAPTURE_ONLY` and
+`NOT_READY_FOR_ANALYTICAL_DATASET`. That was always true. It is now enforced by
+a check rather than asserted in a document.

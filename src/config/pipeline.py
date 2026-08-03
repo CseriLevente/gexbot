@@ -855,52 +855,124 @@ def _settlement_artifact(value: Any) -> Any:
     return value
 
 
-def _declared_universe(value: Any) -> Any:
-    """Narrow a caller's ``expected_universe``, or refuse it.
+def _session_of(moment: datetime) -> Any:
+    """The trading session an instant belongs to. One helper, one answer."""
+    from src.gex.sessions import market_session_date
 
-    There is exactly one such type since v2.1.9. Accepting ``Any`` is how two
-    of them coexisted: the engine read one, the capture path built the other,
-    and only the second carried provenance.
+    return market_session_date(moment)
+
+
+def _universe_evidence(universe: Any) -> dict[str, Any]:
+    """The typed evidence a verified artifact contributes to a chain.
+
+    Empty for anything else, which is what keeps a declaration from reaching
+    the completeness measure as though a resolver had checked it.
     """
+    if universe is None or not hasattr(universe, "artifact_hash"):
+        return {}
+    return {
+        "universe_artifact_hash": universe.artifact_hash,
+        "universe_evidence_fingerprint": universe.evidence_fingerprint,
+        "coverage_status": universe.coverage_status.value,
+        "universe_resolver_version": universe.resolver_version,
+    }
+
+
+def _verified_universe(value: Any) -> Any:
+    """Narrow a caller's universe to a *verified artifact*, or refuse it.
+
+    v2.1.9 took an ``ExpectedContractUniverse`` here -- a declaration -- and
+    verified it later, at replay. So the chain operation was stamped with the
+    hash of an unresolved claim, and whether that claim held was discovered
+    after the capture it was supposed to characterise.
+
+    The lifecycle is now: capture the source, resolve it, persist the artifact,
+    *then* open the chain operation under the artifact's hash. This function is
+    where the type system enforces the order.
+    """
+    if value is None:
+        return None
+    from src.domain.expected_universe import ExpectedContractUniverse
+    from src.domain.universe_artifact import VerifiedExpectedUniverseArtifact
+
+    if isinstance(value, ExpectedContractUniverse):
+        raise PipelineConsistencyError(
+            f"{value.display_id!r} is an ExpectedContractUniverse, which is a "
+            "declaration rather than evidence. Resolve it with "
+            "resolve_expected_universe() first and pass the "
+            "VerifiedExpectedUniverseArtifact, or pass it as "
+            "declared_expected_universe to record it as diagnostic-only."
+        )
+    if not isinstance(value, VerifiedExpectedUniverseArtifact):
+        raise PipelineConsistencyError(
+            f"verified_expected_universe must be a "
+            f"VerifiedExpectedUniverseArtifact, got {type(value).__name__}"
+        )
+    return value
+
+
+def _declared_universe(value: Any) -> Any:
+    """Narrow a diagnostic-only universe declaration, or refuse it."""
     if value is None:
         return None
     from src.domain.expected_universe import ExpectedContractUniverse
 
     if not isinstance(value, ExpectedContractUniverse):
         raise PipelineConsistencyError(
-            f"expected_universe must be an ExpectedContractUniverse, got "
-            f"{type(value).__name__}"
+            f"declared_expected_universe must be an ExpectedContractUniverse, "
+            f"got {type(value).__name__}"
         )
     return value
 
 
 def _universe_for_fetch(
     session: Any, expected_contract_ids: Any, expected_source: str
-) -> tuple[Any, Any, str, bool]:
-    """What a fetch should measure completeness against.
+) -> tuple[Any, Any, str, dict[str, Any]]:
+    """What a fetch should measure completeness against, and on what evidence.
 
     A session that owns a universe supplies it. Passing one alongside is
     refused: v2.1.8 required a caller to repeat ``expected_contract_ids`` and
     ``expected_source`` on every fetch after having already declared a universe
     on the session, so the two could differ and the fetch quietly won.
+
+    The fourth element is the *typed evidence* the chain carries. It is empty
+    for a declared universe, which is what keeps a diagnostic declaration from
+    reaching the completeness measure as though it had been verified.
     """
     owned = getattr(session, "expected_universe", None) if session is not None else None
+    declared = (
+        getattr(session, "declared_expected_universe", None)
+        if session is not None
+        else None
+    )
     supplied = expected_contract_ids is not None or expected_source != "none"
-    if owned is None:
-        return None, expected_contract_ids, expected_source, True
+
+    held = owned if owned is not None else declared
+    if held is None:
+        return None, expected_contract_ids, expected_source, {}
     if supplied:
         raise PipelineConsistencyError(
             f"this capture session was opened with expected universe "
-            f"{owned.display_id!r} and the fetch supplied another "
+            f"{held.display_id!r} and the fetch supplied another "
             f"({expected_source!r}). Whether a chain is complete is decided "
             "against the universe the capture was opened with; a second one "
             "passed here would be a choice about which answer to get."
         )
+    if owned is None:
+        # Declared, not verified: the identities travel so a diagnostic can
+        # name them, and no evidence travels, so completeness stays
+        # PARTIALLY_OBSERVED.
+        return None, tuple(sorted(held.identity_set)), held.source, {}
     return (
         owned,
         tuple(sorted(owned.identity_set)),
         owned.source,
-        owned.complete_for_request,
+        {
+            "universe_artifact_hash": owned.artifact_hash,
+            "universe_evidence_fingerprint": owned.evidence_fingerprint,
+            "coverage_status": owned.coverage_status.value,
+            "universe_resolver_version": owned.resolver_version,
+        },
     )
 
 
@@ -942,6 +1014,9 @@ def _persist_artifacts(store: Any, *, settlement: Any, universe: Any) -> None:
             sources=(settlement.evidence_id,) if settlement.evidence_id else (),
         )
     if universe is not None:
+        # The verified artifact, not the declaration it was resolved from. A
+        # replay that recovered the declaration would be recovering the caller's
+        # description of the evidence rather than the evidence.
         store.put(
             ArtifactKind.EXPECTED_UNIVERSE,
             universe.semantic_payload(),
@@ -1212,7 +1287,7 @@ class ThetaDataResearchPipeline:
             if capture is not None
             else self._new_capture_session(as_of, store=store)
         )
-        universe, expected_contract_ids, expected_source, complete_for_request = (
+        universe, expected_contract_ids, expected_source, universe_evidence = (
             _universe_for_fetch(session, expected_contract_ids, expected_source)
         )
         open_interest_as_of = _settlement_date_for_fetch(session, open_interest_as_of)
@@ -1229,7 +1304,7 @@ class ThetaDataResearchPipeline:
             open_interest_as_of=open_interest_as_of,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
-            expected_complete_for_request=complete_for_request,
+            universe_evidence=universe_evidence,
             expected_universe=universe,
             capture=session,
             mark=mark,
@@ -1260,7 +1335,7 @@ class ThetaDataResearchPipeline:
             if capture is not None
             else self._new_capture_session(as_of, store=store)
         )
-        universe, expected_contract_ids, expected_source, complete_for_request = (
+        universe, expected_contract_ids, expected_source, universe_evidence = (
             _universe_for_fetch(session, expected_contract_ids, expected_source)
         )
         open_interest_as_of = _settlement_date_for_fetch(session, open_interest_as_of)
@@ -1274,7 +1349,7 @@ class ThetaDataResearchPipeline:
             open_interest_as_of=open_interest_as_of,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
-            expected_complete_for_request=complete_for_request,
+            universe_evidence=universe_evidence,
             expected_universe=universe,
             capture=session,
             mark=mark,
@@ -1316,9 +1391,11 @@ class ThetaDataResearchPipeline:
         session_id: str,
         as_of: datetime,
         capture_origin: Any = None,
-        expected_universe: Any = None,
+        verified_expected_universe: Any = None,
+        declared_expected_universe: Any = None,
         settlement_rule: Any = None,
         artifact_store: Any = None,
+        universe_max_age: Any = None,
     ) -> Any:
         """A capture session stamped with this pipeline's identity.
 
@@ -1345,29 +1422,64 @@ class ThetaDataResearchPipeline:
         what the artifact's rule *derives* from the session date, so passing one
         alongside would be offering the answer to a question the rule exists to
         answer.
+
+        The universe comes in two forms since v2.1.10, and the split is the
+        point. ``verified_expected_universe`` takes a
+        ``VerifiedExpectedUniverseArtifact`` -- something a resolver produced by
+        reading stored records -- and its scope and timing are checked against
+        this capture before the operation is opened.
+        ``declared_expected_universe`` takes an unresolved
+        ``ExpectedContractUniverse``, records it for diagnostics, and stamps
+        nothing: it can never make completeness independent.
+
+        v2.1.9 had one parameter, took the declaration, and verified it at
+        *replay*. So the chain operation was stamped with the hash of a claim
+        nobody had checked, and whether the claim held was discovered after the
+        capture it was supposed to characterise.
         """
         from src.adapters.raw_store import CaptureOrigin, CaptureSession
         from src.adapters.thetadata.client import capture_origin_of
+        from src.gex.sessions import market_session_date
 
         artifact = _settlement_artifact(settlement_rule)
         open_interest_as_of = (
             artifact.resolved_settlement_date if artifact is not None else None
         )
-        if artifact is not None and artifact.chain_session_date != as_of.date():
+        # The options market's session, not the calendar day of whatever zone
+        # the caller's instant happens to carry. 2026-03-18T01:00Z is the 18th
+        # in UTC and the 17th in New York, and a settlement rule applied to the
+        # wrong one derives a different prior session.
+        session_date = market_session_date(as_of)
+        if artifact is not None and artifact.chain_session_date != session_date:
             raise PipelineConsistencyError(
                 f"the settlement artifact was derived for chain session "
                 f"{artifact.chain_session_date.isoformat()} and this capture is "
-                f"for {as_of.date().isoformat()}. A rule applied to a different "
+                f"for {session_date.isoformat()}. A rule applied to a different "
                 "session produced a different date; open interest is the linear "
                 "weight on every GEX term."
             )
-        universe = _declared_universe(expected_universe)
+
+        if verified_expected_universe is not None and (
+            declared_expected_universe is not None
+        ):
+            raise PipelineConsistencyError(
+                "a capture session takes a verified universe or a declared one, "
+                "not both: the two would disagree about whether completeness "
+                "was measured, and the disagreement would be settled by "
+                "whichever the fetch path read first"
+            )
+        universe = _verified_universe(verified_expected_universe)
+        declared = _declared_universe(declared_expected_universe)
+        if universe is not None:
+            self._require_compatible_universe(
+                universe, as_of=as_of, max_age=universe_max_age
+            )
 
         recipe = self.normalization_recipe(
             as_of=as_of,
             open_interest_as_of=open_interest_as_of,
             expected_universe_fingerprint=(
-                universe.universe_hash if universe else None
+                universe.artifact_hash if universe else None
             ),
         )
         operation = self.begin_operation(
@@ -1410,7 +1522,7 @@ class ThetaDataResearchPipeline:
             # under. Stamped rather than passed at calculation time, so a replay
             # is measured against the universe the capture expected instead of
             # whichever one the caller happens to hold.
-            expected_universe_fingerprint=(universe.universe_hash if universe else ""),
+            expected_universe_fingerprint=(universe.artifact_hash if universe else ""),
             open_interest_date_rule_fingerprint=(
                 artifact.artifact_hash if artifact is not None else ""
             ),
@@ -1423,7 +1535,58 @@ class ThetaDataResearchPipeline:
             # than only the digests that name them.
             settlement_artifact=artifact,
             expected_universe=universe,
+            declared_expected_universe=declared,
         )
+
+    def request_scope(self, *, requested_at: datetime) -> Any:
+        """The question this session's chain request asks, in comparable terms.
+
+        Built from the configuration rather than described by a caller, for the
+        same reason the request specification is: a scope somebody typed is a
+        claim about what was asked, and the thing it would be compared against
+        is the actual request.
+        """
+        from src.domain.universe_scope import UniverseRequestScope
+
+        request = self.runtime.default_chain_request
+        return UniverseRequestScope(
+            root=request.symbol,
+            max_dte=getattr(request, "max_dte", None),
+            strike_range=getattr(request, "strike_range", None),
+            rights=("call", "put"),
+            request_filters=(),
+            requested_at=requested_at,
+        )
+
+    def _require_compatible_universe(
+        self, artifact: Any, *, as_of: datetime, max_age: Any = None
+    ) -> None:
+        """Refuse a verified universe that does not describe *this* chain.
+
+        v2.1.9 accepted a universe because its identities re-derived from the
+        records it named. That is necessary and says nothing about whether the
+        listing was about this request: a narrower or older sweep re-derives
+        just as cleanly, and on a narrower scope a perfect re-derivation is
+        exactly what a false ``MEASURED_COMPLETE`` looks like.
+        """
+        from src.adapters.universe_resolvers import (
+            DEFAULT_MAX_UNIVERSE_AGE,
+            check_source_compatibility,
+        )
+
+        reasons = check_source_compatibility(
+            artifact,
+            chain_scope=self.request_scope(requested_at=as_of),
+            chain_requested_at=as_of,
+            chain_pipeline_fingerprint=self.fingerprint(),
+            source_pipeline_fingerprint=self.fingerprint(),
+            max_age=max_age if max_age is not None else DEFAULT_MAX_UNIVERSE_AGE,
+        )
+        if reasons:
+            raise PipelineConsistencyError(
+                f"the verified universe {artifact.display_id!r} cannot serve "
+                "this capture: " + "; ".join(reasons)
+            )
 
     def _capture_index_spot(
         self, *, as_of: datetime, capture: Any
@@ -1451,7 +1614,7 @@ class ThetaDataResearchPipeline:
         expected_source: str,
         capture: Any,
         mark: int,
-        expected_complete_for_request: bool = True,
+        universe_evidence: dict[str, Any] | None = None,
         expected_universe: Any = None,
     ) -> ChainSnapshot:
         from dataclasses import replace as _replace
@@ -1469,7 +1632,7 @@ class ThetaDataResearchPipeline:
             capture=capture,
             expected_contract_ids=expected_contract_ids,
             expected_source=expected_source,
-            expected_complete_for_request=expected_complete_for_request,
+            universe_evidence=universe_evidence,
             pipeline=self,
             manifest_since=mark,
             capture_plan_fingerprint=self.capture_plan.fingerprint,
@@ -1597,7 +1760,7 @@ class ThetaDataResearchPipeline:
             as_of=requested_as_of,
             open_interest_as_of=open_interest_as_of,
             expected_universe_fingerprint=(
-                expected_universe.universe_hash if expected_universe else None
+                expected_universe.artifact_hash if expected_universe else None
             ),
         )
         return CaptureOperationIdentity(
@@ -1615,7 +1778,7 @@ class ThetaDataResearchPipeline:
             ),
             open_interest_date_rule_fingerprint=open_interest_date_rule_fingerprint,
             expected_universe_fingerprint=(
-                expected_universe.universe_hash if expected_universe else None
+                expected_universe.artifact_hash if expected_universe else None
             ),
             parser_version=PARSER_VERSION,
         )
@@ -1678,7 +1841,7 @@ class ThetaDataResearchPipeline:
         """The universe a replay measures against must be the captured one."""
         captured = stamped["expected_universe_fingerprint"]
         supplied = (
-            expected_universe.universe_hash if expected_universe is not None else None
+            expected_universe.artifact_hash if expected_universe is not None else None
         )
         if captured == supplied:
             return
@@ -1911,13 +2074,18 @@ class ThetaDataResearchPipeline:
             risk_free_rate=recipe.risk_free_rate or 0.0,
             dividend_yield=recipe.dividend_yield or 0.0,
             expected_contract_ids=(
-                tuple(sorted(expected_universe.identities))
+                tuple(sorted(expected_universe.identity_set))
                 if expected_universe is not None
                 else None
             ),
             expected_source=(
                 expected_universe.source if expected_universe is not None else "none"
             ),
+            # The typed evidence too, or the replay would rebuild a chain whose
+            # completeness reads PARTIALLY_OBSERVED against an original that
+            # measured -- a difference in the chain hash caused by the check
+            # rather than by the data.
+            universe_evidence=_universe_evidence(expected_universe),
         )
         return chain, self._consumption_report(manifest=manifest, transport=transport)
 
@@ -2006,7 +2174,7 @@ class ThetaDataResearchPipeline:
                 consumption.consumption_hash if consumption is not None else ""
             ),
             expected_universe_hash=(
-                expected_universe.universe_hash
+                expected_universe.artifact_hash
                 if expected_universe is not None
                 else None
             ),
@@ -2182,7 +2350,7 @@ class ThetaDataResearchPipeline:
                     as_of=operation.effective_valuation_timestamp,
                     open_interest_as_of=settlement_date,
                     expected_universe_fingerprint=(
-                        expected_universe.universe_hash
+                        expected_universe.artifact_hash
                         if expected_universe is not None
                         else None
                     ),
@@ -2219,7 +2387,6 @@ class ThetaDataResearchPipeline:
         """
         from src.adapters.artifact_store import ArtifactKind
         from src.adapters.evidence_resolvers import SettlementDateRuleArtifact
-        from src.adapters.universe_resolvers import resolve_expected_universe
         from src.domain.expected_universe import ExpectedContractUniverse
         from src.domain.settlement import SettlementRule
 
@@ -2295,39 +2462,124 @@ class ThetaDataResearchPipeline:
                     "produced"
                 )
             else:
-                declared = ExpectedContractUniverse(
-                    identities=frozenset(payload["identities"]),
-                    source_kind=payload["source_kind"],
-                    observed_at=_iso_instant(payload["observed_at"]),
-                    source_record_ids=tuple(payload["source_record_ids"]),
-                    complete_for_request=payload["complete_for_request"],
-                    documentation_evidence_id=payload["documentation_evidence_id"],
-                    evidence_fingerprint=payload["evidence_fingerprint"],
+                recovered_universe, universe_failure = self._recover_universe(
+                    payload, universe_key=universe_key, manifest=manifest, store=store
                 )
-                if declared.universe_hash != universe_key:
-                    failures.append(
-                        f"the recovered universe hashes to "
-                        f"{short_id(declared.universe_hash)}... and the records "
-                        f"were stamped {short_id(universe_key)}..."
-                    )
+                if universe_failure:
+                    failures.append(universe_failure)
                 else:
-                    resolved = resolve_expected_universe(
-                        declared, manifest=manifest, store=store
-                    )
-                    if not resolved.established:
-                        failures.append(
-                            f"the capture-bound expected universe does not "
-                            f"follow from its source: {resolved.failure}"
-                        )
-                    else:
-                        universe = declared
+                    universe = recovered_universe
 
-        _ = ArtifactKind  # imported for the kind names used when persisting
+        _ = (ArtifactKind, ExpectedContractUniverse)  # names used when persisting
         return RecoveredCaptureArtifacts(
             settlement_artifact=settlement,
             expected_universe=universe,
             failures=tuple(failures),
         )
+
+    def _recover_universe(
+        self, payload: dict[str, Any], *, universe_key: str, manifest: Any, store: Any
+    ) -> tuple[Any, str]:
+        """Rebuild the *verified artifact* a chain operation was stamped with.
+
+        Returns the artifact, or a reason it could not be produced. Three
+        checks, and the third is the one v2.1.9 lacked:
+
+        1. the stored payload reconstructs into an artifact;
+        2. that artifact hashes to the digest the records carry;
+        3. its identities still follow from the records it names.
+
+        v2.1.9 reconstructed the *declaration* and re-resolved it, then returned
+        the declaration. So what reached completeness was the object the caller
+        had described rather than the object the resolver had verified, and the
+        difference between the two is the whole of this release.
+        """
+        from src.adapters.universe_resolvers import resolve_expected_universe
+        from src.domain.expected_universe import ExpectedContractUniverse
+        from src.domain.universe_artifact import VerifiedExpectedUniverseArtifact
+        from src.domain.universe_scope import UniverseRequestScope
+
+        scope_payload = payload.get("source_scope") or {}
+        try:
+            artifact = VerifiedExpectedUniverseArtifact(
+                identities=frozenset(payload["identities"]),
+                source_kind=payload["source_kind"],
+                coverage_status=payload["coverage_status"],
+                source_operation_fingerprint=payload["source_operation_fingerprint"],
+                source_record_ids=tuple(payload["source_record_ids"]),
+                source_request_spec_fingerprint=payload[
+                    "source_request_spec_fingerprint"
+                ],
+                source_scope=UniverseRequestScope(
+                    root=scope_payload.get("root", "UNSPECIFIED"),
+                    expirations=(
+                        tuple(
+                            _iso_date(value) for value in scope_payload["expirations"]
+                        )
+                        if scope_payload.get("expirations")
+                        else None
+                    ),
+                    max_dte=scope_payload.get("max_dte"),
+                    strike_range=scope_payload.get("strike_range"),
+                    rights=tuple(scope_payload.get("rights") or ("call", "put")),
+                    request_filters=tuple(
+                        (pair[0], pair[1])
+                        for pair in scope_payload.get("request_filters") or ()
+                    ),
+                    requested_at=(
+                        _iso_instant(scope_payload["requested_at"])
+                        if scope_payload.get("requested_at")
+                        else None
+                    ),
+                ),
+                observed_at=_iso_instant(payload["observed_at"]),
+                evidence_fingerprint=payload["evidence_fingerprint"],
+                resolver_version=payload["resolver_version"],
+                declaration_hash=payload.get("declaration_hash", ""),
+                documentation_evidence_id=payload.get("documentation_evidence_id"),
+            )
+        except Exception as error:
+            return None, f"the stored universe artifact does not reconstruct: {error}"
+
+        if artifact.artifact_hash != universe_key:
+            return None, (
+                f"the recovered universe hashes to "
+                f"{short_id(artifact.artifact_hash)}... and the records were "
+                f"stamped {short_id(universe_key)}..."
+            )
+
+        # Re-derived from the bytes, not believed. The declaration this rebuilds
+        # is the one the artifact records, so the resolver runs the same check
+        # it ran at capture time and against the same records.
+        declaration = ExpectedContractUniverse(
+            identities=artifact.identity_set,
+            source_kind=artifact.source_kind,
+            source_record_ids=artifact.source_record_ids,
+            scope=artifact.source_scope,
+            documentation_evidence_id=artifact.documentation_evidence_id,
+            declared_at=artifact.observed_at,
+        )
+        resolved = resolve_expected_universe(
+            declaration, manifest=manifest, store=store
+        )
+        if not resolved.established:
+            return None, (
+                f"the capture-bound expected universe does not follow from its "
+                f"source: {resolved.failure}"
+            )
+        assert resolved.artifact is not None
+        if resolved.artifact.identity_set != artifact.identity_set:
+            return None, (
+                "re-deriving the universe from its records produced a different "
+                "contract set than the stamped artifact records"
+            )
+        if resolved.artifact.coverage_status is not artifact.coverage_status:
+            return None, (
+                f"the stamped artifact claims coverage "
+                f"{artifact.coverage_status.value} and re-deriving it produces "
+                f"{resolved.artifact.coverage_status.value}"
+            )
+        return artifact, ""
 
     def _settlement_refusals(
         self, chain: ChainSnapshot, artifact: Any
@@ -2464,7 +2716,7 @@ class ThetaDataResearchPipeline:
             as_of=valuation,
             open_interest_as_of=settlement_date,
             expected_universe_fingerprint=(
-                expected_universe.universe_hash if expected_universe else None
+                expected_universe.artifact_hash if expected_universe else None
             ),
         )
         try:
@@ -2607,12 +2859,12 @@ class ThetaDataResearchPipeline:
         if open_interest is None:
             refusals.append("the context carries no open-interest provenance")
         elif open_interest.chain_date is not None and (
-            open_interest.chain_date != chain.as_of.date()
+            open_interest.chain_date != _session_of(chain.as_of)
         ):
             refusals.append(
                 f"the open-interest evidence is for session "
                 f"{open_interest.chain_date.isoformat()}, not "
-                f"{chain.as_of.date().isoformat()}"
+                f"{_session_of(chain.as_of).isoformat()}"
             )
         return tuple(refusals)
 

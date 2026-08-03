@@ -61,7 +61,7 @@ __all__ = [
 #: Bumped when the *meaning* of a normalized-chain hash changes -- a new field
 #: covered, a different rendering. A receipt taken under older rules must not be
 #: compared against one taken under newer ones and read as a mismatch of data.
-NORMALIZATION_SCHEMA_VERSION = "normalized-chain/2.1.9"
+NORMALIZATION_SCHEMA_VERSION = "normalized-chain/2.1.10"
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,7 +20,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2033 tests, 92% coverage
+.venv/Scripts/python.exe -m pytest         # 2238 tests, 90% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no
@@ -128,6 +128,15 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Operation digests recomputed from their own fields | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `OPERATION_FINGERPRINT_MISMATCH` on any edited field |
 | Field evidence rereads the exact named record | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; required before pagination or partitions can be certified |
 | Content-addressed artifact store | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the stamped digest is the lookup key, so replay recovers the object rather than only its name |
+| Snapshots cannot pass as contract lists | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a response with one row per contract enumerates its own rows, not the request's universe |
+| Universe coverage derived, not declared | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `UniverseCoverageStatus` is a resolver output and a caller cannot grant `FULL_REQUEST_ENUMERATED` |
+| Pagination coverage read from the responses | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; unsupported where no ThetaData endpoint returns page metadata, rather than simulated |
+| Universe documentation separate from settlement documentation | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a settlement-convention document establishes no contracts |
+| Verified expected-universe artifact | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; only a resolver-produced artifact can make completeness independent |
+| Universe source scope and timing checked | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; root, expirations, strikes, rights, ordering and staleness, before the chain operation opens |
+| Completeness independence is typed | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the artifact hash and coverage status decide it, never the `expected_source` label |
+| One market-session date helper | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `America/New_York`, with an AST test that no other site derives one |
+| `READY_FOR_ANALYTICAL_DATASET` | `NOT_READY` — requires `FULL_REQUEST_ENUMERATED` coverage, and no verified contract-list or pagination source exists (OD-11) |
 | Trusted API derives its own authority | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; it takes evidence, not a verdict |
 | Records stamped with pipeline, plan, request spec and recipe | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture cannot be relabelled as another pipeline's |
 | Canonical expected request per endpoint | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture taken at `rate_value=4.2` does not verify against a pipeline configured with 3.1 |

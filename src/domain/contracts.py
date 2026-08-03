@@ -439,7 +439,13 @@ class ChainSnapshot:
             allowed = set(roots)
             selected = tuple(q for q in selected if q.contract.root in allowed)
         if max_dte is not None:
-            cutoff = self.as_of.date()
+            # The market's session, not the calendar day of whatever zone this
+            # snapshot's instant carries. Days to expiry is counted from the
+            # session the chain belongs to, and the two differ for six hours
+            # out of every twenty-four.
+            from src.gex.sessions import market_session_date
+
+            cutoff = market_session_date(self.as_of)
             selected = tuple(
                 q for q in selected if (q.contract.expiry - cutoff).days <= max_dte
             )

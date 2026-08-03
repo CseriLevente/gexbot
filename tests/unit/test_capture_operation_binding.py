@@ -299,7 +299,13 @@ def test_widening_the_tolerance_is_a_configuration_change_records_disagree_with(
 
 
 def test_forged_completeness_cannot_alter_a_trusted_confidence():
-    """The reproduced regression: 52.0619 -> 57.3394 with trusted=True."""
+    """The reproduced regression: 52.0619 -> 57.3394 with trusted=True.
+
+    The forgery has to be a better one since v2.1.10. A made-up
+    ``expected_source`` string no longer moves anything -- independence is
+    decided from the artifact hash and the coverage status -- so this supplies
+    those too, which is what a forger would now have to do.
+    """
     from src.domain.completeness import ChainCompleteness
 
     taken = captured_chain()
@@ -314,6 +320,10 @@ def test_forged_completeness_cannot_alter_a_trusted_confidence():
         expected_contract_ids=received,
         received_contract_ids=received,
         expected_source="a_source_i_made_up",
+        universe_artifact_hash="f" * 64,
+        universe_evidence_fingerprint="f" * 64,
+        coverage_status="FULL_REQUEST_ENUMERATED",
+        resolver_version="universe-resolver/2.1.10",
     )
     tampered = dataclasses.replace(taken.chain, completeness=forged)
 
@@ -322,9 +332,39 @@ def test_forged_completeness_cannot_alter_a_trusted_confidence():
         taken.pipeline.compute_diagnostic_gex(tampered).confidence.score
         != honest.confidence.score
     )
-    # And it now moves the chain hash, so the re-derivation catches it.
+    # And it moves the chain hash, so the re-derivation catches it.
     assert canonical_chain_hash(tampered) != canonical_chain_hash(taken.chain)
     refuses(taken, tampered, match=r"(?i)re-derived|completeness")
+
+
+def test_a_made_up_source_label_is_now_inert():
+    """Strictly stronger than the refusal above, and worth stating separately.
+
+    A label cannot move the score at all any more, so the forgery has to
+    fabricate a hash and a coverage state -- both of which the re-derivation
+    compares.
+    """
+    from src.domain.completeness import ChainCompleteness
+
+    taken = captured_chain()
+    honest = taken.pipeline.compute_diagnostic_gex(taken.chain)
+    received = tuple(sorted(q.contract.canonical_id for q in taken.chain.quotes))
+    relabelled = dataclasses.replace(
+        taken.chain,
+        completeness=ChainCompleteness(
+            received_quote_count=len(received),
+            received_oi_count=len(received),
+            received_iv_count=len(received),
+            received_greeks_count=len(received),
+            expected_contract_ids=received,
+            received_contract_ids=received,
+            expected_source="VENDOR_CONTRACT_LIST",
+        ),
+    )
+    assert (
+        taken.pipeline.compute_diagnostic_gex(relabelled).confidence.score
+        == honest.confidence.score
+    )
 
 
 def test_completeness_is_a_typed_field_not_a_metadata_key():
@@ -488,47 +528,60 @@ def test_short_id_is_available_and_is_not_what_gets_compared():
 
 
 # =============================================================================
-# §6 -- an expected universe is capture-bound (v2.1.9: and evidence-backed)
+# §6 -- an expected universe is capture-bound, and it is a *verified artifact*
 # =============================================================================
 #
-# The verification half -- re-deriving a universe from the records it names --
-# lives in tests/unit/test_expected_universe_evidence.py. What is checked here
-# is the *binding*: which universe a replay is measured against.
+# The verification half -- what a source actually covers, and whether a snapshot
+# can stand in for a contract list -- lives in
+# tests/unit/test_expected_universe_evidence.py. What is checked here is the
+# binding: which universe a replay is measured against.
 
 
-def universe_from(taken, *, identities=None, record_ids=None):
-    """A vendor-listed universe read out of this capture's quote response."""
+def universe_artifact(taken, *, identities=None, **changes):
+    """A verified artifact resolved from this capture's quote response."""
     from src.adapters.thetadata.endpoints import Endpoint
+    from src.adapters.universe_resolvers import resolve_expected_universe
     from src.domain.expected_universe import (
         ExpectedContractUniverse,
         ExpectedUniverseSourceKind,
     )
+    from src.domain.universe_scope import UniverseRequestScope
 
     quote_records = taken.manifest.records_for(Endpoint.OPTION_QUOTE_SNAPSHOT.value)
-    return ExpectedContractUniverse(
+    declaration = ExpectedContractUniverse(
         identities=frozenset(
             identities
             if identities is not None
             else (q.contract.canonical_id for q in taken.chain.quotes)
         ),
-        source_kind=ExpectedUniverseSourceKind.VENDOR_CONTRACT_LIST,
-        observed_at=AS_OF,
-        source_record_ids=tuple(
-            record_ids if record_ids is not None else quote_records[:1]
-        ),
+        source_kind=ExpectedUniverseSourceKind.OBSERVED_SNAPSHOT_ROWS,
+        source_record_ids=tuple(quote_records[:1]),
+        scope=UniverseRequestScope(root="SPXW", requested_at=AS_OF),
+        declared_at=AS_OF,
+        **changes,
     )
+    outcome = resolve_expected_universe(
+        declaration, manifest=taken.manifest, store=taken.store
+    )
+    assert outcome.established, outcome.failure
+    return outcome.artifact
 
 
-def test_an_expected_universe_hashes_its_identities_and_provenance():
+def test_a_verified_artifact_hashes_its_identities_and_its_coverage():
     taken = captured_chain()
-    universe = universe_from(taken)
-    assert len(universe.universe_hash) == 64
+    artifact = universe_artifact(taken)
+    assert len(artifact.artifact_hash) == 64
+    assert len(artifact.evidence_fingerprint) == 64
 
-    smaller = universe_from(taken, identities=list(universe.identity_set)[:1])
-    assert smaller.universe_hash != universe.universe_hash
+    # Coverage is part of the identity, so two artifacts differing only in what
+    # they claim to cover are different artifacts.
+    from src.domain.expected_universe import UniverseCoverageStatus
 
-    relabelled = dataclasses.replace(universe, complete_for_request=False)
-    assert relabelled.universe_hash != universe.universe_hash
+    assert artifact.coverage_status is UniverseCoverageStatus.OBSERVED_SUBSET
+    relabelled = dataclasses.replace(
+        artifact, coverage_status=UniverseCoverageStatus.PARTIAL_PAGE
+    )
+    assert relabelled.artifact_hash != artifact.artifact_hash
 
 
 def test_a_universe_from_records_must_name_them():
@@ -540,47 +593,38 @@ def test_a_universe_from_records_must_name_them():
     with pytest.raises(ValueError, match=r"(?i)names no records"):
         ExpectedContractUniverse(
             identities=frozenset({"SPXW:2026-03-20:5000:call"}),
-            source_kind=ExpectedUniverseSourceKind.VENDOR_CONTRACT_LIST,
-            observed_at=AS_OF,
+            source_kind=ExpectedUniverseSourceKind.OBSERVED_SNAPSHOT_ROWS,
+            declared_at=AS_OF,
         )
 
 
-def test_a_measured_universe_survives_replay():
+def test_a_verified_universe_survives_replay():
     """Original and replay measure the same completeness from the same bytes."""
     from src.domain.completeness import CompletenessStatus
 
     taken = captured_chain()
-    universe = resolved_universe(taken)
+    artifact = universe_artifact(taken)
     operation = taken.pipeline.resolve_operation(
         manifest=taken.manifest, store=taken.store
     )
     recipe = taken.pipeline.normalization_recipe(
         as_of=operation.effective_valuation_timestamp,
         open_interest_as_of=taken.settlement_artifact.resolved_settlement_date,
-        expected_universe_fingerprint=universe.universe_hash,
+        expected_universe_fingerprint=artifact.artifact_hash,
     )
     rebuilt, _ = taken.pipeline.rebuild_from_capture(
         manifest=taken.manifest,
         store=taken.store,
         recipe=recipe,
         operation=operation,
-        expected_universe=universe,
+        expected_universe=artifact,
     )
     assert rebuilt.completeness is not None
-    assert rebuilt.completeness.status is CompletenessStatus.MEASURED_COMPLETE
+    assert rebuilt.completeness.universe_artifact_hash == artifact.artifact_hash
+    # An observed subset, honestly reported: the rows arrived and the response
+    # never claimed to be the whole request.
+    assert rebuilt.completeness.status is CompletenessStatus.PARTIALLY_OBSERVED
     assert rebuilt.completeness.missing_expected_count == 0
-
-
-def resolved_universe(taken, **changes):
-    """A universe this capture's records actually produce, marked verified."""
-    from src.adapters.universe_resolvers import resolve_expected_universe
-
-    declared = universe_from(taken, **changes)
-    resolved = resolve_expected_universe(
-        declared, manifest=taken.manifest, store=taken.store
-    )
-    assert resolved.established, resolved.failure
-    return resolved.universe
 
 
 def test_a_different_universe_produces_a_different_chain():
@@ -595,7 +639,7 @@ def test_a_different_universe_produces_a_different_chain():
             as_of=operation.effective_valuation_timestamp,
             open_interest_as_of=taken.settlement_artifact.resolved_settlement_date,
             expected_universe_fingerprint=(
-                universe.universe_hash if universe else None
+                universe.artifact_hash if universe else None
             ),
         )
         chain, _ = taken.pipeline.rebuild_from_capture(
@@ -607,30 +651,32 @@ def test_a_different_universe_produces_a_different_chain():
         )
         return canonical_chain_hash(chain)
 
-    full = resolved_universe(taken)
-    partial = universe_from(taken, identities=list(full.identity_set)[:1])
-    assert rebuilt_with(full) != rebuilt_with(partial)
+    full = universe_artifact(taken)
+    narrowed = dataclasses.replace(
+        full, identities=frozenset(list(full.identity_set)[:1])
+    )
+    assert rebuilt_with(full) != rebuilt_with(narrowed)
     assert rebuilt_with(full) != rebuilt_with(None)
 
 
 def test_the_universe_hash_reaches_the_receipt():
     taken = captured_chain()
-    universe = resolved_universe(taken)
+    artifact = universe_artifact(taken)
     operation = taken.pipeline.resolve_operation(
         manifest=taken.manifest, store=taken.store
     )
     recipe = taken.pipeline.normalization_recipe(
         as_of=operation.effective_valuation_timestamp,
-        expected_universe_fingerprint=universe.universe_hash,
+        expected_universe_fingerprint=artifact.artifact_hash,
     )
     receipt = taken.pipeline.normalized_chain_receipt(
         taken.chain,
         manifest=taken.manifest,
         recipe=recipe,
         operation=operation,
-        expected_universe=universe,
+        expected_universe=artifact,
     )
-    assert receipt.expected_universe_hash == universe.universe_hash
+    assert receipt.expected_universe_hash == artifact.artifact_hash
     assert receipt.operation_fingerprint == operation.operation_fingerprint
 
 

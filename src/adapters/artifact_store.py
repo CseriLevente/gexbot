@@ -39,7 +39,7 @@ __all__ = [
 
 #: Bumped when the *envelope* changes -- not when an artifact type does; those
 #: carry their own schema versions inside.
-ARTIFACT_SCHEMA_VERSION = "capture-artifact/2.1.9"
+ARTIFACT_SCHEMA_VERSION = "capture-artifact/2.1.10"
 
 
 class ArtifactKind(str):

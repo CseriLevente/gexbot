@@ -1,5 +1,100 @@
 # Changelog
 
+## 2.1.10 - expected-universe coverage evidence
+
+v2.1.9 made a universe *resolvable*: the resolver reopened the records it named
+and re-derived the identities. That closed "a caller typed a list and labelled it
+a vendor listing", and it left the harder half open.
+
+**Proving that a set of identities occurs in stored records is not proving that
+those records enumerate the complete universe the request should have
+returned.** A truncated response enumerates its own rows perfectly.
+
+Five things followed from that gap:
+
+* the resolver accepted any endpoint with one row per contract as a
+  `VENDOR_CONTRACT_LIST`, so an `/v3/option/snapshot/quote` response established
+  `MEASURED_COMPLETE` for the whole chain;
+* `CAPTURED_PAGINATION_METADATA` named a check nobody had written — its resolver
+  re-derived identities and never read a page number, a total or a continuation
+  token, so one ordinary quote response satisfied it;
+* the universe resolver looked its evidence id up in `DOCUMENTATION_RULES`,
+  which is the *settlement* registry. A content-verified document about
+  open-interest settlement says nothing about which options exist, and it
+  established a universe of whatever identities sat beside it;
+* `complete_for_request: bool` was a constructor argument, hashed into the
+  universe. A caller passing `True` was the entire evidence for full coverage,
+  and hashing an assertion made it look like a finding;
+* `observed_at` came from the caller, so a listing captured three weeks ago
+  could present itself as observed this morning — and staleness is measured
+  against that instant.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.9 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Any row-per-contract endpoint counted as a contract list | A quote snapshot established `MEASURED_COMPLETE` for the whole request | `ResponseCapabilities` separates "enumerates rows" from "enumerates the request universe", "carries pagination metadata" and "is a dedicated contract list". No ThetaData endpoint has the last three |
+| 2 | Pagination coverage was never read | The source kind named a check that did not exist | `PaginationCoverageEvidence`, built by `read_pagination_metadata` from the stored bytes. Unsupported where no metadata exists, rather than simulated |
+| 3 | `complete_for_request` was a caller Boolean | Full coverage was whatever the caller said | `UniverseCoverageStatus`, produced by the resolver. A declaration may carry `declared_coverage` for the audit trail and nothing reads it |
+| 4 | Settlement documentation defined universes | A genuine document about the wrong subject | `UniverseDocumentationRule` in its own registry, requiring an identity set or a typed derivation |
+| 5 | A declaration could measure completeness | The engine measured against what somebody expected | `VerifiedExpectedUniverseArtifact` is a different type, and the engine takes only that |
+| 6 | Independence came from a source *string* | `expected_source="VENDOR_CONTRACT_LIST"` made a chain independently observed | `ChainCompleteness` carries the artifact hash, evidence fingerprint, coverage status and resolver version, and decides from those |
+| 7 | Nothing compared the source's scope to the chain's | A narrower or older sweep re-derives perfectly and covers a different set | `UniverseRequestScope` and `check_source_compatibility`: root, expirations, strikes, rights, filters, ordering, staleness, resolver version |
+| 8 | The chain operation was stamped with an unresolved claim | Whether it held was discovered at replay, after the capture | `capture_session(verified_expected_universe=...)` checks scope and timing before the operation opens; `declared_expected_universe=...` is the diagnostic form |
+| 9 | Recovery returned the declaration | What reached completeness was the caller's description of the evidence | `recover_capture_artifacts` rebuilds the artifact, checks its hash against the stamp, and re-derives it from its records |
+| 10 | Session dates came from `as_of.date()` | 2026-03-18T01:00Z is the 18th in UTC and the 17th in New York | One `market_session_date(as_of)` through `ZoneInfo("America/New_York")`, with an AST test that no other site produces one |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | — |
+| `EXPECTED_MODEL_FINGERPRINT` | `6accfab618292203` | `32b4694cef709838` | `VERSION_METADATA_ONLY` |
+| `EXPECTED_OUTPUT_HASH` | `d0be7199...` | `0e536883...` | `REPRESENTATIONAL` |
+
+Measured in two parts, separately, and neither assumed.
+
+Pinning `model_version` back to `gex-engine/2.1.9` reproduces
+`6accfab618292203c9af97789874a238786c8884446fe5898a1d845f59a5cc16` exactly.
+
+The output hash covers the serialised snapshot, which includes the
+chain-completeness *report*. v2.1.10 replaces one key with four:
+`expected_complete_for_request` gives way to `coverage_status`,
+`universe_artifact_hash`, `universe_evidence_fingerprint` and
+`resolver_version`. Removing those four and restoring the old key reproduces
+`d0be719931de451dd8ef88a178ec8287bec899b93ed605e8f5be4275eedb1961` exactly, so
+nothing else moved. Every numeric literal in the reference case is unchanged:
+59,228,408,806.90227 unsigned, −24,836,100,698.992706 signed, 93.857 confidence,
+250 contracts, 1,263,165 open interest, 5039.1337825 primary zero-gamma root.
+
+### Behavioural changes worth knowing
+
+* **`VENDOR_CONTRACT_LIST` and `CAPTURED_PAGINATION_METADATA` are unsupported in
+  production.** No verified ThetaData endpoint is a listing endpoint or returns
+  page metadata (OD-11). A snapshot resolves as `OBSERVED_SNAPSHOT_ROWS` to
+  `OBSERVED_SUBSET`, which is honest and useful and not completeness.
+* `capture_session` takes `verified_expected_universe` **or**
+  `declared_expected_universe`, never both, and no longer takes
+  `expected_universe`.
+* `ExpectedContractUniverse` is a declaration. It has no `observed_at` and no
+  `complete_for_request`; it has `declared_at` and `declared_coverage`, and it
+  carries a `scope`.
+* `resolve_expected_universe` returns a `ResolvedExpectedUniverse` whose
+  `artifact` is the verified object. The old `.universe` attribute is gone.
+* `ChainCompleteness.NON_INDEPENDENT_SOURCES` is gone. Independence is decided
+  from the artifact hash and the coverage status.
+* Analytical readiness now requires `FULL_REQUEST_ENUMERATED` or a written
+  incomplete-chain policy. **Raw-capture readiness deliberately does not consult
+  it**: bytes are worth collecting whatever their coverage.
+* A universe source older than two sessions, or from a narrower scope, is
+  refused at `capture_session` rather than at replay.
+
 ## 2.1.9 - settlement-date and expected-universe evidence
 
 v2.1.8 bound every non-payload input to the capture operation. Two of those

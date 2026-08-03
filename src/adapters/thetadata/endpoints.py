@@ -30,6 +30,7 @@ the monitoring layer has to watch, alongside the feeds themselves.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
@@ -78,6 +79,88 @@ MINIMUM_TIER: Final[dict[Endpoint, Tier]] = {
     Endpoint.OPTION_OPEN_INTEREST_HISTORY: Tier.VALUE,
     Endpoint.INDEX_PRICE_HISTORY: Tier.VALUE,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseCapabilities:
+    """What a response can and cannot establish about the contract universe.
+
+    Four separate questions, because v2.1.9 collapsed them into one and got the
+    wrong answer. Its universe resolver accepted any endpoint returning a row
+    per contract as a ``VENDOR_CONTRACT_LIST``, so a quote snapshot -- which
+    returns the contracts the vendor *chose to send* -- established
+    ``MEASURED_COMPLETE`` for the whole request.
+
+    That is the v2 defect in a new place. A response enumerating its own rows
+    says which contracts arrived; it cannot say which were owed, because a
+    truncated response enumerates its own rows perfectly.
+    """
+
+    #: One row per contract in the response. Necessary for extracting
+    #: identities, and on its own it establishes nothing about coverage.
+    enumerates_rows: bool = False
+
+    #: The response is contractually the complete set for the request. No
+    #: ThetaData endpoint this repository has verified makes that promise.
+    enumerates_request_universe: bool = False
+
+    #: The response carries page/total metadata a resolver can read back.
+    carries_pagination_metadata: bool = False
+
+    #: A dedicated listing endpoint whose purpose is to enumerate contracts,
+    #: as opposed to a market-data snapshot that happens to have rows.
+    is_dedicated_contract_list: bool = False
+
+    @property
+    def can_establish_full_coverage(self) -> bool:
+        """Whether a response of this kind could ever prove a complete universe."""
+        return self.enumerates_request_universe or self.is_dedicated_contract_list
+
+    @property
+    def can_supply_identities(self) -> bool:
+        return self.enumerates_rows
+
+
+#: What each endpoint's response can support. Every option snapshot enumerates
+#: its own rows and nothing more: none is a listing endpoint, none promises the
+#: complete requested universe, and none returns pagination metadata this
+#: repository has verified. See OPEN_DECISIONS OD-11.
+RESPONSE_CAPABILITIES: Final[dict[Endpoint, ResponseCapabilities]] = {
+    Endpoint.OPTION_QUOTE_SNAPSHOT: ResponseCapabilities(enumerates_rows=True),
+    Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT: ResponseCapabilities(enumerates_rows=True),
+    Endpoint.OPTION_GREEKS_FIRST_ORDER: ResponseCapabilities(enumerates_rows=True),
+    Endpoint.OPTION_GREEKS_SECOND_ORDER: ResponseCapabilities(enumerates_rows=True),
+    Endpoint.OPTION_GREEKS_ALL: ResponseCapabilities(enumerates_rows=True),
+    Endpoint.OPTION_QUOTE_HISTORY: ResponseCapabilities(enumerates_rows=True),
+    Endpoint.OPTION_OPEN_INTEREST_HISTORY: ResponseCapabilities(enumerates_rows=True),
+    # An index print names one instrument. It enumerates nothing.
+    Endpoint.INDEX_PRICE_SNAPSHOT: ResponseCapabilities(),
+    Endpoint.INDEX_PRICE_HISTORY: ResponseCapabilities(),
+}
+
+#: Convenience for the resolver and the architecture test. Deliberately empty,
+#: and the emptiness is the claim: no verified ThetaData contract-list endpoint
+#: exists, so nothing in this repository can establish a complete universe from
+#: vendor bytes today.
+DEDICATED_CONTRACT_LIST_ENDPOINTS: Final[frozenset[str]] = frozenset(
+    endpoint.value
+    for endpoint, capability in RESPONSE_CAPABILITIES.items()
+    if capability.is_dedicated_contract_list
+)
+
+
+def capabilities_of(endpoint: str) -> ResponseCapabilities:
+    """What an endpoint's response can establish, by URL path.
+
+    Unknown endpoints get the empty capability rather than a permissive
+    default: a response nobody has characterised proves nothing, and defaulting
+    the other way is how a new endpoint would silently acquire authority.
+    """
+    for candidate, capability in RESPONSE_CAPABILITIES.items():
+        if candidate.value == endpoint:
+            return capability
+    return ResponseCapabilities()
+
 
 # Response columns, in the order the CSV format returns them.
 RESPONSE_FIELDS: Final[dict[Endpoint, tuple[str, ...]]] = {

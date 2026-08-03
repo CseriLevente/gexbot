@@ -43,7 +43,7 @@ __all__ = [
 
 #: Bumped when the *meaning* of a settlement rule changes, so a rule recorded
 #: under older semantics is refused rather than reinterpreted.
-SETTLEMENT_EVIDENCE_SCHEMA_VERSION = "settlement-evidence/2.1.9"
+SETTLEMENT_EVIDENCE_SCHEMA_VERSION = "settlement-evidence/2.1.10"
 
 #: Calendars this repository can actually apply. Named rather than assumed: a
 #: rule citing a calendar nobody implemented would otherwise be silently

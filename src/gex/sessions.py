@@ -170,6 +170,26 @@ def to_eastern(dt: datetime) -> datetime:
     return dt.astimezone(EASTERN)
 
 
+def market_session_date(as_of: datetime) -> date:
+    """Which trading session an instant belongs to, in the options market's zone.
+
+    The one place a financial session date is produced. ``as_of.date()`` answers
+    a different question -- it names the calendar day in whatever zone the value
+    happens to carry -- and the two disagree for six hours out of every
+    twenty-four.
+
+    Concretely: 2026-03-18T01:00Z is the 18th in UTC and the *17th* in New York,
+    where the options market was open. A settlement rule applied to the 18th
+    derives a different prior session than one applied to the 17th, and open
+    interest is the linear weight on every GEX term. Callers were reaching for
+    ``.date()`` on a UTC instant in v2.1.9, so the answer depended on which
+    representation of the same moment somebody happened to hold.
+
+    Refuses naive input for the same reason :func:`to_eastern` does.
+    """
+    return to_eastern(as_of).date()
+
+
 def settlement_datetime(
     root: OptionRoot, expiry: date, *, honour_early_close: bool = False
 ) -> datetime:

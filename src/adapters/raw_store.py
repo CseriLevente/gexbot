@@ -60,13 +60,13 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-PARSER_VERSION = "thetadata-v3-parser/2.1.9"
+PARSER_VERSION = "thetadata-v3-parser/2.1.10"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.9"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.10"
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -1522,7 +1522,13 @@ class CaptureSession:
     #: permanently ineligible for a trusted GEX: since v2.1.9 nothing downstream
     #: accepts a settlement rule, so there is no later opportunity to supply one.
     settlement_artifact: Any = None
+    #: The *verified* artifact, where one was resolved before the operation
+    #: opened. Its hash is what the records are stamped with.
     expected_universe: Any = None
+    #: An unresolved declaration, recorded for diagnostics and stamped nowhere.
+    #: Keeping the two in separate fields is what stops a claim reaching the
+    #: completeness measure by being in the same slot as evidence.
+    declared_expected_universe: Any = None
     _sequence: int = 0
 
     @property

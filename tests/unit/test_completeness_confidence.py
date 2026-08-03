@@ -223,25 +223,51 @@ def test_unknown_completeness_makes_the_snapshot_uncalibrated():
 IDS = tuple(cid(k) for k in range(4900, 4950, 10))  # five identities
 
 
+#: Since v2.1.10 the *source label* establishes nothing. A verified measure
+#: carries the artifact hash and the coverage status a resolver produced, and
+#: the matrix below supplies them wherever it means "an independent universe".
+VERIFIED = {
+    "universe_artifact_hash": "a" * 64,
+    "universe_evidence_fingerprint": "e" * 64,
+    "coverage_status": "FULL_REQUEST_ENUMERATED",
+    "resolver_version": "universe-resolver/2.1.10",
+}
+
+
 @pytest.mark.parametrize(
-    ("expected", "source", "received", "status"),
+    ("expected", "source", "received", "verified", "status"),
     [
-        (None, "none", IDS, CompletenessStatus.PARTIALLY_OBSERVED),
-        (IDS, "quote_response", IDS, CompletenessStatus.PARTIALLY_OBSERVED),
-        (IDS, "contract_list", IDS, CompletenessStatus.MEASURED_COMPLETE),
-        (IDS, "contract_list", IDS[:3], CompletenessStatus.MEASURED_INCOMPLETE),
-        ((), "contract_list", (), CompletenessStatus.UNKNOWN),
+        (None, "none", IDS, False, CompletenessStatus.PARTIALLY_OBSERVED),
+        (IDS, "quote_response", IDS, False, CompletenessStatus.PARTIALLY_OBSERVED),
+        (IDS, "contract_list", IDS, True, CompletenessStatus.MEASURED_COMPLETE),
+        (
+            IDS,
+            "contract_list",
+            IDS[:3],
+            True,
+            CompletenessStatus.MEASURED_INCOMPLETE,
+        ),
+        ((), "contract_list", (), True, CompletenessStatus.UNKNOWN),
         # Same *count* as expected, entirely different identities. v2.1.1
         # reported MEASURED_COMPLETE here.
         (
             IDS,
             "contract_list",
             tuple(cid(k) for k in range(5100, 5150, 10)),
+            True,
             CompletenessStatus.MEASURED_INCOMPLETE,
+        ),
+        # The v2.1.10 case: the same label, and no verified artifact behind it.
+        (
+            IDS,
+            "VENDOR_CONTRACT_LIST",
+            IDS,
+            False,
+            CompletenessStatus.PARTIALLY_OBSERVED,
         ),
     ],
 )
-def test_status_matrix(expected, source, received, status):
+def test_status_matrix(expected, source, received, verified, status):
     measure = ChainCompleteness(
         received_quote_count=len(received),
         received_oi_count=len(received),
@@ -250,6 +276,7 @@ def test_status_matrix(expected, source, received, status):
         expected_contract_ids=expected,
         received_contract_ids=received,
         expected_source=source,
+        **(VERIFIED if verified else {}),
     )
     assert measure.status is status
 

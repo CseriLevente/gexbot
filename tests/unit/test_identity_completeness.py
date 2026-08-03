@@ -23,7 +23,15 @@ from src.adapters.thetadata.client import ChainCompleteness, CompletenessStatus
 
 
 def measure(*, expected=None, received=(), source="contract_list", **overrides):
-    """Build a measure from identity sets rather than from counts."""
+    """Build a measure from identity sets rather than from counts.
+
+    These tests are about identity *arithmetic*, so the typed evidence a
+    verified artifact would supply is filled in here. Since v2.1.10 the label
+    alone establishes nothing -- ``expected_source`` is for humans -- and a
+    measure with no artifact hash is ``PARTIALLY_OBSERVED`` however its source
+    is spelled, which is the point of the change and would otherwise make every
+    test in this file about provenance instead.
+    """
     payload = {
         "received_quote_count": len(received),
         "received_oi_count": len(received),
@@ -32,6 +40,10 @@ def measure(*, expected=None, received=(), source="contract_list", **overrides):
         "expected_contract_ids": tuple(expected) if expected is not None else None,
         "received_contract_ids": tuple(received),
         "expected_source": source,
+        "universe_artifact_hash": "a" * 64,
+        "universe_evidence_fingerprint": "e" * 64,
+        "coverage_status": "FULL_REQUEST_ENUMERATED",
+        "resolver_version": "universe-resolver/2.1.10",
     }
     payload.update(overrides)
     return ChainCompleteness(**payload)
@@ -223,7 +235,23 @@ def test_no_independent_universe_is_still_partially_observed():
 
 
 def test_an_expectation_from_the_response_is_still_not_independent():
-    result = measure(expected=[A, B], received=[A, B], source="quote_response")
+    """Expressed as the absence of evidence since v2.1.10.
+
+    It used to be a label on a denylist -- ``expected_source ==
+    "quote_response"``. Taking the expectation from the response being judged
+    means no resolver established anything, so what says so is the missing
+    artifact hash rather than the spelling of the source.
+    """
+    result = measure(
+        expected=[A, B],
+        received=[A, B],
+        source="quote_response",
+        universe_artifact_hash=None,
+        universe_evidence_fingerprint=None,
+        coverage_status="UNKNOWN_COVERAGE",
+        resolver_version=None,
+    )
+    assert not result.independently_observed
     assert result.status is CompletenessStatus.PARTIALLY_OBSERVED
 
 

@@ -42,17 +42,22 @@ AS_OF = eastern(2026, 3, 17, 11, 0)
 
 
 def runtime(tmp_path=None, **overrides):
+    from src.adapters.raw_store import FileRawStore
     from tests.unit.test_thetadata_runtime import csv_response
 
     settings = dict(overrides)
+    store = None
     if tmp_path is not None:
         settings.update(
             raw_capture_enabled=True, raw_capture_path=str(tmp_path / "raw")
         )
+        # Explicit since v2.1.13: a configured path no longer constructs a store.
+        store = FileRawStore(tmp_path / "raw")
     return ThetaDataRuntime.from_config(
         parse_thetadata_config(settings),
         transport=FakeTransport(default=csv_response()),
         clock=lambda: AS_OF,
+        default_raw_store=store,
     )
 
 

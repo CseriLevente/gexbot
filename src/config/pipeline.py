@@ -1481,6 +1481,7 @@ class ThetaDataResearchPipeline:
         transport: Any = None,
         clock: Any = None,
         attempt_observer: Any = None,
+        default_raw_store: Any = None,
     ) -> ThetaDataResearchPipeline:
         """Build one session from the whole configuration file.
 
@@ -1499,6 +1500,7 @@ class ThetaDataResearchPipeline:
             model_spec=loaded.engine.model_spec,
             engine_config=loaded.engine,
             attempt_observer=attempt_observer,
+            default_raw_store=default_raw_store,
         )
 
     @classmethod
@@ -1512,6 +1514,7 @@ class ThetaDataResearchPipeline:
         model_spec: ModelSpec | None = None,
         engine_config: Any = None,
         attempt_observer: Any = None,
+        default_raw_store: Any = None,
     ) -> ThetaDataResearchPipeline:
         """Build a coherent session, or refuse.
 
@@ -1561,6 +1564,7 @@ class ThetaDataResearchPipeline:
             transport=transport,
             clock=clock,
             attempt_observer=attempt_observer,
+            default_raw_store=default_raw_store,
         )
         # Runs on the IV question alone. In v2.1.3 selecting the vendor-gamma
         # comparison moved the session into a different ``PricingMode`` and this
@@ -1936,7 +1940,7 @@ class ThetaDataResearchPipeline:
         """
         return {
             "pipeline_fingerprint": self.fingerprint(),
-            "config": self.config.as_dict(),
+            "config": self.config.semantic_payload(),
             "model": (
                 self.model_spec.as_dict()
                 if hasattr(self.model_spec, "as_dict")
@@ -3621,7 +3625,10 @@ class ThetaDataResearchPipeline:
         """
         payload = json.dumps(
             {
-                "config": self.config.as_dict(),
+                # Semantic, not storage. A destination path is an operational
+                # fact and belongs in the run report, not in the identity every
+                # record is stamped with.
+                "config": self.config.semantic_payload(),
                 "model": self.model_spec.as_dict()
                 if hasattr(self.model_spec, "as_dict")
                 else self.model_spec.fingerprint(),

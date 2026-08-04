@@ -20,7 +20,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2328 tests, 90% coverage
+.venv/Scripts/python.exe -m pytest         # 2355 tests, 90% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no
@@ -142,7 +142,14 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Capture origin derived from the destination | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; a local Theta Terminal is `LOCAL_TERMINAL_CAPTURE`, a vendor URL is `LIVE_HTTP_CAPTURE` |
 | Every HTTP attempt accounted for | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES`; retryable 429 and 5xx bodies are preserved content-addressed and are never chain data |
 | A partial failure always writes a manifest and a summary | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES`; `FAILED_PARTIAL`, a partial manifest that cannot verify, and a documented exit code |
-| Dry run is network- and filesystem-non-mutating | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; the destination does not exist afterwards |
+| Dry run is network- and filesystem-non-mutating | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; snapshotted before and after against the whole repository tree |
+| No store is created from a configuration path | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a fallback path names where a store *would* go, and the operator constructs exactly one |
+| The run destination is claimed atomically | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; two concurrent runs, one directory, one winner |
+| Stored response bodies are byte-preserving | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; entity bytes, hashed as stored, with the decoding recorded separately |
+| Oversized and unanswered requests appear in the attempt log | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; and `FAILED_NO_RESPONSE` is not `FAILED_BEFORE_REQUEST` |
+| Vendor 400/401/403/429 get their own operator classification | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; none of them is an internal error |
+| `Retry-After` is a floor on the backoff | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; it can lengthen a wait and never shorten one |
+| Attempt evidence survives a finalization failure | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; an fsynced append-only index plus an emergency summary |
 | Destinations resolved through symlinks, never reused | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; and run ids carry a cryptographic nonce |
 | Documentation universe evidence survives a process restart | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; the rule and the verified bytes are content-addressed, so recovery needs no global registry |
 | Pipeline differences derived, not declared | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; a waiver approves a computed diff and cannot state one |

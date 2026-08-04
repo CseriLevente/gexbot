@@ -228,11 +228,11 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.12` | `pyproject.toml` | anything ships |
+| Package version | `2.1.13` | `pyproject.toml` | anything ships |
 | Parser version | `thetadata-v3-parser/2.1.10` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
 | Manifest schema | `raw-capture-manifest/2.1.10` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
-| Certification schema | `adapter-certification/2.1.12` | `src/adapters/certification.py` | what a readiness verdict means changes |
+| Certification schema | `adapter-certification/2.1.13` | `src/adapters/certification.py` | what a readiness verdict means changes |
 | Validation schema | `adapter-validation/2.1.10` | `src/adapters/validation.py` | what a validation report means changes |
 | Normalization schema | `normalized-chain/2.1.10` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
 | Request-spec schema | `thetadata-request-spec/2.1.10` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
@@ -245,10 +245,11 @@ They move independently, and conflating them is how a change hides.
 | Universe-documentation schema | `universe-documentation/2.1.12` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
 | Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
 | Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
-| Operator-report schema | `raw-capture-run/2.1.12` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
-| Run-intent schema | `raw-capture-intent/2.1.12` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
-| HTTP-attempt schema | `http-attempt/2.1.12` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
-| Analytical-readiness schema | `analytical-readiness/2.1.12` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
+| Operator-report schema | `raw-capture-run/2.1.13` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
+| Run-intent schema | `raw-capture-intent/2.1.13` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
+| HTTP-attempt schema | `http-attempt/2.1.13` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
+| Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
+| Raw-response schema | `raw-response/2.1.13` | `src/adapters/raw_store.py` | what a stored payload *is* changes -- v2.1.13 stores entity bytes rather than a re-encoding of a lossily decoded string |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

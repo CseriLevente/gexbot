@@ -1,5 +1,69 @@
 # Changelog
 
+## 2.1.13 - the capture path, checked against itself
+
+The final code release before the first paid session. v2.1.12 made the command
+safe to run; running it found that the safest-looking part of it was writing
+into the checkout.
+
+**`build_thetadata_client` constructed `FileRawStore(config.raw_capture_path)`
+during pipeline construction, for every caller.** The operator writes its capture
+to `<output>/raw` and passes that store to the session, so the configured one
+received nothing -- and the shipped profile says `artifacts/raw`. Merely building
+a pipeline created that directory inside the repository, and the dry run, whose
+report says `wrote_files=false`, created it too.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.12 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | A configured path constructed a store | Two stores, one unused, and both the dry and live runs created `artifacts/raw` inside the checkout | Nothing constructs a filesystem store from configuration. `default_raw_store=` is explicit, the operator builds exactly one under its claimed run root, and the report names the *effective* path beside the configured fallback |
+| 2 | Check-then-create on the destination | Two concurrent runs both observed an empty path, both proceeded, and mixed eight records into one manifest while overwriting each other's intent and summary | `mkdir(exist_ok=False)` **before** any store, attempt log or intent exists. One `mkdir` wins; the other run is refused before it sends |
+| 3 | Bodies were decoded with `errors="replace"` and re-encoded | The store's digest was the hash of *our reading* of the response, not of the response | `HttpResponse.body` carries the entity bytes; the store writes and hashes them; `decode_text()` returns a typed `DecodedBody` with the content type, charsets, decode status and both digests |
+| 4 | An oversized response raised before the observer ran | The attempt log reported zero attempts for a request that had definitely been made -- the one failure where the size is the whole finding | A typed `RESPONSE_TOO_LARGE` attempt carrying the configured cap and the bytes read, from both the cap check and the streaming reader; and its own exit code, not `SCHEMA_ERROR` |
+| 5 | The run state came from stored records | Four attempts against a Theta Terminal that was not running read as `FAILED_BEFORE_REQUEST` | `RawCaptureRunState.from_evidence`: zero attempts, no response, or something answered. `FAILED_NO_RESPONSE` is the new middle case |
+| 6 | Five error classes were classified | A vendor 400, 401 or 403 arrives as a `ThetaDataHTTPError` subclass and fell through to `INTERNAL_ERROR` -- sending an operator to read this code instead of their environment | The whole public hierarchy, plus the cause chain, so a retry budget spent on 429s is `RATE_LIMITED` rather than a bare `RETRY_EXHAUSTED`. Eleven categories, distinct exit codes |
+| 7 | `Retry-After` could shorten a backoff | `max(retry_after, backoff_base_seconds)` is the *first* delay, so on attempt four a `Retry-After: 1` cut an eight-second wait to one | `min(max(retry_after, computed), cap)`. The vendor asking us to wait longer is information; asking us to hammer sooner is not |
+| 8 | Finalization was outside the guard | A failure in the manifest, the scan or the rename leaked the connection pool | The whole lifecycle is wrapped and the transport is closed in `finally`; a finalization failure writes `capture-summary-emergency.json` with what is in memory and says `manifest_written: false` |
+| 9 | Attempt metadata lived in memory until the summary | An interpreter that died left content-addressed bodies nobody could attribute to a request | `attempts/index.jsonl`, appended and fsynced per attempt, readable by `HttpAttemptLog.recovered_from`. Existing bodies are verified before reuse |
+| 10 | `VerifiedAnalyticalEvidenceContext` was an input | It is a public frozen dataclass, so writing one with six `True`-shaped fields returned `READY_FOR_ANALYTICAL_DATASET` | `assess_analytical_readiness` takes primitive evidence and derives the context; the context is returned as the derivation report |
+| 11 | Storage paths were in the semantic fingerprint | Moving a capture from `/disk-a` to `/disk-b` changed the pipeline identity every record is stamped with | `ThetaDataConfig.semantic_payload()` excludes `raw_capture_path` and `raw_capture_enabled`. The actual path is recorded in the run report |
+| 12 | No Windows operator examples | The first session is being run from PowerShell | Documented, including `--execute-live` and drive-qualified path semantics |
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | **no change** |
+| `EXPECTED_MODEL_FINGERPRINT` | `32b4694cef709838` | unchanged | **no change** |
+| `EXPECTED_OUTPUT_HASH` | `0e536883...` | unchanged | **no change** |
+
+`MODEL_VERSION` stays `gex-engine/2.1.10` and `PARSER_VERSION` stays
+`thetadata-v3-parser/2.1.10`: the byte-to-text interpretation of a UTF-8 CSV is
+unchanged, and no numerical input moved.
+
+### Behavioural changes worth knowing
+
+* `build_thetadata_client`, `ThetaDataRuntime.from_config` and
+  `ThetaDataResearchPipeline.from_config/from_loaded_config` take
+  `default_raw_store=`. Without it the client uses `NullRawStore`.
+* `HttpResponse` gained `body: bytes` and `decode_text()`. `text` remains, as a
+  reading of the bytes; a fixture may still supply either.
+* `RawResponseStore.put(payload=...)` accepts `str | bytes`, and `get_body()` is
+  the authoritative accessor. `payload_hash` is over bytes.
+* `assess_analytical_readiness` takes `pipeline=`, `chain=`, `manifest=`,
+  `store=`, `artifact_store=`, `pricing_compatibility=`.
+* `ByteLimitedReader.read` returns `bytes` and no longer takes an encoding.
+* Attempt bodies are `.bin`, not `.txt`.
+
+---
+
 ## 2.1.12 - the first real session, and two evidence-recovery gaps
 
 One objective: make the first raw-only ThetaData session operationally safe,

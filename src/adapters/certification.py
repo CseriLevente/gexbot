@@ -1357,6 +1357,9 @@ class AnalyticalReadinessReport:
     universe: UniverseReadiness = UniverseReadiness.UNIVERSE_NOT_READY
     blockers: tuple[str, ...] = ()
     satisfied: tuple[str, ...] = ()
+    #: The evidence this verdict was derived from. An *output*: it is what the
+    #: gate established, not something a caller may hand back in.
+    derivation: Any = None
 
     @property
     def ready(self) -> bool:
@@ -1370,11 +1373,14 @@ class AnalyticalReadinessReport:
             "blockers": list(self.blockers),
             "satisfied": list(self.satisfied),
             "requirements": list(ANALYTICAL_DATASET_REQUIREMENTS),
+            "derivation": (
+                self.derivation.as_dict() if self.derivation is not None else None
+            ),
         }
 
 
 #: Bumped when what an analytical-readiness verdict rests on changes.
-ANALYTICAL_READINESS_SCHEMA_VERSION = "analytical-readiness/2.1.12"
+ANALYTICAL_READINESS_SCHEMA_VERSION = "analytical-readiness/2.1.13"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1525,23 +1531,40 @@ def build_analytical_evidence(
 
 
 def assess_analytical_readiness(
-    context: VerifiedAnalyticalEvidenceContext,
+    *,
+    pipeline: Any,
+    chain: Any,
+    manifest: Any,
+    store: Any,
+    artifact_store: Any = None,
+    pricing_compatibility: Any = None,
 ) -> AnalyticalReadinessReport:
     """All six conditions, or ``NOT_ANALYTICALLY_READY`` naming the missing ones.
 
-    Takes only a context :func:`build_analytical_evidence` produced. v2.1.11
-    took six independent ``Any`` arguments, and six fabricated objects with the
-    right attribute names returned ``READY_FOR_ANALYTICAL_DATASET``.
+    Takes the **primitive evidence** and derives the context itself.
+
+    v2.1.11 took six loose ``Any`` arguments and six ``SimpleNamespace`` objects
+    were ready. v2.1.12 required a ``VerifiedAnalyticalEvidenceContext`` -- which
+    is a public frozen dataclass, so constructing one with six ``True``-shaped
+    fields was the same defect wearing a type. The context is still returned, as
+    the *derivation report*; it is no longer an input, because a caller holding
+    one is a caller who wrote one.
     """
-    if not isinstance(context, VerifiedAnalyticalEvidenceContext):
-        raise ThetaDataCertificationError(
-            "assess_analytical_readiness takes a VerifiedAnalyticalEvidenceContext, "
-            f"got {type(context).__name__}. Build one with "
-            "build_analytical_evidence(pipeline=..., chain=..., manifest=..., "
-            "store=...), which re-derives the chain and re-verifies the capture "
-            "itself -- v2.1.11 accepted six loose objects, and six fabricated "
-            "ones were ready."
-        )
+    context = build_analytical_evidence(
+        pipeline=pipeline,
+        chain=chain,
+        manifest=manifest,
+        store=store,
+        artifact_store=artifact_store,
+        pricing_compatibility=pricing_compatibility,
+    )
+    return _report_for(context)
+
+
+def _report_for(
+    context: VerifiedAnalyticalEvidenceContext,
+) -> AnalyticalReadinessReport:
+    """Turn a derived context into the verdict. Internal on purpose."""
     blockers: list[str] = list(context.derivation_failures)
     satisfied: list[str] = []
 
@@ -1616,6 +1639,7 @@ def assess_analytical_readiness(
         universe=universe,
         blockers=tuple(blockers),
         satisfied=tuple(satisfied),
+        derivation=context,
     )
 
 

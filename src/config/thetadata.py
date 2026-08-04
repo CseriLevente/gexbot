@@ -394,6 +394,23 @@ class ThetaDataConfig:
             )
         return username, password
 
+    #: Keys that say *where bytes go*, not what the numbers mean. Excluded from
+    #: the semantic identity: moving a capture from ``/disk-a`` to ``/disk-b``
+    #: changes nothing about the market data, the request, the pricing model or
+    #: the normalized chain, and until v2.1.13 it changed the pipeline
+    #: fingerprint -- which every capture is stamped with and every replay
+    #: compares. Two identical sessions written to two disks were two different
+    #: pipelines.
+    STORAGE_ONLY_KEYS = ("raw_capture_path", "raw_capture_enabled")
+
+    def semantic_payload(self) -> dict[str, Any]:
+        """What changes a number, and nothing about where it is stored."""
+        return {
+            key: value
+            for key, value in self.as_dict().items()
+            if key not in self.STORAGE_ONLY_KEYS
+        }
+
     def as_dict(self) -> dict[str, Any]:
         """Serialisable settings. Contains env-var *names*, never values."""
         return {
@@ -1049,6 +1066,7 @@ def build_thetadata_client(
     transport: Any = None,
     clock: Any = None,
     attempt_observer: Any = None,
+    default_raw_store: Any = None,
 ) -> ThetaDataClient:
     """The one sanctioned way to construct a configured client.
 
@@ -1061,7 +1079,7 @@ def build_thetadata_client(
     is omitted a real HTTP transport is built from the config, wrapped in the
     retry policy.
     """
-    from src.adapters.raw_store import FileRawStore, NullRawStore
+    from src.adapters.raw_store import NullRawStore
     from src.adapters.thetadata.client import (
         GreeksParameters,
         ThetaDataClient,
@@ -1093,11 +1111,19 @@ def build_thetadata_client(
         attempt_observer=attempt_observer,
     )
 
-    store = (
-        FileRawStore(config.raw_capture_path)
-        if config.raw_capture_enabled and config.raw_capture_path
-        else NullRawStore()
-    )
+    # **No filesystem store is created from a configuration path.**
+    #
+    # v2.1.12 built ``FileRawStore(config.raw_capture_path)`` here, during
+    # pipeline construction, for every caller. The operator writes its capture to
+    # ``<output>/raw`` and passes that store to the session, so this one received
+    # nothing -- and because the shipped profile says ``artifacts/raw``, merely
+    # *constructing a pipeline* created a directory inside the checkout. The dry
+    # run, whose whole promise is that it writes nothing, created it too.
+    #
+    # A path in configuration is a statement about where a store *would* go. It
+    # is not an instruction to make one. Ownership is now explicit: whoever wants
+    # a durable store constructs it and hands it over.
+    store = default_raw_store if default_raw_store is not None else NullRawStore()
 
     return ThetaDataClient(
         settings=ThetaDataSettings(
@@ -1139,6 +1165,10 @@ def effective_transport_settings(config: ThetaDataConfig) -> dict[str, Any]:
     username, _ = config.resolved_credentials()
     return {
         "base_url": _safe_base_url(config.base_url),
+        # What the profile *names* as a fallback destination, and whether
+        # anything is using it. v2.1.12 reported one path and wrote to another.
+        "configured_fallback_raw_capture_path": config.raw_capture_path,
+        "configured_raw_capture_enabled": config.raw_capture_enabled,
         "authentication_mode": config.authentication_mode.value,
         "credentials_resolved": bool(kwargs["basic_auth"]),
         "username_env": config.username_env or "THETADATA_USERNAME",
@@ -1203,6 +1233,7 @@ class ThetaDataRuntime:
         transport: Any = None,
         clock: Any = None,
         attempt_observer: Any = None,
+        default_raw_store: Any = None,
     ) -> ThetaDataRuntime:
         """The one sanctioned entry point. Nothing else assembles a session."""
         from src.adapters.thetadata.client import ChainRequest
@@ -1213,6 +1244,7 @@ class ThetaDataRuntime:
                 transport=transport,
                 clock=clock,
                 attempt_observer=attempt_observer,
+                default_raw_store=default_raw_store,
             ),
             default_chain_request=ChainRequest(
                 symbol=symbol,

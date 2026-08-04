@@ -1497,33 +1497,40 @@ def test_the_completeness_only_function_no_longer_returns_a_dataset_verdict():
     assert "READY_FOR_ANALYTICAL_DATASET" not in values
 
 
-def test_fabricated_analytical_inputs_cannot_return_ready():
-    """The named v2.1.12 regression.
+def test_a_manually_built_context_cannot_reach_the_readiness_gate():
+    """The named v2.1.13 regression.
 
-    v2.1.11 took six loose ``Any`` arguments, and every one was satisfiable by a
-    ``SimpleNamespace``: a receipt whose ``matches()`` always returned true, a
-    report with an empty ``blocking_dimensions``, a completeness object with the
-    right ``coverage_status`` string. Six fabricated objects were ready.
+    v2.1.11 took six loose ``Any`` arguments and six ``SimpleNamespace`` objects
+    were ready. v2.1.12 required a ``VerifiedAnalyticalEvidenceContext`` -- which
+    is a public frozen dataclass, so writing one with six ``True``-shaped fields
+    was the same defect wearing a type. The public gate takes primitives and
+    derives the context itself.
     """
-    import types
+    import inspect
 
-    from src.adapters.certification import assess_analytical_readiness
-    from src.adapters.errors import ThetaDataCertificationError
+    from src.adapters.certification import (
+        VerifiedAnalyticalEvidenceContext,
+        assess_analytical_readiness,
+    )
 
-    forged = types.SimpleNamespace(
+    forged = VerifiedAnalyticalEvidenceContext(
         normalization_matches=True,
         settlement_established=True,
         pricing_dimensions_unresolved=(),
-        universe="UNIVERSE_READY",
+        universe=__import__(
+            "src.adapters.certification", fromlist=["UniverseReadiness"]
+        ).UniverseReadiness.UNIVERSE_READY,
         excluded_records=(),
         capture_pipeline_fingerprint="a" * 64,
         reading_pipeline_fingerprint="a" * 64,
-        derivation_failures=(),
-        matches=lambda *_: True,
-        blocking_dimensions=(),
     )
-    with pytest.raises(ThetaDataCertificationError, match=r"(?i)VerifiedAnalytical"):
-        assess_analytical_readiness(forged)
+    # It still constructs -- it is the derivation *report* -- and there is now
+    # no parameter it fits into.
+    parameters = inspect.signature(assess_analytical_readiness).parameters
+    assert "context" not in parameters
+    assert set(parameters) >= {"pipeline", "chain", "manifest", "store"}
+    with pytest.raises(TypeError):
+        assess_analytical_readiness(forged)  # type: ignore[call-arg]
 
 
 def test_analytical_readiness_requires_every_condition_it_names():
@@ -1533,10 +1540,10 @@ def test_analytical_readiness_requires_every_condition_it_names():
         AnalyticalReadiness,
         UniverseReadiness,
         VerifiedAnalyticalEvidenceContext,
-        assess_analytical_readiness,
+        _report_for,
     )
 
-    report = assess_analytical_readiness(
+    report = _report_for(
         VerifiedAnalyticalEvidenceContext(
             normalization_matches=False,
             settlement_established=False,
@@ -1565,11 +1572,10 @@ def test_the_shipped_capture_is_not_analytically_ready():
     from src.adapters.certification import (
         AnalyticalReadiness,
         assess_analytical_readiness,
-        build_analytical_evidence,
     )
 
     owned, _ = capture_with_universe()
-    context = build_analytical_evidence(
+    report = assess_analytical_readiness(
         pipeline=owned.pipeline,
         chain=owned.chain,
         manifest=owned.manifest,
@@ -1577,6 +1583,10 @@ def test_the_shipped_capture_is_not_analytically_ready():
         artifact_store=owned.artifacts,
         pricing_compatibility=owned.pipeline.pricing_compatibility,
     )
-    report = assess_analytical_readiness(context)
     assert report.state is AnalyticalReadiness.NOT_ANALYTICALLY_READY
     assert any("FULL_REQUEST_ENUMERATED" in blocker for blocker in report.blockers)
+    # And the derivation travels with the verdict, as an output.
+    assert report.derivation is not None
+    assert report.as_dict()["derivation"]["schema_version"].startswith(
+        "analytical-readiness/"
+    )

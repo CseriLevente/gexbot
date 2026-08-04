@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.12"
+    assert package["project"]["version"] == "2.1.13"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine and parser stay at 2.1.10: v2.1.11 changed what a universe has
@@ -319,11 +319,12 @@ def test_all_three_versions_are_documented():
         "capture-verification/2.1.11",
         # v2.1.12.
         "universe-resolver/2.1.12",
-        "adapter-certification/2.1.12",
+        "adapter-certification/2.1.13",
         "universe-documentation/2.1.12",
-        "raw-capture-run/2.1.12",
-        "raw-capture-intent/2.1.12",
-        "http-attempt/2.1.12",
-        "analytical-readiness/2.1.12",
+        "raw-capture-run/2.1.13",
+        "raw-capture-intent/2.1.13",
+        "http-attempt/2.1.13",
+        "analytical-readiness/2.1.13",
+        "raw-response/2.1.13",
     ):
         assert version in text, version

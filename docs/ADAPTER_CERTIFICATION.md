@@ -1032,3 +1032,88 @@ artifacts itself.
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
 `ADAPTER_CERTIFIED`. What changed is that the session which produces the first
 evidence is now safe to run, and honest about what it produced.
+
+---
+
+## v2.1.13: what running it found
+
+v2.1.12's command was reviewed against a session that actually happens. The
+finding that matters is small to state and was invisible from inside the report.
+
+`build_thetadata_client` constructed `FileRawStore(config.raw_capture_path)`
+during pipeline construction. The operator writes its capture to `<output>/raw`
+and hands that store to the session, so the configured one received nothing --
+and the shipped profile names `artifacts/raw`. Building a pipeline created that
+directory inside the checkout. The dry run, which exists to write nothing and
+reports `wrote_files=false`, created it too.
+
+Nothing constructs a filesystem store from a configuration path any more. A
+`raw_capture_path` names where a store *would* go; the operator builds exactly
+one, under a run root it has claimed, and the report distinguishes the configured
+fallback from the effective destination.
+
+### The destination is claimed, not checked
+
+`mkdir(exist_ok=False)`, after path validation and before any store, attempt log
+or intent document exists. v2.1.12 checked that the path was empty and created
+the stores afterwards, so two processes could both observe an empty path and both
+proceed -- reproduced, with two runs completing into one directory, mixing eight
+records and overwriting each other's top-level documents. Exactly one `mkdir`
+wins now.
+
+### The stored bytes are the vendor's bytes
+
+`HttpResponse.body` carries the HTTP entity body after content decoding, the
+store writes and hashes exactly those bytes, and decoding is a separate recorded
+step: content type, declared and selected charset, whether any byte was replaced,
+and the digest of the text alongside the digest of the bytes.
+
+v2.1.12 decoded in the transport with `errors="replace"` and the store
+re-encoded that string as UTF-8. Two lossy conversions between the socket and the
+file, and the digest was called the hash of the vendor's response.
+
+### Every attempt, including the ones with nothing in them
+
+An oversized response now produces a typed `RESPONSE_TOO_LARGE` attempt carrying
+the configured cap and the bytes read -- from the cap check and from the
+streaming reader, which are two different places the same failure can surface.
+v2.1.12 raised from both and the attempt log reported zero attempts, on the one
+failure where the size of the thing is the finding.
+
+Run state is derived from the attempt log rather than from stored records, so
+"nothing was sent", "nothing answered" and "something answered and then stopped"
+are three states rather than one.
+
+### A vendor's refusal is not our bug
+
+The classifier covers the whole public `ThetaDataError` hierarchy and follows the
+cause chain, so a 401 is `AUTHENTICATION_REJECTED`, a 400 is `VENDOR_HTTP_ERROR`,
+and a retry budget spent on 429s is `RATE_LIMITED`. All three were
+`INTERNAL_ERROR`, which points an operator at this code instead of at their
+environment.
+
+### Evidence that outlives the run
+
+`attempts/index.jsonl` is appended and fsynced as each attempt happens, so the
+attempt evidence survives an interpreter that dies or a finalization that fails.
+The lifecycle is wrapped and the transport is closed in `finally`; when
+finalization is itself what broke, the run writes an emergency summary carrying
+what is in memory and saying plainly that there is no manifest.
+
+**The guarantee, stated accurately:** every ordinary controlled failure produces
+a manifest and a summary; a storage or finalization failure produces a
+best-effort emergency summary.
+
+### Two identities, kept apart
+
+A destination path is an operational fact. It was inside the pipeline
+fingerprint, so the same session written to two disks was two pipelines --
+and that fingerprint is stamped on every record and compared by every replay.
+Storage keys are excluded from the semantic payload and recorded in the run
+report instead.
+
+### What this changes about the shipped state
+
+Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
+`ADAPTER_CERTIFIED`. What changed is that the command can now be run without
+modifying the repository it was run from.

@@ -1522,11 +1522,18 @@ class ThetaDataClient:
             ) from exc
         received = self._clock()
 
+        # Decoded once, here, and recorded. The *bytes* are what reaches the
+        # store; this is the reading of them, and everything below parses the
+        # reading. v2.1.12 stored the reading and called its digest the hash of
+        # the vendor's response.
+        decoded = response.decode_text()
+        body_text = decoded.text
+
         if capture is not None:
             capture.capture(
                 endpoint=endpoint.value,
                 query_params=dict(params),
-                payload=response.text,
+                payload=response.body,
                 request_started_at=started,
                 response_received_at=received,
                 http_status=response.status_code,
@@ -1546,10 +1553,10 @@ class ThetaDataClient:
                 endpoint=endpoint.value,
                 status_code=response.status_code,
                 request_id=response.request_id,
-                body_length=len(response.text),
+                body_length=decoded.byte_length,
             )
 
-        vendor_error = detect_vendor_error(response.text)
+        vendor_error = detect_vendor_error(body_text)
         if vendor_error:
             raise ThetaDataVendorError(
                 f"{endpoint.value} returned a vendor error body: {vendor_error}"
@@ -1558,7 +1565,7 @@ class ThetaDataClient:
         # is a legitimate outcome for a filtered request. Confirm the body is
         # actually CSV before drawing that conclusion.
         body_status, body_detail = validate_csv_body(
-            normalize_response_body(response.text),
+            normalize_response_body(body_text),
             required=tuple(sorted(REQUIRED_COLUMNS.get(endpoint, set()))),
         )
         if body_status is not CsvBodyStatus.VALID_EMPTY_CSV:
@@ -1567,7 +1574,7 @@ class ThetaDataClient:
                 f"body that is not usable CSV ({body_status.value}): {body_detail}"
             )
 
-        rows = parse_csv(normalize_response_body(response.text))
+        rows = parse_csv(normalize_response_body(body_text))
         check_schema(rows, endpoint)
         return rows
 

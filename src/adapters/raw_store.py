@@ -348,8 +348,27 @@ def _moment_or_none(value: Any) -> datetime | None:
         return None
 
 
-def payload_hash(payload: str) -> str:
+#: What a stored raw payload *is*. Bumped when that changes, which it did in
+#: v2.1.13: the store now holds the response's entity bytes rather than a UTF-8
+#: re-encoding of a lossily decoded string.
+RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.13"
+
+
+def payload_hash(payload: str | bytes) -> str:
+    """SHA-256 over the *stored bytes*.
+
+    Text is encoded as UTF-8 for the same result it always gave, so every
+    existing fixture hashes identically. What changed is that a caller with real
+    bytes can hand them over unaltered: v2.1.12 could only accept a string, and
+    the string had already been through ``errors="replace"``.
+    """
+    if isinstance(payload, bytes):
+        return hashlib.sha256(payload).hexdigest()
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _as_body(payload: str | bytes) -> bytes:
+    return payload if isinstance(payload, bytes) else payload.encode("utf-8")
 
 
 def canonical_parameter_hash(params: Mapping[str, Any]) -> str:
@@ -388,7 +407,7 @@ def build_record_id(
     sequence: int,
     endpoint: str,
     query_params: Mapping[str, Any],
-    payload: str,
+    payload: str | bytes,
 ) -> str:
     """Collision-safe, deterministic, filesystem-safe record id.
 
@@ -706,7 +725,7 @@ class RawResponseStore(Protocol):
         record_id: str,
         endpoint: str,
         query_params: dict[str, Any],
-        payload: str,
+        payload: str | bytes,
         request_started_at: datetime,
         response_received_at: datetime,
         http_status: int,
@@ -718,6 +737,8 @@ class RawResponseStore(Protocol):
     ) -> RawResponseRecord: ...
 
     def get_payload(self, record_id: str) -> str: ...
+
+    def get_body(self, record_id: str) -> bytes: ...
 
     def records(self) -> tuple[RawResponseRecord, ...]: ...
 
@@ -736,7 +757,7 @@ class InMemoryRawStore:
 
     def __init__(self) -> None:
         self._records: dict[str, RawResponseRecord] = {}
-        self._payloads: dict[str, str] = {}
+        self._payloads: dict[str, bytes] = {}
 
     def put(
         self,
@@ -744,7 +765,7 @@ class InMemoryRawStore:
         record_id: str,
         endpoint: str,
         query_params: dict[str, Any],
-        payload: str,
+        payload: str | bytes,
         request_started_at: datetime,
         response_received_at: datetime,
         http_status: int,
@@ -769,7 +790,7 @@ class InMemoryRawStore:
             payload_hash=payload_hash(payload),
             payload_location=f"memory://{record_id}",
             vendor_schema_version=vendor_schema_version,
-            byte_length=len(payload.encode("utf-8")),
+            byte_length=len(_as_body(payload)),
             request_id=request_id,
             request_sequence=request_sequence,
             capture_origin=(
@@ -809,10 +830,20 @@ class InMemoryRawStore:
             ),
         )
         self._records[record_id] = record
-        self._payloads[record_id] = payload
+        self._payloads[record_id] = _as_body(payload)
         return record
 
     def get_payload(self, record_id: str) -> str:
+        """The stored bytes, read as text. See :meth:`get_body` for the bytes."""
+        return self.get_body(record_id).decode("utf-8", errors="replace")
+
+    def get_body(self, record_id: str) -> bytes:
+        """Exactly what was stored.
+
+        The authoritative accessor since v2.1.13: ``payload_hash`` is taken over
+        these bytes, so anything checking a digest has to compare against them
+        rather than against a decoding of them.
+        """
         if record_id not in self._payloads:
             raise KeyError(record_id)
         return self._payloads[record_id]
@@ -870,7 +901,7 @@ class FileRawStore:
         record_id: str,
         endpoint: str,
         query_params: dict[str, Any],
-        payload: str,
+        payload: str | bytes,
         request_started_at: datetime,
         response_received_at: datetime,
         http_status: int,
@@ -896,7 +927,7 @@ class FileRawStore:
             payload_hash=payload_hash(payload),
             payload_location=str(path),
             vendor_schema_version=vendor_schema_version,
-            byte_length=len(payload.encode("utf-8")),
+            byte_length=len(_as_body(payload)),
             request_id=request_id,
             request_sequence=request_sequence,
             capture_origin=(
@@ -943,13 +974,21 @@ class FileRawStore:
         return record
 
     @staticmethod
-    def _atomic_write(path: pathlib.Path, payload: str) -> None:
+    def _atomic_write(path: pathlib.Path, payload: str | bytes) -> None:
+        """Binary, always.
+
+        v2.1.12 opened the file in text mode with ``newline=""``, so the bytes
+        on disk were a UTF-8 re-encoding of a string that had already been
+        decoded with ``errors="replace"``. Two lossy conversions between the
+        socket and the file, and the digest was described as the hash of the
+        vendor's response.
+        """
         handle, temp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=".partial-", suffix=".tmp"
         )
         try:
-            with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
-                stream.write(payload)
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(_as_body(payload))
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temp_name, path)
@@ -1156,10 +1195,15 @@ class FileRawStore:
         return tuple(sorted(p.name for p in self._root.glob(".partial-*.tmp")))
 
     def get_payload(self, record_id: str) -> str:
+        """The stored bytes, read as text. See :meth:`get_body` for the bytes."""
+        return self.get_body(record_id).decode("utf-8", errors="replace")
+
+    def get_body(self, record_id: str) -> bytes:
+        """Exactly the bytes that were written, byte for byte."""
         path = self._payload_path(record_id)
         if not path.exists():
             raise KeyError(record_id)
-        return path.read_text(encoding="utf-8")
+        return path.read_bytes()
 
     def records(self) -> tuple[RawResponseRecord, ...]:
         if not self._index.exists():
@@ -1236,7 +1280,7 @@ class NullRawStore:
         record_id: str,
         endpoint: str,
         query_params: dict[str, Any],
-        payload: str,
+        payload: str | bytes,
         request_started_at: datetime,
         response_received_at: datetime,
         http_status: int,
@@ -1256,7 +1300,7 @@ class NullRawStore:
             payload_hash=payload_hash(payload),
             payload_location="null://discarded",
             vendor_schema_version=vendor_schema_version,
-            byte_length=len(payload.encode("utf-8")),
+            byte_length=len(_as_body(payload)),
             request_id=request_id,
             request_sequence=request_sequence,
             capture_origin=(
@@ -1297,6 +1341,9 @@ class NullRawStore:
         )
 
     def get_payload(self, record_id: str) -> str:
+        raise KeyError(record_id)
+
+    def get_body(self, record_id: str) -> bytes:
         raise KeyError(record_id)
 
     def records(self) -> tuple[RawResponseRecord, ...]:
@@ -1589,7 +1636,7 @@ class CaptureSession:
         *,
         endpoint: str,
         query_params: dict[str, Any],
-        payload: str,
+        payload: str | bytes,
         request_started_at: datetime,
         response_received_at: datetime,
         http_status: int,

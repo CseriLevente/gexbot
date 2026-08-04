@@ -20,12 +20,15 @@ was built from, and these live in their own directory with their own schema.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import pathlib
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from src.adapters.errors import ThetaDataRawStoreError
 from src.domain.digests import digest_of
 
 __all__ = [
@@ -36,8 +39,13 @@ __all__ = [
     "safe_headers",
 ]
 
+#: Attempt bodies are stored with this suffix because they are bytes, not text.
+#: v2.1.12 used ``.txt`` for a body that had already been through
+#: ``errors="replace"``, which was consistent and wrong in the same direction.
+ATTEMPT_BODY_SUFFIX = ".bin"
+
 #: Bumped when the *meaning* of an attempt record changes.
-HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.12"
+HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.13"
 
 #: Response headers worth keeping. Everything else is dropped rather than
 #: filtered: an allow-list cannot leak a header nobody thought about, and a
@@ -88,10 +96,27 @@ class HttpAttemptRecord:
     response_byte_length: int | None = None
     transport_error_code: str | None = None
     retryable: bool = False
+    #: Whatever this particular failure needs to be understood -- the configured
+    #: cap and the bytes read, for a ``RESPONSE_TOO_LARGE``. Typed loosely on
+    #: purpose: an error class nobody has met yet should be able to say what
+    #: happened without a schema change.
+    detail: dict[str, Any] = field(default_factory=dict)
+    #: How the body was read, when there was one.
+    decode: dict[str, Any] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> bool:
-        return self.status_code is not None and 200 <= self.status_code < 300
+        """A 2xx *and* nothing that stopped it being usable.
+
+        A response too large to read carries a 200 and is not a success: the
+        status describes what the vendor meant to send, and the error code
+        describes what this process could do with it.
+        """
+        return (
+            self.transport_error_code is None
+            and self.status_code is not None
+            and 200 <= self.status_code < 300
+        )
 
     def semantic_payload(self) -> dict[str, Any]:
         return {
@@ -110,6 +135,8 @@ class HttpAttemptRecord:
             "response_byte_length": self.response_byte_length,
             "transport_error_code": self.transport_error_code,
             "retryable": self.retryable,
+            "detail": dict(sorted(self.detail.items())),
+            "decode": dict(sorted(self.decode.items())),
             "succeeded": self.succeeded,
         }
 
@@ -138,36 +165,120 @@ class HttpAttemptLog:
         self.root = pathlib.Path(root) if root is not None else None
         self.records: list[HttpAttemptRecord] = []
 
-    def observe(self, record: HttpAttemptRecord, body: str | None = None) -> None:
-        """Record one attempt, storing its body when there is one."""
+    def observe(self, record: HttpAttemptRecord, body: bytes | None = None) -> None:
+        """Record one attempt, storing its body bytes when there are any.
+
+        The bytes are written and the metadata appended **now**, not at
+        finalization. v2.1.12 wrote bodies as they arrived and held the records
+        in memory until the summary, so an interpreter that died mid-run left
+        content-addressed bodies nobody could attribute to a request.
+        """
         from dataclasses import replace
 
-        if body is None:
-            self.records.append(record)
-            return
-        payload = body.encode("utf-8")
-        digest = hashlib.sha256(payload).hexdigest()
-        location = self._write_body(payload, digest) if self.root is not None else None
-        self.records.append(
-            replace(
+        from src.adapters.transport import decode_body
+
+        stored = record
+        if body is not None:
+            digest = hashlib.sha256(body).hexdigest()
+            location = self._write_body(body, digest) if self.root is not None else None
+            stored = replace(
                 record,
                 response_body_hash=digest,
                 response_body_location=location,
-                response_byte_length=len(payload),
+                response_byte_length=len(body),
+                decode=decode_body(body, record.response_headers).as_dict(),
             )
-        )
+        self.records.append(stored)
+        self._append_index(stored)
+
+    def _append_index(self, record: HttpAttemptRecord) -> None:
+        """One line per attempt, flushed and fsynced as it happens.
+
+        Append-only JSONL rather than one rewritten document: an append that is
+        interrupted loses at most the line it was writing, and every earlier line
+        is still parseable. A rewritten document that is interrupted loses all of
+        them.
+        """
+        if self.root is None:
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record.as_dict(), sort_keys=True, default=str) + "\n"
+        with open(self.index_path, "a", encoding="utf-8") as stream:
+            stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    @property
+    def index_path(self) -> pathlib.Path:
+        assert self.root is not None
+        return self.root / "index.jsonl"
+
+    @classmethod
+    def recovered_from(cls, root: pathlib.Path | str) -> tuple[dict[str, Any], ...]:
+        """Every attempt recorded under ``root``, read back off disk.
+
+        What makes the incremental index worth having: after an interpreter that
+        died or a finalization that failed, this is the attempt evidence, and it
+        does not depend on the process that wrote it still existing.
+        """
+        index = pathlib.Path(root) / "index.jsonl"
+        if not index.is_file():
+            return ()
+        entries: list[dict[str, Any]] = []
+        for line in index.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                entries.append(json.loads(text))
+            except json.JSONDecodeError:
+                # A torn final line. Everything before it still counts, and
+                # discarding the whole file because of it would be the opposite
+                # of what an append-only index is for.
+                continue
+        return tuple(entries)
+
+    def verify_bodies(self) -> tuple[str, ...]:
+        """Which stored attempt bodies no longer hash to their own filenames."""
+        failures: list[str] = []
+        for record in self.records:
+            location = record.response_body_location
+            if not location or not record.response_body_hash:
+                continue
+            path = pathlib.Path(location)
+            if not path.is_file():
+                failures.append(f"{location} is missing")
+                continue
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual != record.response_body_hash:
+                failures.append(f"{location} hashes to {actual[:12]}...")
+        return tuple(failures)
 
     def _write_body(self, payload: bytes, digest: str) -> str:
-        """Content-addressed, atomically. Two identical bodies are one file."""
+        """Content-addressed, atomically. Two identical bodies are one file.
+
+        An existing file is *verified* before it is reused: content addressing
+        means the name implies the content, and a file that no longer hashes to
+        its name has stopped being the response it claims to be.
+        """
         assert self.root is not None
-        target = self.root / digest[:2] / f"{digest}.txt"
+        target = self.root / digest[:2] / f"{digest}.bin"
         if target.exists():
-            return str(target)
+            if hashlib.sha256(target.read_bytes()).hexdigest() == digest:
+                return str(target)
+            raise ThetaDataRawStoreError(
+                f"{target} no longer hashes to its own name; an attempt body "
+                "that changed after it was written is not the response it names"
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary = tempfile.mkstemp(dir=str(target.parent), suffix=".part")
         try:
             with open(handle, "wb") as stream:
                 stream.write(payload)
+                stream.flush()
+                # The same durability the raw records get: a paid capture's
+                # failure evidence is not less important than its data.
+                os.fsync(stream.fileno())
             pathlib.Path(temporary).replace(target)
         except BaseException:
             pathlib.Path(temporary).unlink(missing_ok=True)
@@ -195,5 +306,6 @@ class HttpAttemptLog:
             "bodies_preserved": sum(
                 1 for record in self.records if record.response_body_location
             ),
+            "index_path": str(self.index_path) if self.root is not None else "",
             "attempts": [record.as_dict() for record in self.records],
         }

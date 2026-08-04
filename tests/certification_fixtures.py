@@ -152,10 +152,27 @@ def vendor_transport(**variants: bool) -> FakeTransport:
     return transport
 
 
+def default_store_for(settings: dict[str, Any]) -> Any:
+    """The store a fixture pipeline captures into when no session is opened.
+
+    Explicit since v2.1.13. A configured ``raw_capture_path`` no longer causes a
+    ``FileRawStore`` to be constructed -- that is what made *building a pipeline*
+    create ``artifacts/raw`` inside the checkout, including during a dry run
+    whose whole promise is that it writes nothing. Tests that relied on the
+    implicit store now say so.
+    """
+    path = settings.get("raw_capture_path")
+    if not settings.get("raw_capture_enabled") or not path:
+        return None
+    return FileRawStore(path)
+
+
 def pipeline_from(**settings: Any) -> ThetaDataResearchPipeline:
     """A pipeline from an explicit settings mapping."""
     return ThetaDataResearchPipeline.from_config(
-        parse_thetadata_config(settings), transport=vendor_transport()
+        parse_thetadata_config(settings),
+        transport=vendor_transport(),
+        default_raw_store=default_store_for(settings),
     )
 
 
@@ -168,7 +185,9 @@ def resolved_pipeline(**overrides: Any) -> ThetaDataResearchPipeline:
     }
     settings = resolved_settings(**{**CAPTURE_SETTINGS, **overrides})
     return ThetaDataResearchPipeline.from_config(
-        parse_thetadata_config(settings), transport=vendor_transport(**variants)
+        parse_thetadata_config(settings),
+        transport=vendor_transport(**variants),
+        default_raw_store=default_store_for(settings),
     )
 
 
@@ -182,7 +201,9 @@ def unresolved_pipeline(**overrides: Any) -> ThetaDataResearchPipeline:
     settings = {**CAPTURE_SETTINGS}
     settings.update(overrides)
     return ThetaDataResearchPipeline.from_config(
-        parse_thetadata_config(settings), transport=vendor_transport(**variants)
+        parse_thetadata_config(settings),
+        transport=vendor_transport(**variants),
+        default_raw_store=default_store_for(settings),
     )
 
 

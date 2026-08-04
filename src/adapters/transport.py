@@ -22,13 +22,15 @@ Retry policy notes, since these are the decisions that matter operationally:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from src.adapters.errors import ThetaDataResponseTooLargeError
@@ -137,10 +139,118 @@ def _redact(url: str) -> str:
     return f"{base}?{'&'.join(parts)}"
 
 
+#: What ``HttpResponse.body`` holds, stated so nobody has to guess later.
+#:
+#: **The HTTP entity body after transfer- and content-decoding**: what ``httpx``
+#: yields from ``iter_bytes()``, so a gzip-compressed response is stored
+#: decompressed. Not the compressed wire bytes. That is the layer a parser reads
+#: and the layer a re-derivation has to reproduce; preserving the compressed
+#: form would mean re-running a decompressor to check a hash, and two
+#: implementations of that decompressor is a second thing to be wrong.
+BODY_REPRESENTATION = "http-entity-body-after-content-decoding"
+
+
+class DecodeStatus(str, Enum):
+    """How cleanly a byte body became text."""
+
+    #: Decoded with the selected charset, no substitutions.
+    EXACT = "EXACT"
+    #: Undecodable sequences were replaced. The bytes are still exact; the
+    #: *text* is not, and anything derived from the text says so.
+    REPLACED = "REPLACED"
+    #: The body was supplied as text, so there is nothing to decode.
+    SUPPLIED_AS_TEXT = "SUPPLIED_AS_TEXT"
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedBody:
+    """A byte body and the reading of it, with both digests.
+
+    v2.1.12 decoded with ``errors="replace"`` inside the transport and threw the
+    bytes away, and the store then re-encoded the *text* as UTF-8. A response
+    containing one invalid byte was stored as a U+FFFD, hashed as a U+FFFD, and
+    the hash was described as the hash of the vendor's response. It was the hash
+    of our reading of it.
+    """
+
+    text: str
+    body_hash: str
+    byte_length: int
+    decoded_text_hash: str
+    content_type: str = ""
+    declared_charset: str = ""
+    selected_charset: str = "utf-8"
+    decode_status: DecodeStatus = DecodeStatus.EXACT
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "body_representation": BODY_REPRESENTATION,
+            "body_hash": self.body_hash,
+            "byte_length": self.byte_length,
+            "decoded_text_hash": self.decoded_text_hash,
+            "content_type": self.content_type,
+            "declared_charset": self.declared_charset,
+            "selected_charset": self.selected_charset,
+            "decode_status": self.decode_status.value,
+        }
+
+
+def _charset_of(headers: Mapping[str, str]) -> tuple[str, str]:
+    """``(content_type, declared_charset)`` from the headers, lowercased."""
+    for key, value in dict(headers or {}).items():
+        if str(key).lower() != "content-type":
+            continue
+        text = str(value)
+        charset = ""
+        for part in text.split(";")[1:]:
+            name, _, held = part.partition("=")
+            if name.strip().lower() == "charset":
+                charset = held.strip().strip('"').lower()
+        return text.split(";")[0].strip().lower(), charset
+    return "", ""
+
+
+def decode_body(body: bytes, headers: Mapping[str, str] | None = None) -> DecodedBody:
+    """Read a byte body as text, recording exactly how.
+
+    The charset comes from the response's own ``Content-Type`` where it states
+    one, and UTF-8 otherwise -- which is what ThetaData sends. A charset the
+    interpreter does not know falls back to UTF-8 and says so through the
+    selected charset, rather than raising in the middle of a paid capture.
+    """
+    content_type, declared = _charset_of(headers or {})
+    selected = declared or "utf-8"
+    try:
+        text = body.decode(selected)
+        status = DecodeStatus.EXACT
+    except (UnicodeDecodeError, LookupError):
+        text = body.decode("utf-8", errors="replace")
+        selected = "utf-8"
+        status = DecodeStatus.REPLACED
+    return DecodedBody(
+        text=text,
+        body_hash=hashlib.sha256(body).hexdigest(),
+        byte_length=len(body),
+        decoded_text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        content_type=content_type,
+        declared_charset=declared,
+        selected_charset=selected,
+        decode_status=status,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HttpResponse:
+    """One vendor response, bytes first.
+
+    ``body`` is authoritative and ``text`` is a reading of it. Both are fields so
+    that a fixture can still be written as ``HttpResponse(status_code=200,
+    text="a,b\\n1,2\\n")`` -- ``__post_init__`` fills in whichever was not
+    supplied, and a caller who supplies text is recorded as having done so.
+    """
+
     status_code: int
-    text: str
+    text: str = ""
     headers: Mapping[str, str] = field(default_factory=dict)
     url: str = ""
     request_id: str = ""
@@ -148,6 +258,26 @@ class HttpResponse:
     attempts: int = 1
     #: Vendor error code parsed from the body, when the vendor supplies one.
     vendor_error_code: str | None = None
+    #: The entity body after content decoding. See :data:`BODY_REPRESENTATION`.
+    body: bytes = b""
+    _supplied_as_text: bool = field(default=False, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.body:
+            if not self.text:
+                object.__setattr__(
+                    self, "text", decode_body(self.body, self.headers).text
+                )
+            return
+        object.__setattr__(self, "body", self.text.encode("utf-8"))
+        object.__setattr__(self, "_supplied_as_text", True)
+
+    def decode_text(self) -> DecodedBody:
+        """The typed reading of this response's bytes."""
+        decoded = decode_body(self.body, self.headers)
+        if self._supplied_as_text:
+            return replace(decoded, decode_status=DecodeStatus.SUPPLIED_AS_TEXT)
+        return decoded
 
     @property
     def retry_after_seconds(self) -> float | None:
@@ -168,7 +298,8 @@ class HttpResponse:
 
     @property
     def byte_length(self) -> int:
-        return len(self.text.encode("utf-8"))
+        """The size of the *body*. v2.1.12 measured a re-encoding of the text."""
+        return len(self.body)
 
 
 def parse_retry_after(
@@ -290,6 +421,15 @@ class FakeTransport:
         self, path_fragment: str, text: str, *, status_code: int = 200
     ) -> None:
         self.register(path_fragment, HttpResponse(status_code=status_code, text=text))
+
+    def register_bytes(
+        self, path_fragment: str, body: bytes, *, status_code: int = 200, **headers: str
+    ) -> None:
+        """Answer with exactly these bytes, whatever they decode to."""
+        self.register(
+            path_fragment,
+            HttpResponse(status_code=status_code, body=body, headers=dict(headers)),
+        )
 
     def registered_text(self, path_fragment: str) -> str | None:
         """The body registered for a route, or ``None``.
@@ -485,6 +625,9 @@ def _unwrap(item: HttpResponse | Exception, url: str) -> HttpResponse:
         request_id=item.request_id or "fake",
         elapsed_seconds=item.elapsed_seconds,
         attempts=item.attempts,
+        # The registered bytes, not a re-encoding of the registered text: a
+        # fixture that registers non-UTF-8 bytes must deliver them unchanged.
+        body=item.body,
     )
 
 
@@ -541,9 +684,10 @@ class RetryingTransport:
         started_at: datetime,
         status_code: int | None = None,
         headers: Any = None,
-        body: str | None = None,
+        body: bytes | None = None,
         transport_error_code: str | None = None,
         retryable: bool = False,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         if self._attempt_observer is None:
             return
@@ -562,6 +706,7 @@ class RetryingTransport:
                 response_headers=safe_headers(headers),
                 transport_error_code=transport_error_code,
                 retryable=retryable,
+                detail=dict(extra or {}),
             ),
             body,
         )
@@ -596,6 +741,22 @@ class RetryingTransport:
             started_at = datetime.now(UTC)
             try:
                 response = self._inner.get(url, params, timeout_seconds)
+            except ResponseTooLargeError as exc:
+                # The streaming reader aborted mid-body. There is no response to
+                # describe, and the cap and the bytes read are the finding.
+                self._observe(
+                    url=url,
+                    params=params,
+                    request_id=request_id,
+                    attempt=attempt,
+                    started_at=started_at,
+                    transport_error_code="RESPONSE_TOO_LARGE",
+                    extra={
+                        "configured_max_response_bytes": self._max_response_bytes,
+                        "bytes_read_before_abort": getattr(exc, "bytes_read", None),
+                    },
+                )
+                raise
             except TransportError as exc:
                 last_error = exc
                 logger.warning(
@@ -624,6 +785,25 @@ class RetryingTransport:
                 # non-streaming one (the fake, or a future implementation) is
                 # still checked here so an oversized payload can never be parsed.
                 if response.byte_length > self._max_response_bytes:
+                    # Recorded before it is raised. v2.1.12 raised from here and
+                    # from ``ByteLimitedReader``, so the attempt log reported
+                    # zero attempts for a request that had definitely been made
+                    # -- the one failure mode where the size of the thing is the
+                    # whole finding.
+                    self._observe(
+                        url=url,
+                        params=params,
+                        request_id=request_id,
+                        attempt=attempt,
+                        started_at=started_at,
+                        status_code=response.status_code,
+                        headers=response.headers,
+                        transport_error_code="RESPONSE_TOO_LARGE",
+                        extra={
+                            "configured_max_response_bytes": (self._max_response_bytes),
+                            "bytes_read_before_abort": response.byte_length,
+                        },
+                    )
                     raise ResponseTooLargeError(
                         f"response of {response.byte_length} bytes exceeds the "
                         f"{self._max_response_bytes}-byte cap for {_redact(url)}"
@@ -636,7 +816,7 @@ class RetryingTransport:
                     started_at=started_at,
                     status_code=response.status_code,
                     headers=response.headers,
-                    body=response.text,
+                    body=response.body,
                     retryable=response.status_code in RETRYABLE_STATUS_CODES,
                 )
                 if response.ok:
@@ -659,6 +839,7 @@ class RetryingTransport:
                         request_id=request_id,
                         elapsed_seconds=elapsed,
                         attempts=attempt,
+                        body=response.body,
                     )
                 if response.status_code not in RETRYABLE_STATUS_CODES:
                     # A malformed request stays malformed; retrying only wastes
@@ -711,8 +892,13 @@ class RetryingTransport:
         """
         computed = self._policy.delay_for(attempt, random_unit=self._random_unit())
         if retry_after is not None:
+            # A floor, never a reduction. v2.1.12 returned the header value
+            # bounded below by ``backoff_base_seconds`` -- which is the *first*
+            # delay, so on attempt four a ``Retry-After: 1`` shortened a computed
+            # eight-second backoff to one second. The vendor asking us to wait
+            # longer is information; the vendor asking us to hammer sooner is not.
             return min(
-                max(retry_after, self._policy.backoff_base_seconds),
+                max(retry_after, computed),
                 self._policy.max_retry_after_seconds,
             )
         if isinstance(last_error, VendorHTTPError) and last_error.status_code == 429:
@@ -745,7 +931,15 @@ class ByteLimitedReader:
         self.bytes_read = 0
         self.aborted = False
 
-    def read(self, stream: Any, *, encoding: str = "utf-8") -> str:
+    def read(self, stream: Any) -> bytes:
+        """The body, as bytes.
+
+        v2.1.12 decoded here with ``errors="replace"`` and returned a string, so
+        the only representation that ever left this method was already lossy --
+        and the store then re-encoded that string as UTF-8 and called the digest
+        the hash of the vendor's response. Decoding is now a separate, recorded
+        step; this returns what arrived.
+        """
         chunks: list[bytes] = []
         for chunk in stream:
             self.bytes_read += len(chunk)
@@ -753,13 +947,16 @@ class ByteLimitedReader:
                 self.aborted = True
                 chunks.clear()
                 self._close(stream)
-                raise ResponseTooLargeError(
+                error = ResponseTooLargeError(
                     f"response exceeded the {self.max_bytes}-byte cap while "
                     f"streaming; aborted after {self.bytes_read} bytes and "
                     "discarded the partial body"
                 )
+                error.bytes_read = self.bytes_read  # type: ignore[attr-defined]
+                error.max_bytes = self.max_bytes  # type: ignore[attr-defined]
+                raise error
             chunks.append(chunk)
-        return b"".join(chunks).decode(encoding, errors="replace")
+        return b"".join(chunks)
 
     @staticmethod
     def _close(stream: Any) -> None:
@@ -835,13 +1032,15 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
                 # the tests. Aborts mid-stream, closes the connection, and
                 # discards the partial body.
                 body = ByteLimitedReader(max_bytes=self._max_response_bytes).read(
-                    response.iter_bytes(), encoding=response.encoding or "utf-8"
+                    response.iter_bytes()
                 )
                 return HttpResponse(
                     status_code=response.status_code,
-                    text=body,
                     headers=dict(response.headers),
                     url=str(response.url),
+                    # Bytes, decoded once by whoever needs text. See
+                    # ``BODY_REPRESENTATION`` for exactly which bytes these are.
+                    body=body,
                 )
         except self._httpx.HTTPError as exc:
             raise TransportError(f"{type(exc).__name__} for {_redact(url)}") from exc

@@ -184,14 +184,42 @@ def test_configured_greeks_parameters_reach_the_outgoing_query():
     assert "version=1" in joined
 
 
-def test_configured_raw_capture_reaches_the_store(tmp_path):
+def test_a_configured_path_alone_creates_no_store(tmp_path):
+    """The v2.1.13 regression, at the layer that caused it.
+
+    A path in configuration is a statement about where a store *would* go. Until
+    v2.1.13 it was an instruction to make one, executed during pipeline
+    construction for every caller -- so the shipped operator profile, which says
+    ``artifacts/raw``, created that directory inside the checkout the moment a
+    pipeline existed. The dry run, which reports ``wrote_files=false``, created
+    it too.
+    """
     runtime = ThetaDataRuntime.from_config(
         parse(raw_capture_enabled=True, raw_capture_path=str(tmp_path / "raw")),
         transport=FakeTransport(default=csv_response()),
         clock=lambda: AS_OF,
     )
+    assert not (tmp_path / "raw").exists()
     fetch(runtime)
+    assert not (tmp_path / "raw").exists()
+
+
+def test_an_explicit_default_store_receives_the_records(tmp_path):
+    """And the supported way to get one still works, said out loud."""
+    from src.adapters.raw_store import FileRawStore
+
+    store = FileRawStore(tmp_path / "raw")
+    runtime = ThetaDataRuntime.from_config(
+        parse(raw_capture_enabled=True, raw_capture_path=str(tmp_path / "unused")),
+        transport=FakeTransport(default=csv_response()),
+        clock=lambda: AS_OF,
+        default_raw_store=store,
+    )
+    fetch(runtime)
+    assert store.records()
     assert list((tmp_path / "raw").iterdir())
+    # And the path the configuration named is still not there.
+    assert not (tmp_path / "unused").exists()
 
 
 def test_raw_capture_disabled_writes_nothing(tmp_path):

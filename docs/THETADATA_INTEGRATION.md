@@ -343,6 +343,25 @@ python -m src.tools.capture_thetadata_once \
   --execute-live
 ```
 
+**Windows (PowerShell).** The backtick is the line continuation, and the path
+needs quoting when it contains a space:
+
+```powershell
+py -3.12 -m src.tools.capture_thetadata_once `
+  --config config/thetadata_capture.yaml `
+  --output "D:\ThetaData\capture-2026-08-05"
+
+py -3.12 -m src.tools.capture_thetadata_once `
+  --config config/thetadata_capture.yaml `
+  --output "D:\ThetaData\capture-2026-08-05" `
+  --execute-live
+```
+
+The destination must be a new directory — the command creates it, and refuses
+if it is already there. On Windows that includes a drive-qualified path such as
+`D:\ThetaData\...`; a bare `\ThetaData\...` is refused as relative, because
+which drive it lands on then depends on the shell's current location.
+
 The dry run prints the resolved configuration, the **effective transport
 settings**, the expected capture origin, the pipeline fingerprint, the
 capture-plan fingerprint, the required endpoints, the subscription tier, the
@@ -388,8 +407,25 @@ including a local one, was stamped `LIVE_HTTP_CAPTURE`.
 
 The destination is resolved with symlinks followed and refused if it is inside
 this repository, a symlink, an existing file, or a directory that already holds
-anything — including one that holds a `run-intent.json`, which belongs to an
-earlier run. **v2.1.12 has no resume**: give each run its own directory.
+anything. **There is no resume**: give each run its own directory.
+
+The run then **claims** it with `mkdir(exist_ok=False)` — atomically, before any
+store, attempt log or intent document exists. v2.1.12 checked that the path was
+empty and created the stores afterwards, so two processes could both observe an
+empty path, both proceed, and mix their records into one manifest while
+overwriting each other's summary. Exactly one `mkdir` wins; the other run is
+refused before it sends anything.
+
+### No hidden store
+
+A `raw_capture_path` in the profile names a **fallback** destination for library
+callers. It does not cause a store to be created. Until v2.1.13 it did, inside
+`build_thetadata_client`, during pipeline construction, for every caller — so
+the shipped profile's `artifacts/raw` was created inside the checkout the moment
+a pipeline existed, including by the dry run that reports `wrote_files=false`.
+The operator constructs exactly one `FileRawStore` under its claimed run root and
+passes it as the pipeline's default; the report names that path as
+`effective_raw_store_path`, separately from the configured fallback.
 
 v2.1.5 shipped 573 fixture payloads in a release archive because a capture was
 written into the namespace the checkout manages; v2.1.11 compared the literal
@@ -417,6 +453,19 @@ it. Nothing is deleted automatically.
 
 All three top-level documents are written to a temporary file, fsynced and
 renamed, so an interrupted process cannot leave a plausible-looking half-JSON.
+
+### Stored bytes are the vendor's bytes
+
+`raw/<record>.raw` holds the **HTTP entity body after content decoding** — what
+the transport read off the socket, decompressed but not decoded — and
+`payload_hash` is taken over exactly those bytes. Text is a separate, recorded
+reading: the manifest carries the content type, the declared and selected
+charsets, whether any byte had to be replaced, and the digest of the decoded
+text alongside the digest of the bytes.
+
+v2.1.12 decoded in the transport with `errors="replace"` and the store
+re-encoded that string as UTF-8, so one invalid byte became a U+FFFD and the
+digest was described as the hash of the vendor's response.
 
 ### Retried attempts are preserved
 
@@ -447,8 +496,45 @@ snapshot was built from; a preserved 500 is evidence about a failure.
 | 8 | a response did not have the shape this parser reads |
 | 9 | the raw store or the artifact store could not do its job |
 | 10 | an unexpected internal error; `--debug` prints the traceback |
+| 11 | the vendor rejected the credentials — 401 or 403 |
+| 12 | a non-2xx the vendor is entitled to send, a 400 most often |
+| 13 | rate limited — 429, after the retry budget |
+| 14 | the response exceeded the configured cap |
+| 15 | evidence that does not follow from what was captured |
+| 16 | a validation report that does not hold against its capture |
 
 No secret is printed on any path, and a failure names the summary it wrote.
+
+A vendor 400, 401 or 403 was reported as an internal error until v2.1.13, which
+sent an operator to read this code instead of their environment.
+
+### Run states
+
+| State | Means |
+|---|---|
+| `COMPLETED_VERIFIED` | every planned endpoint answered and the manifest verified |
+| `COMPLETED_UNVERIFIED` | every endpoint answered; verification or integrity did not pass |
+| `FAILED_PARTIAL` | at least one response arrived or one record was stored, then a failure |
+| `FAILED_NO_RESPONSE` | requests were attempted and **nothing answered** |
+| `FAILED_BEFORE_REQUEST` | nothing was attempted; no request left this process |
+
+Derived from the attempt log, not from stored records. v2.1.12 reported four
+attempts against a Theta Terminal that was not running as
+`FAILED_BEFORE_REQUEST`, which is the opposite of the finding.
+
+### When finalization itself fails
+
+Every ordinary controlled failure produces a manifest and a summary. If the
+*finalization* is what breaks — a store that cannot be scanned, a disk that
+filled between the last response and the summary — the run writes
+`capture-summary-emergency.json` instead, carrying the run and session ids, the
+state, the typed error, the records known in memory, the attempt count and the
+output root, and saying `manifest_written: false`. The HTTP transport is closed
+in a `finally` either way.
+
+The attempt index (`attempts/index.jsonl`) is appended and fsynced as each
+attempt happens, so the attempt evidence survives a finalization failure or an
+interpreter that dies.
 
 **It computes no GEX.** Eight load-bearing vendor conventions are unknown, so a
 number from these bytes would have no stated meaning -- and comparing those

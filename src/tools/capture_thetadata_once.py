@@ -33,6 +33,7 @@ neither.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -59,11 +60,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.12"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.13"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.12"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.13"
 
 _RULE = "-" * 76
 
@@ -88,17 +89,43 @@ class RawCaptureRunState(str, Enum):
     COMPLETED_VERIFIED = "COMPLETED_VERIFIED"
     #: Every planned endpoint answered and verification or integrity did not pass.
     COMPLETED_UNVERIFIED = "COMPLETED_UNVERIFIED"
-    #: Some endpoints answered and then something failed. The bytes are kept.
+    #: At least one HTTP response arrived, or a record was stored, and then
+    #: something failed. The bytes are kept.
     FAILED_PARTIAL = "FAILED_PARTIAL"
-    #: Nothing was sent -- configuration, credentials, destination, readiness.
+    #: Requests were attempted and **nothing answered**: connection refused,
+    #: DNS, TLS, a timeout on every attempt. v2.1.12 called this
+    #: ``FAILED_BEFORE_REQUEST``, because it derived the state from stored
+    #: records -- so four attempts against a Theta Terminal that was not running
+    #: read as "nothing was sent", which is the opposite of the finding.
+    FAILED_NO_RESPONSE = "FAILED_NO_RESPONSE"
+    #: Nothing was attempted -- configuration, credentials, destination,
+    #: readiness. No request left this process.
     FAILED_BEFORE_REQUEST = "FAILED_BEFORE_REQUEST"
 
     @property
     def is_failure(self) -> bool:
         return self in (
             RawCaptureRunState.FAILED_PARTIAL,
+            RawCaptureRunState.FAILED_NO_RESPONSE,
             RawCaptureRunState.FAILED_BEFORE_REQUEST,
         )
+
+    @classmethod
+    def from_evidence(
+        cls, *, attempts: int, responses: int, records: int
+    ) -> RawCaptureRunState:
+        """Which failure this was, from the attempt log rather than the store.
+
+        Three genuinely different operational facts, and an operator does
+        different things about each: nothing was sent (fix the configuration),
+        nothing answered (is the Terminal running?), something answered and then
+        stopped (look at the preserved bodies).
+        """
+        if responses or records:
+            return cls.FAILED_PARTIAL
+        if attempts:
+            return cls.FAILED_NO_RESPONSE
+        return cls.FAILED_BEFORE_REQUEST
 
 
 class ExitCode(int, Enum):
@@ -125,6 +152,20 @@ class ExitCode(int, Enum):
     STORAGE_ERROR = 9
     #: Something this code did not anticipate. ``--debug`` prints the traceback.
     INTERNAL_ERROR = 10
+    #: The vendor refused the credentials -- 401 or 403.
+    AUTHENTICATION_REJECTED = 11
+    #: A non-2xx the vendor is entitled to send: a 400, most often.
+    VENDOR_HTTP_ERROR = 12
+    #: 429, after the retry budget.
+    RATE_LIMITED = 13
+    #: The response exceeded the configured cap. Its own code, because the
+    #: remedy is a configuration change and not a parser fix -- v2.1.12 mapped it
+    #: onto ``SCHEMA_ERROR``, which points at the wrong thing.
+    RESPONSE_TOO_LARGE = 14
+    #: Evidence that does not follow from what was captured.
+    PROVENANCE_ERROR = 15
+    #: A validation report that does not hold against its capture.
+    VALIDATION_ERROR = 16
 
 
 def new_run_id(moment: datetime) -> str:
@@ -414,19 +455,41 @@ def run_capture(
     if refusals:
         raise CaptureRunError("; ".join(refusals))
 
+    # **Claimed before anything exists inside it.** ``exist_ok=False`` is the
+    # whole mechanism: the check-then-create in v2.1.12 let two processes both
+    # observe an empty path and both proceed, mixing their records and
+    # overwriting each other's intent and summary. ``mkdir`` is atomic, so
+    # exactly one of them gets the directory and the other is refused before it
+    # sends anything.
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise CaptureRunError(
+            f"{destination} already exists, so another run owns it. Each capture "
+            "gets its own directory: two runs sharing one would share a manifest "
+            "and overwrite each other's summary."
+        ) from error
+    except OSError as error:
+        raise CaptureRunError(f"{destination} could not be created: {error}") from error
+
     loaded = load_config(config_path)
     moment = as_of if as_of is not None else datetime.now(UTC)
     attempts = HttpAttemptLog(destination / "attempts")
+
+    raw_root = destination / "raw"
+    artifact_root = destination / "artifacts"
+    # **Exactly one** raw store for the whole run, and the pipeline is built
+    # around it. v2.1.12 built a second one from ``config.raw_capture_path``
+    # inside the client factory, which received nothing and created
+    # ``artifacts/raw`` inside the checkout.
+    store = FileRawStore(raw_root)
+    artifacts = ArtifactStore(artifact_root)
     pipeline = ThetaDataResearchPipeline.from_loaded_config(
         loaded,
         transport=transport if transport is not None or not build_transport else None,
         attempt_observer=attempts,
+        default_raw_store=store,
     )
-
-    raw_root = destination / "raw"
-    artifact_root = destination / "artifacts"
-    store = FileRawStore(raw_root)
-    artifacts = ArtifactStore(artifact_root)
 
     readiness = assess_readiness(
         pipeline=pipeline,
@@ -459,47 +522,98 @@ def run_capture(
         attempts=attempts,
     )
     run.extra["effective_transport"] = effective_transport_settings(loaded.thetadata)
+    run.extra["effective_raw_store_path"] = str(raw_root)
     run.capture_origin = capture_origin_of(
         pipeline.runtime.client.transport, pipeline.runtime.client.settings.base_url
     )
 
-    run.session = pipeline.capture_session(
-        store=store,
-        session_id=run.run_id,
-        as_of=moment,
-        artifact_store=artifacts,
-        # No settlement rule and no universe. Both are choices about what the
-        # numbers *mean*, and this run exists to collect bytes -- the resulting
-        # capture is permanently raw-only, which is the honest state until the
-        # vendor's conventions have been compared against these responses.
-    )
-    run.mark = run.session.mark()
-    _write_intent(run, config_path=config_path)
-
+    # Everything from here is wrapped, and the transport is closed in ``finally``
+    # whatever happens -- including a failure inside finalization itself, which
+    # v2.1.12 let leak the connection pool.
     try:
-        run.state = RawCaptureRunState.IN_PROGRESS
-        chain = pipeline.fetch_chain(as_of=moment, capture=run.session)
-    except BaseException as error:  # finalized below, then reported
-        run.error_code, run.failed_endpoint = _classify(error)
-        run.error_message = _redacted(error)
-        run.state = (
-            RawCaptureRunState.FAILED_PARTIAL
-            if run.session.captured[run.mark :]
-            else RawCaptureRunState.FAILED_BEFORE_REQUEST
+        run.session = pipeline.capture_session(
+            store=store,
+            session_id=run.run_id,
+            as_of=moment,
+            artifact_store=artifacts,
+            # No settlement rule and no universe. Both are choices about what the
+            # numbers *mean*, and this run exists to collect bytes -- the
+            # resulting capture is permanently raw-only, which is the honest
+            # state until the vendor's conventions have been compared against
+            # these responses.
         )
-        report = _finalize(run, chain=None)
+        run.mark = run.session.mark()
+        _write_intent(run, config_path=config_path)
+
+        chain: Any = None
+        try:
+            run.state = RawCaptureRunState.IN_PROGRESS
+            chain = pipeline.fetch_chain(as_of=moment, capture=run.session)
+        except BaseException as error:  # finalized below, then reported
+            run.error_code, run.failed_endpoint = _classify(error)
+            run.error_message = _redacted(error)
+            run.state = RawCaptureRunState.from_evidence(
+                attempts=len(attempts.records),
+                responses=sum(1 for a in attempts.records if a.status_code is not None),
+                records=len(run.session.captured[run.mark :]),
+            )
+        else:
+            run.extra["contract_count"] = len(getattr(chain, "quotes", ()))
+        try:
+            return _finalize(run, chain=chain)
+        except BaseException as error:  # finalization itself failed
+            return _emergency_summary(run, error)
+    finally:
         _close(pipeline)
-        return report
-    run.extra["contract_count"] = len(getattr(chain, "quotes", ()))
-    report = _finalize(run, chain=chain)
-    _close(pipeline)
-    return report
+
+
+def _emergency_summary(run: _Run, error: BaseException) -> dict[str, Any]:
+    """The strongest report that can still be written when finalization fails.
+
+    Not a fallback for ordinary failures -- those finalize normally, with a
+    manifest. This is for the case where the *finalization* is what broke: a
+    store that cannot be scanned, a manifest that cannot be built, a disk that
+    filled between the last response and the summary.
+
+    It writes what is in memory, to a differently named file, and says plainly
+    that there is no manifest. Claiming one exists when storage is the thing
+    that failed would be the worst possible time to be wrong.
+    """
+    code, _ = _classify(error)
+    payload = {
+        "schema_version": RAW_CAPTURE_RUN_SCHEMA_VERSION,
+        "mode": "LIVE",
+        "emergency": True,
+        "manifest_written": False,
+        "run_state": RawCaptureRunState.FAILED_PARTIAL.value,
+        "run_id": run.run_id,
+        "session_id": getattr(run.session, "session_id", ""),
+        "operation_id": getattr(run.session, "operation_id", ""),
+        "finalization_error_code": code,
+        "finalization_error": _redacted(error),
+        "error_code": run.error_code,
+        "error_message": run.error_message,
+        "records_known_in_memory": sorted(
+            record.record_id for record in run.session.captured[run.mark :]
+        )
+        if run.session is not None
+        else [],
+        "attempt_count": len(run.attempts.records),
+        "attempt_index_path": (
+            str(run.attempts.index_path) if run.attempts.root is not None else ""
+        ),
+        "output_root": str(run.destination),
+        "summary_path": str(run.destination / "capture-summary-emergency.json"),
+        "trusted_gex_computed": False,
+        "orders_placed": 0,
+    }
+    with contextlib.suppress(Exception):
+        _write_json(run.destination / "capture-summary-emergency.json", payload)
+    return payload
 
 
 def _close(pipeline: Any) -> None:
     """Release the HTTP connection pool. A leaked socket outlives the process."""
-    import contextlib
-
     closer = getattr(getattr(pipeline.runtime.client, "transport", None), "close", None)
     if callable(closer):
         # Closing must never mask the outcome of the capture: a socket that
@@ -509,13 +623,27 @@ def _close(pipeline: Any) -> None:
 
 
 def _classify(error: BaseException) -> tuple[str, str]:
-    """A typed error code and, where it can be told, the endpoint that failed."""
+    """A typed error code and, where it can be told, the endpoint that failed.
+
+    Ordered most specific first, and covering the whole public
+    ``ThetaDataError`` hierarchy. v2.1.12 listed five of them, so a vendor 400,
+    401 or 403 -- which arrive as ``ThetaDataHTTPError`` subclasses, not as the
+    transport's ``VendorHTTPError`` -- fell through to ``INTERNAL_ERROR``. A
+    rejected credential reported as an internal error sends an operator to read
+    this code instead of their environment.
+    """
     from src.adapters.errors import (
+        ThetaDataAuthenticationError,
         ThetaDataConfigurationError,
+        ThetaDataHTTPError,
+        ThetaDataProvenanceError,
+        ThetaDataRateLimitError,
         ThetaDataRawStoreError,
         ThetaDataResponseTooLargeError,
         ThetaDataRetryExhaustedError,
         ThetaDataSchemaError,
+        ThetaDataValidationError,
+        ThetaDataVendorError,
     )
     from src.adapters.transport import (
         RetryBudgetExhaustedError,
@@ -524,19 +652,49 @@ def _classify(error: BaseException) -> tuple[str, str]:
     )
 
     endpoint = str(getattr(error, "url", "") or "").partition("?")[0]
+
+    # What the retry budget was actually spent on. ``RetryBudgetExhaustedError``
+    # says only that we gave up; the last failure says why, and "we retried a
+    # 429 four times" and "we retried a 503 four times" send an operator to
+    # different places.
+    status = _underlying_status(error)
+    if status in (401, 403):
+        return "AUTHENTICATION_REJECTED", endpoint
+    if status == 429:
+        return "RATE_LIMITED", endpoint
+
     for kind, code in (
-        (RetryBudgetExhaustedError, "RETRY_EXHAUSTED"),
-        (ThetaDataRetryExhaustedError, "RETRY_EXHAUSTED"),
-        (VendorHTTPError, "VENDOR_HTTP_ERROR"),
-        (TransportError, "TRANSPORT_FAILURE"),
+        (ThetaDataAuthenticationError, "AUTHENTICATION_REJECTED"),
+        (ThetaDataRateLimitError, "RATE_LIMITED"),
         (ThetaDataResponseTooLargeError, "RESPONSE_TOO_LARGE"),
+        (ThetaDataVendorError, "VENDOR_HTTP_ERROR"),
         (ThetaDataSchemaError, "SCHEMA_ERROR"),
+        (ThetaDataProvenanceError, "PROVENANCE_ERROR"),
+        (ThetaDataValidationError, "VALIDATION_ERROR"),
         (ThetaDataRawStoreError, "STORAGE_ERROR"),
         (ThetaDataConfigurationError, "CONFIGURATION_ERROR"),
+        (ThetaDataRetryExhaustedError, "RETRY_EXHAUSTED"),
+        (ThetaDataHTTPError, "VENDOR_HTTP_ERROR"),
+        (RetryBudgetExhaustedError, "RETRY_EXHAUSTED"),
+        (VendorHTTPError, "VENDOR_HTTP_ERROR"),
+        (TransportError, "TRANSPORT_FAILURE"),
     ):
         if isinstance(error, kind):
             return code, endpoint
     return f"INTERNAL_ERROR:{type(error).__name__}", endpoint
+
+
+def _underlying_status(error: BaseException) -> int | None:
+    """The HTTP status behind a wrapped failure, following the cause chain."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "status_code", None)
+        if isinstance(status, int):
+            return status
+        current = getattr(current, "last_error", None) or current.__cause__
+    return None
 
 
 def _redacted(error: BaseException) -> str:
@@ -820,11 +978,15 @@ def main(argv: list[str] | None = None) -> int:
 #: Typed error code -> exit code. One table, so the documentation and the
 #: behaviour cannot drift.
 _EXIT_FOR = {
+    "AUTHENTICATION_REJECTED": ExitCode.AUTHENTICATION_REJECTED,
+    "RATE_LIMITED": ExitCode.RATE_LIMITED,
+    "VENDOR_HTTP_ERROR": ExitCode.VENDOR_HTTP_ERROR,
     "RETRY_EXHAUSTED": ExitCode.RETRY_EXHAUSTED,
-    "VENDOR_HTTP_ERROR": ExitCode.RETRY_EXHAUSTED,
     "TRANSPORT_FAILURE": ExitCode.TRANSPORT_FAILURE,
-    "RESPONSE_TOO_LARGE": ExitCode.SCHEMA_ERROR,
+    "RESPONSE_TOO_LARGE": ExitCode.RESPONSE_TOO_LARGE,
     "SCHEMA_ERROR": ExitCode.SCHEMA_ERROR,
+    "PROVENANCE_ERROR": ExitCode.PROVENANCE_ERROR,
+    "VALIDATION_ERROR": ExitCode.VALIDATION_ERROR,
     "STORAGE_ERROR": ExitCode.STORAGE_ERROR,
     "CONFIGURATION_ERROR": ExitCode.CONFIGURATION_ERROR,
     "INTERNAL_ERROR": ExitCode.INTERNAL_ERROR,

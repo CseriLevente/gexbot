@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.12.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.13.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.12.zip
+sha256sum gex-bot-v2.1.13.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.12.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.13.zip -Algorithm SHA256
 ```
 
 ### The digest must describe the file that was uploaded
@@ -146,7 +146,7 @@ would get a mismatch and have no way to tell an innocent re-wrap from a
 substituted artefact. Verify the digest against the uploaded file, after upload:
 
 ```powershell
-Get-FileHash .\gex-bot-v2.1.12.zip -Algorithm SHA256   # the file being sent
+Get-FileHash .\gex-bot-v2.1.13.zip -Algorithm SHA256   # the file being sent
 ```
 
 ---
@@ -209,8 +209,9 @@ thing that has gone wrong somewhere, and the session costs money.
 - [ ] subscription tier confirmed to be `standard` or better, against the
       account rather than against `config/thetadata_capture.yaml`
 - [ ] licensing and data-use terms confirmed for storing raw responses
-- [ ] output destination **new, empty, and outside this repository** — the
-      command refuses anything else, including a symlink that resolves inside
+- [ ] output destination **new and outside this repository** — the command
+      creates it and refuses a path that already exists, a symlink, or one
+      that resolves inside the checkout
 - [ ] sufficient disk space for a full SPX+SPXW chain plus retry bodies
 - [ ] dry run completed successfully and its report reviewed line by line:
 
@@ -218,6 +219,12 @@ thing that has gone wrong somewhere, and the session costs money.
 python -m src.tools.capture_thetadata_once \
   --config config/thetadata_capture.yaml \
   --output /absolute/path/outside/this/repo/capture-YYYY-MM-DD
+```
+
+```powershell
+py -3.12 -m src.tools.capture_thetadata_once `
+  --config config/thetadata_capture.yaml `
+  --output "D:\ThetaData\capture-YYYY-MM-DD"
 ```
 
 Check in that output: `capture_readiness` is `READY_FOR_RAW_CAPTURE_ONLY`,

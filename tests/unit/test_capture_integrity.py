@@ -112,7 +112,13 @@ def test_exactly_one_raw_store_is_constructed_for_a_live_run(tmp_path, monkeypat
 
     monkeypatch.setattr(raw_store_module.FileRawStore, "__init__", watched)
     report = live_run(tmp_path)
-    assert built == [report["effective_raw_store_path"]], built
+
+    # Preflight probes store durability in a temporary directory that is gone
+    # before the run claims anything; it is not a place records could land.
+    durable = [root for root in built if "gex-preflight-" not in root]
+    assert durable == [report["effective_raw_store_path"]], built
+    for probe in set(built) - set(durable):
+        assert not pathlib.Path(probe).exists(), probe
 
 
 def test_the_reported_store_is_the_store_that_received_the_records(tmp_path):
@@ -604,6 +610,60 @@ def test_a_finalization_failure_still_closes_the_transport(tmp_path, monkeypatch
     assert report["output_root"] == str(tmp_path / "capture")
     assert run_path(report, "summary_path").exists()
     assert report["trusted_gex_computed"] is False
+
+
+def test_an_emergency_summary_reports_the_state_the_evidence_supports(
+    tmp_path, monkeypatch
+):
+    """The named regression: ``FAILED_PARTIAL`` was hardcoded.
+
+    A finalization that fails is a second problem, not a reclassification of the
+    first. v2.1.13 stamped FAILED_PARTIAL on every emergency summary, so a run
+    that never got a response reported the same state as one that lost the disk
+    after three endpoints -- and an operator reading "partial" goes looking for
+    bytes that are not there.
+    """
+    import src.tools.capture_thetadata_once as tool
+    from src.adapters.transport import TransportError
+    from tests.certification_fixtures import AS_OF, vendor_transport
+
+    def exploding(run, *, chain):
+        raise OSError("the disk filled while writing the manifest")
+
+    monkeypatch.setattr(tool, "_finalize", exploding)
+
+    class _Refused:
+        """Nothing answers: attempts, no responses, no records."""
+
+        capture_origin = "OFFLINE_FIXTURE"
+
+        def origin_for(self, url: str) -> str:
+            return self.capture_origin
+
+        def get(self, url, params, timeout_seconds):
+            raise TransportError("ConnectError for http://127.0.0.1:25503")
+
+    refused = run_capture(
+        CAPTURE_CONFIG,
+        output=str(tmp_path / "nothing-answered"),
+        transport=_Refused(),
+        as_of=AS_OF,
+    )
+    assert refused["emergency"] is True
+    assert refused["attempt_count"] >= 1
+    assert refused["records_known_in_memory"] == []
+    assert refused["run_state"] == RawCaptureRunState.FAILED_NO_RESPONSE.value
+
+    # Everything answered, and finalization is what failed. That is partial.
+    answered = run_capture(
+        CAPTURE_CONFIG,
+        output=str(tmp_path / "answered"),
+        transport=vendor_transport(),
+        as_of=AS_OF,
+    )
+    assert answered["emergency"] is True
+    assert answered["records_known_in_memory"]
+    assert answered["run_state"] == RawCaptureRunState.FAILED_PARTIAL.value
 
 
 def test_a_crlf_vendor_completes_a_verified_run(tmp_path):

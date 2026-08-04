@@ -395,8 +395,38 @@ def test_an_existing_nonempty_destination_is_refused(tmp_path):
     destination = tmp_path / "used"
     destination.mkdir()
     (destination / "raw").mkdir()
-    with pytest.raises(CaptureRunError, match=r"(?i)already holds"):
+    with pytest.raises(CaptureRunError, match=r"(?i)already exists and holds"):
         run_capture(CAPTURE_CONFIG, output=str(destination), transport=None)
+
+
+def test_an_existing_empty_destination_is_refused_by_both_modes(tmp_path):
+    """The named regression: the dry run must not bless what the live run refuses.
+
+    The live run claims its directory with ``mkdir(exist_ok=False)``, so an
+    existing empty directory was always going to fail -- but v2.1.13's dry run
+    only objected to a *non-empty* one. An operator got "no destination
+    refusals", ran it live, and got an untyped FileExistsError a second later.
+    The destination itself must not exist. Its parent may.
+    """
+    parent = tmp_path / "captures"
+    destination = parent / "today"
+    destination.mkdir(parents=True)
+    assert list(destination.iterdir()) == []
+
+    planned = plan_capture(CAPTURE_CONFIG, output=str(destination))
+    assert planned["destination_refusals"], "the dry run accepted it"
+    assert "already exists and is empty" in " ".join(planned["destination_refusals"])
+
+    with pytest.raises(CaptureRunError, match=r"(?i)already exists and is empty"):
+        run_capture(CAPTURE_CONFIG, output=str(destination), transport=None)
+
+    # The parent existing is fine, which is the normal case.
+    assert (
+        plan_capture(CAPTURE_CONFIG, output=str(parent / "tomorrow"))[
+            "destination_refusals"
+        ]
+        == []
+    )
 
 
 def test_a_second_run_cannot_reuse_the_first_directory(tmp_path):
@@ -411,6 +441,102 @@ def test_a_destination_that_is_a_file_is_refused(tmp_path):
     target.write_text("", encoding="utf-8")
     with pytest.raises(CaptureRunError, match=r"(?i)not a directory"):
         run_capture(CAPTURE_CONFIG, output=str(target), transport=None)
+
+
+@pytest.mark.parametrize(
+    ("break_it", "expected"),
+    [
+        ("config", r"(?i)"),
+        ("credentials", r"(?i)unset or empty"),
+        ("readiness", r"(?i)READY_FOR_RAW_CAPTURE_ONLY"),
+    ],
+)
+def test_a_run_that_never_starts_leaves_no_directory(
+    tmp_path, monkeypatch, break_it, expected
+):
+    """The named regression: preflight before the claim.
+
+    v2.1.13 created the destination and *then* loaded the configuration,
+    resolved credentials and graded readiness. Every one of those failures left
+    an empty directory behind -- which the next attempt refused, so an operator
+    had to delete the evidence of their own typo before they could retry.
+    Nothing that can fail may run after the mkdir.
+    """
+    import dataclasses
+
+    destination = tmp_path / "never-started"
+    config = CAPTURE_CONFIG
+
+    if break_it == "config":
+        config = str(tmp_path / "no-such-profile.yaml")
+    elif break_it == "credentials":
+        import src.config.thetadata as thetadata_module
+
+        def unset(self):
+            raise thetadata_module.MissingCredentialsError(
+                "['THETADATA_PASSWORD'] is unset or empty in the environment"
+            )
+
+        monkeypatch.setattr(
+            thetadata_module.ThetaDataConfig, "resolved_credentials", unset
+        )
+    else:
+        import src.adapters.certification as certification
+        from src.adapters.certification import CertificationState
+
+        graded = certification.assess_readiness
+
+        def downgraded(**kwargs):
+            return dataclasses.replace(
+                graded(**kwargs), state=CertificationState.NOT_READY
+            )
+
+        monkeypatch.setattr(certification, "assess_readiness", downgraded)
+
+    with pytest.raises(Exception, match=expected):
+        run_capture(config, output=str(destination), transport=None)
+
+    assert not destination.exists()
+
+
+def test_a_missing_profile_is_a_configuration_error_not_an_internal_one(
+    tmp_path, capsys
+):
+    """The named regression: ``ConfigError`` fell through to INTERNAL_ERROR.
+
+    ``load_config`` raises it for a malformed or absent profile and it names the
+    offending path. Reporting that as "an unexpected internal error, re-run with
+    --debug for a traceback" sends an operator to read this code instead of
+    their YAML.
+    """
+    code = main(
+        [
+            "--config",
+            str(tmp_path / "no-such-profile.yaml"),
+            "--output",
+            str(tmp_path / "capture"),
+            "--execute-live",
+        ]
+    )
+    assert code == int(ExitCode.CONFIGURATION_ERROR)
+    assert "INTERNAL_ERROR" not in capsys.readouterr().err
+
+
+def test_there_is_no_switch_that_builds_a_transport_it_promised_not_to():
+    """The named regression: ``build_transport=False`` still built one.
+
+    The flag chose between two ways of passing ``None`` to a factory whose
+    documented behaviour for ``None`` is "construct the configured transport".
+    A caller asking for no transport got an ``HttpxTransport``. The parameter is
+    gone: pass the transport you want, or get the configured one.
+    """
+    import inspect
+
+    assert "build_transport" not in inspect.signature(run_capture).parameters
+    source = pathlib.Path("src/tools/capture_thetadata_once.py").read_text(
+        encoding="utf-8"
+    )
+    assert "build_transport" not in source
 
 
 def test_two_runs_in_the_same_second_get_different_ids():

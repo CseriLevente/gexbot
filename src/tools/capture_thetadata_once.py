@@ -223,22 +223,32 @@ def _destination_refusals(destination: pathlib.Path) -> tuple[str, ...]:
             "readable from the command that wrote it, not from whatever the "
             "link pointed at that day."
         )
-    if resolved.exists() and not resolved.is_dir():
-        reasons.append(f"{resolved} exists and is not a directory")
-    elif resolved.is_dir():
-        existing = sorted(entry.name for entry in resolved.iterdir())
-        if existing:
-            marker = "run-intent.json"
+    # **The destination itself must not exist. Its parent may.** The live run
+    # claims the directory with ``mkdir(exist_ok=False)``, which refuses an
+    # existing empty one -- so a dry run that called an existing empty directory
+    # acceptable told the operator something the live run would contradict a
+    # second later, and the contradiction arrived as an untyped FileExistsError.
+    if resolved.exists():
+        if not resolved.is_dir():
+            reasons.append(f"{resolved} exists and is not a directory")
+        else:
+            existing = sorted(entry.name for entry in resolved.iterdir())
             reasons.append(
-                f"{resolved} already holds {existing[:5]}"
+                f"{resolved} already exists"
                 + (
-                    f" including {marker}, so it belongs to an earlier run. "
-                    "v2.1.12 has no resume: give this run its own directory, so "
-                    "two captures can never share a manifest."
-                    if marker in existing
-                    else ". A capture directory is created empty, so that what "
-                    "is in it afterwards is what this run wrote."
+                    f" and holds {existing[:5]}"
+                    + (
+                        ", including run-intent.json, so it belongs to an "
+                        "earlier run -- there is no resume"
+                        if "run-intent.json" in existing
+                        else ""
+                    )
+                    if existing
+                    else " and is empty"
                 )
+                + ". A capture directory is created by the run that owns it, so "
+                "that everything in it afterwards is what that run wrote. Give "
+                "this one a path that does not exist yet; the parent may."
             )
     return tuple(reasons)
 
@@ -395,6 +405,122 @@ def _planned_spot(loaded: Any, as_of: datetime) -> Any:
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class _Preflight:
+    """What a live run needs, resolved without touching the destination."""
+
+    destination: pathlib.Path
+    loaded: Any
+    settings: dict[str, Any]
+    expected_origin: str
+    readiness_state: str
+
+
+def _preflight(
+    config_path: str, *, output: str, moment: datetime, live: bool
+) -> _Preflight:
+    """Phase A. Every way this run can be refused, checked before it claims.
+
+    The v2.1.14 rule: **a run that never starts leaves nothing behind.** Until
+    v2.1.13 the destination was created first and then the configuration was
+    loaded, the credentials resolved, the pipeline built and readiness graded --
+    so a typo in the profile, an unset ``THETADATA_PASSWORD`` or a missing
+    ``httpx`` produced an empty directory the operator then had to delete before
+    they could retry, because an existing destination is refused.
+
+    Nothing here writes. The store capability is probed in a temporary
+    directory, and the pipeline is built with a transport that cannot send, so
+    this is a statement about configuration and nothing else.
+    """
+    from src.adapters.certification import CertificationState, assess_readiness
+    from src.adapters.raw_store import FileRawStore
+    from src.config.pipeline import ThetaDataResearchPipeline
+    from src.config.schema import load_config
+    from src.config.thetadata import effective_transport_settings
+
+    destination = pathlib.Path(output).expanduser()
+    refusals = _destination_refusals(destination)
+    if refusals:
+        raise CaptureRunError("; ".join(refusals))
+
+    # ``ConfigError`` propagates: a bad profile is a CONFIGURATION_ERROR with
+    # its own exit code, not a refusal and not an internal error.
+    loaded = load_config(config_path)
+
+    if live:
+        # Resolving raises ``MissingCredentialsError`` naming the variables --
+        # never their values. Asked here so an unset password costs nothing.
+        loaded.thetadata.resolved_credentials()
+        # And the HTTP extra, so ``pip install -e '.[http]'`` is reported as
+        # itself rather than as an ImportError halfway through a paid run.
+        import importlib.util
+
+        if importlib.util.find_spec("httpx") is None:
+            raise ImportError("httpx is not installed")
+
+    pipeline = ThetaDataResearchPipeline.from_loaded_config(
+        loaded, transport=_NoTransport()
+    )
+    settings = effective_transport_settings(loaded.thetadata)
+
+    with tempfile.TemporaryDirectory(prefix="gex-preflight-") as probe:
+        readiness = assess_readiness(
+            pipeline=pipeline,
+            as_of=moment,
+            open_interest=_planned_open_interest(moment),
+            spot=_planned_spot(loaded, moment),
+            raw_store=FileRawStore(pathlib.Path(probe) / "raw"),
+        )
+    if readiness.state is not CertificationState.READY_FOR_RAW_CAPTURE_ONLY:
+        raise CaptureRunError(
+            f"this configuration is {readiness.state.value}, not "
+            "READY_FOR_RAW_CAPTURE_ONLY, so the session would not produce a "
+            f"capture worth paying for: {list(readiness.blockers)}"
+        )
+
+    _refuse_without_room(destination)
+
+    return _Preflight(
+        destination=destination,
+        loaded=loaded,
+        settings=settings,
+        expected_origin=str(_live_capture_origin(settings["base_url"]).value),
+        readiness_state=readiness.state.value,
+    )
+
+
+#: A capture is a few megabytes. This is not a quota -- it is the difference
+#: between "the disk is fine" and "the disk is full", asked before the money is
+#: spent rather than as an ``OSError`` in the middle of writing the third
+#: endpoint's payload.
+MINIMUM_FREE_BYTES = 64 * 1024 * 1024
+
+
+def _refuse_without_room(destination: pathlib.Path) -> None:
+    """Refuse a destination whose filesystem has no room for the capture.
+
+    Asked of the nearest existing ancestor, because the destination itself does
+    not exist yet -- that is the policy.
+    """
+    import shutil
+
+    anchor = destination.resolve(strict=False)
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    try:
+        free = shutil.disk_usage(anchor).free
+    except OSError as error:  # an unreadable mount point is its own refusal
+        raise CaptureRunError(
+            f"the free space at {anchor} could not be read: {error}"
+        ) from error
+    if free < MINIMUM_FREE_BYTES:
+        raise CaptureRunError(
+            f"{anchor} has {free} bytes free and a capture needs at least "
+            f"{MINIMUM_FREE_BYTES}. A paid session that fills the disk halfway "
+            "through is a paid session with an incomplete manifest."
+        )
+
+
 @dataclass
 class _Run:
     """Mutable bookkeeping for one live run.
@@ -427,42 +553,55 @@ def run_capture(
     output: str,
     transport: Any = None,
     as_of: datetime | None = None,
-    build_transport: bool = True,
 ) -> dict[str, Any]:
     """One capture operation, preserved, finalized and verified.
 
     ``transport`` exists so the tests can drive this against the deterministic
-    fake. **No test makes a network request.** When it is ``None`` and
-    ``build_transport`` is true, ``build_thetadata_client`` constructs the
-    configured ``HttpxTransport`` -- with the timeouts, response cap and
-    authentication the profile states. v2.1.11's CLI called ``HttpxTransport()``
-    with no arguments, so the first real session would have run on library
-    defaults while the YAML said otherwise.
+    fake. **No test makes a network request.** When it is ``None``,
+    ``build_thetadata_client`` constructs the configured ``HttpxTransport`` --
+    with the timeouts, response cap and authentication the profile states.
+    v2.1.11's CLI called ``HttpxTransport()`` with no arguments, so the first
+    real session would have run on library defaults while the YAML said
+    otherwise.
+
+    There is no "do not build a transport" switch. v2.1.13 had one, and passing
+    it *still* produced a live ``HttpxTransport``, because the flag only chose
+    between two ways of passing ``None`` to a factory that builds one either
+    way. A knob that cannot do what it is named is worse than no knob: pass the
+    transport you want, or get the configured one.
 
     Returns a report whatever happens. Failures that prevented any request raise
     :class:`CaptureRunError`; failures after the first request are reported with
     ``run_state=FAILED_PARTIAL`` and the bytes are kept.
     """
     from src.adapters.artifact_store import ArtifactStore
-    from src.adapters.certification import CertificationState, assess_readiness
     from src.adapters.http_attempts import HttpAttemptLog
     from src.adapters.raw_store import FileRawStore
     from src.adapters.thetadata.client import capture_origin_of
     from src.config.pipeline import ThetaDataResearchPipeline
-    from src.config.schema import load_config
-    from src.config.thetadata import effective_transport_settings
 
-    destination = pathlib.Path(output).expanduser()
-    refusals = _destination_refusals(destination)
-    if refusals:
-        raise CaptureRunError("; ".join(refusals))
+    moment = as_of if as_of is not None else datetime.now(UTC)
+    checked = _preflight(
+        config_path, output=output, moment=moment, live=transport is None
+    )
+    destination = checked.destination
+    loaded = checked.loaded
 
+    # ---- Phase B: claim the destination, then build what writes into it ----
+    #
     # **Claimed before anything exists inside it.** ``exist_ok=False`` is the
     # whole mechanism: the check-then-create in v2.1.12 let two processes both
     # observe an empty path and both proceed, mixing their records and
     # overwriting each other's intent and summary. ``mkdir`` is atomic, so
     # exactly one of them gets the directory and the other is refused before it
     # sends anything.
+    #
+    # Nothing above this line can fail any more: preflight has already loaded
+    # the configuration, resolved the credentials, built a pipeline and graded
+    # readiness. v2.1.13 did all of that *after* the mkdir, so a bad profile or
+    # an unset password left an empty directory behind -- which the next attempt
+    # then refused, because the destination policy is that a capture directory
+    # is created by the run that owns it.
     try:
         destination.mkdir(parents=True, exist_ok=False)
     except FileExistsError as error:
@@ -474,8 +613,6 @@ def run_capture(
     except OSError as error:
         raise CaptureRunError(f"{destination} could not be created: {error}") from error
 
-    loaded = load_config(config_path)
-    moment = as_of if as_of is not None else datetime.now(UTC)
     attempts = HttpAttemptLog(destination / "attempts")
 
     raw_root = destination / "raw"
@@ -488,24 +625,10 @@ def run_capture(
     artifacts = ArtifactStore(artifact_root)
     pipeline = ThetaDataResearchPipeline.from_loaded_config(
         loaded,
-        transport=transport if transport is not None or not build_transport else None,
+        transport=transport,
         attempt_observer=attempts,
         default_raw_store=store,
     )
-
-    readiness = assess_readiness(
-        pipeline=pipeline,
-        as_of=moment,
-        open_interest=_planned_open_interest(moment),
-        spot=_planned_spot(loaded, moment),
-        raw_store=store,
-    )
-    if readiness.state is not CertificationState.READY_FOR_RAW_CAPTURE_ONLY:
-        raise CaptureRunError(
-            f"this configuration is {readiness.state.value}, not "
-            "READY_FOR_RAW_CAPTURE_ONLY, so the session would not produce a "
-            f"capture worth paying for: {list(readiness.blockers)}"
-        )
     for name, held in (("raw store", store), ("artifact store", artifacts)):
         if getattr(held, "durability", "") != "DURABLE_APPEND_ONLY":
             raise CaptureRunError(
@@ -523,7 +646,7 @@ def run_capture(
         artifacts=artifacts,
         attempts=attempts,
     )
-    run.extra["effective_transport"] = effective_transport_settings(loaded.thetadata)
+    run.extra["effective_transport"] = checked.settings
     run.extra["effective_raw_store_path"] = str(raw_root)
     run.capture_origin = capture_origin_of(
         pipeline.runtime.client.transport, pipeline.runtime.client.settings.base_url
@@ -579,6 +702,26 @@ def run_path(report: Mapping[str, Any], key: str) -> pathlib.Path:
     return pathlib.Path(str(report["output_root"])) / str(report[key])
 
 
+def _emergency_state(run: _Run) -> RawCaptureRunState:
+    """The strongest state the evidence supports, when finalization itself fails.
+
+    A run that already reached a failure state keeps it: the finalization
+    failure is a second problem, not a reclassification of the first. Otherwise
+    the state is derived from what actually happened -- responses and records
+    mean FAILED_PARTIAL, attempts with no response mean FAILED_NO_RESPONSE, and
+    nothing sent means FAILED_BEFORE_REQUEST.
+    """
+    if run.state.is_failure:
+        return run.state
+    attempts = run.attempts.records
+    records = len(run.session.captured[run.mark :]) if run.session is not None else 0
+    return RawCaptureRunState.from_evidence(
+        attempts=len(attempts),
+        responses=sum(1 for record in attempts if record.status_code is not None),
+        records=records,
+    )
+
+
 def _emergency_summary(run: _Run, error: BaseException) -> dict[str, Any]:
     """The strongest report that can still be written when finalization fails.
 
@@ -597,7 +740,13 @@ def _emergency_summary(run: _Run, error: BaseException) -> dict[str, Any]:
         "mode": "LIVE",
         "emergency": True,
         "manifest_written": False,
-        "run_state": RawCaptureRunState.FAILED_PARTIAL.value,
+        # **What is known, not what is convenient.** v2.1.13 hardcoded
+        # FAILED_PARTIAL here, so a finalization that blew up before a single
+        # request was sent reported the same state as one that lost the disk
+        # after three endpoints -- and an operator reading "partial" goes
+        # looking for bytes that are not there. Derived from the attempt log
+        # and the store, exactly as a non-emergency failure is.
+        "run_state": _emergency_state(run).value,
         "run_id": run.run_id,
         "session_id": getattr(run.session, "session_id", ""),
         "operation_id": getattr(run.session, "operation_id", ""),
@@ -666,6 +815,7 @@ def _classify(error: BaseException) -> tuple[str, str]:
         TransportError,
         VendorHTTPError,
     )
+    from src.config.schema import ConfigError
 
     endpoint = str(getattr(error, "url", "") or "").partition("?")[0]
 
@@ -689,6 +839,7 @@ def _classify(error: BaseException) -> tuple[str, str]:
         (ThetaDataValidationError, "VALIDATION_ERROR"),
         (ThetaDataRawStoreError, "STORAGE_ERROR"),
         (ThetaDataConfigurationError, "CONFIGURATION_ERROR"),
+        (ConfigError, "CONFIGURATION_ERROR"),
         (ThetaDataRetryExhaustedError, "RETRY_EXHAUSTED"),
         (ThetaDataHTTPError, "VENDOR_HTTP_ERROR"),
         (RetryBudgetExhaustedError, "RETRY_EXHAUSTED"),
@@ -1020,11 +1171,16 @@ _EXIT_FOR = {
 def _handle(error: Exception, *, debug: bool) -> int:
     """Turn a failure that stopped the run into concise operator output."""
     from src.adapters.errors import ThetaDataConfigurationError
+    from src.config.schema import ConfigError
     from src.config.thetadata import MissingCredentialsError
 
     if isinstance(error, MissingCredentialsError):
         return _fail(_redacted(error), ExitCode.MISSING_CREDENTIALS)
-    if isinstance(error, ThetaDataConfigurationError):
+    # ``ConfigError`` is what ``load_config`` raises for a malformed or missing
+    # profile, and it names the offending path. v2.1.13 did not list it, so it
+    # fell through to INTERNAL_ERROR with "re-run with --debug for a traceback"
+    # -- sending an operator to read this code instead of their YAML.
+    if isinstance(error, ConfigError | ThetaDataConfigurationError):
         return _fail(_redacted(error), ExitCode.CONFIGURATION_ERROR)
     if isinstance(error, ImportError):
         return _fail(

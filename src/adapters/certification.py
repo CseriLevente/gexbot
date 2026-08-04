@@ -101,7 +101,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.10"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.11"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -367,6 +367,12 @@ class CaptureVerification:
     #: was not told which configuration to expect, and an unanchored check is
     #: recorded as such rather than passing quietly.
     expected_pipeline_fingerprint: str = ""
+    #: Failures deliberately set aside, with the reason. Only
+    #: :func:`verify_universe_source` populates this, and only with
+    #: ``MISSING_ENDPOINT``. Kept rather than dropped: a waived failure that
+    #: leaves no trace is indistinguishable from a check that never ran.
+    waived_failures: tuple[str, ...] = ()
+    waiver_reason: str = ""
 
     @property
     def verified(self) -> bool:
@@ -398,7 +404,61 @@ class CaptureVerification:
             "store_description": self.store_description,
             "plan_fingerprint": self.plan_fingerprint,
             "expected_pipeline_fingerprint": self.expected_pipeline_fingerprint,
+            "waived_failures": list(self.waived_failures),
+            "waiver_reason": self.waiver_reason,
         }
+
+
+#: The one failure class a *universe source* may carry. A listing sweep is not a
+#: chain computation: it is not required to hold an index print, an open-interest
+#: response or first-order greeks, because nothing is being priced from it.
+#: Everything else -- payload hashes, per-record field binding, statuses,
+#: origins, the plan and pipeline fingerprints -- still has to hold.
+UNIVERSE_SOURCE_WAIVABLE_PREFIX = "MISSING_ENDPOINT:"
+
+
+def verify_universe_source(
+    manifest: RawCaptureManifest,
+    store: Any,
+    *,
+    plan: CapturePlan | None = None,
+    expected_pipeline_fingerprint: str = "",
+) -> CaptureVerification:
+    """``verify_capture`` for a capture that exists to enumerate contracts.
+
+    The full check, minus the requirement that the capture contain every
+    endpoint a *chain calculation* needs. A universe sweep that also had to
+    carry an index print and open interest could not be verified at all, and
+    "cannot be verified" would push callers back to reading the store directly
+    -- which is the hole v2.1.11 closes.
+
+    The waived failures are carried on the result, so the receipt persisted
+    beside the capture says what was set aside and why.
+    """
+    from dataclasses import replace
+
+    outcome = verify_capture(
+        manifest,
+        store,
+        plan=plan,
+        expected_pipeline_fingerprint=expected_pipeline_fingerprint,
+    )
+    waived = tuple(
+        failure
+        for failure in outcome.failures
+        if failure.startswith(UNIVERSE_SOURCE_WAIVABLE_PREFIX)
+    )
+    if not waived:
+        return outcome
+    return replace(
+        outcome,
+        failures=tuple(f for f in outcome.failures if f not in waived),
+        waived_failures=waived,
+        waiver_reason=(
+            "a universe source enumerates contracts; it is not required to hold "
+            "the endpoints a chain calculation prices from"
+        ),
+    )
 
 
 def grade_claim(
@@ -1220,14 +1280,29 @@ class AnalyticalReadiness(str, Enum):
     NOT_ANALYTICALLY_READY = "NOT_ANALYTICALLY_READY"
     #: Trusted normalization, a vendor-established OI settlement date, resolved
     #: pricing compatibility, verified chain completeness, no material source
-    #: exclusions.
+    #: exclusions, matching capture and pipeline fingerprints.
     READY_FOR_ANALYTICAL_DATASET = "READY_FOR_ANALYTICAL_DATASET"
 
 
-#: What ``READY_FOR_ANALYTICAL_DATASET`` requires beyond a verified capture.
-#: Listed as prose because none of it is implemented as a gate yet: writing the
-#: list down is the deliverable, and pretending to enforce it would be worse
-#: than saying so.
+class UniverseReadiness(str, Enum):
+    """Whether the *contract universe* alone would support a dataset.
+
+    One input to :func:`assess_analytical_readiness`, and named so it cannot be
+    mistaken for the whole answer. v2.1.10 called this function
+    ``analytical_readiness_of`` and let it return
+    ``READY_FOR_ANALYTICAL_DATASET`` on the strength of one of five conditions:
+    a chain with an unknown settlement date, unresolved pricing compatibility
+    and half its contracts dropped by validation was "ready" because its
+    universe was complete.
+    """
+
+    UNIVERSE_READY = "UNIVERSE_READY"
+    UNIVERSE_NOT_READY = "UNIVERSE_NOT_READY"
+
+
+#: What ``READY_FOR_ANALYTICAL_DATASET`` requires. Every one of these is now
+#: checked by :func:`assess_analytical_readiness`; the ones that cannot be
+#: satisfied offline are blockers rather than prose.
 ANALYTICAL_DATASET_REQUIREMENTS = (
     "trusted normalization: the chain re-derived from its raw records, and the "
     "two canonical hashes equal",
@@ -1240,36 +1315,165 @@ ANALYTICAL_DATASET_REQUIREMENTS = (
     "(OPEN_DECISIONS OD-11)",
     "no material source exclusions: contracts dropped by validation accounted "
     "for rather than silently absent",
+    "the capture and the reading pipeline are the same configuration: a dataset "
+    "assembled from records captured under a different one is two datasets",
 )
 
 
-def analytical_readiness_of(completeness: Any) -> AnalyticalReadiness:
+def universe_readiness_of(completeness: Any) -> UniverseReadiness:
     """Whether a chain's completeness could support an analytical dataset.
 
-    One of the five requirements above, checked rather than described --
-    because it is the one v2.1.10 made checkable. The others still depend on a
-    live session and stay prose.
+    **One** of the requirements above, and deliberately named for the one it
+    checks. Callers that need the verdict want
+    :func:`assess_analytical_readiness`.
 
     **Raw-capture readiness deliberately does not consult this.** Bytes are
-    worth collecting whatever their coverage; the whole reason
-    ``AnalyticalReadiness`` is a separate axis is that conflating the two would
-    block the first capture on a question only a capture can answer.
+    worth collecting whatever their coverage; the whole reason analytical
+    readiness is a separate axis is that conflating the two would block the
+    first capture on a question only a capture can answer.
     """
     from src.domain.expected_universe import UniverseCoverageStatus
 
     if completeness is None:
-        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+        return UniverseReadiness.UNIVERSE_NOT_READY
     try:
         coverage = UniverseCoverageStatus(
             getattr(completeness, "coverage_status", "UNKNOWN_COVERAGE")
         )
     except ValueError:
-        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+        return UniverseReadiness.UNIVERSE_NOT_READY
     if not coverage.establishes_completeness:
-        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
+        return UniverseReadiness.UNIVERSE_NOT_READY
     if not getattr(completeness, "independently_observed", False):
-        return AnalyticalReadiness.NOT_ANALYTICALLY_READY
-    return AnalyticalReadiness.READY_FOR_ANALYTICAL_DATASET
+        return UniverseReadiness.UNIVERSE_NOT_READY
+    return UniverseReadiness.UNIVERSE_READY
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticalReadinessReport:
+    """The verdict and, when it is negative, every reason it is."""
+
+    state: AnalyticalReadiness = AnalyticalReadiness.NOT_ANALYTICALLY_READY
+    universe: UniverseReadiness = UniverseReadiness.UNIVERSE_NOT_READY
+    blockers: tuple[str, ...] = ()
+    satisfied: tuple[str, ...] = ()
+
+    @property
+    def ready(self) -> bool:
+        return self.state is AnalyticalReadiness.READY_FOR_ANALYTICAL_DATASET
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state.value,
+            "universe": self.universe.value,
+            "ready": self.ready,
+            "blockers": list(self.blockers),
+            "satisfied": list(self.satisfied),
+            "requirements": list(ANALYTICAL_DATASET_REQUIREMENTS),
+        }
+
+
+def assess_analytical_readiness(
+    *,
+    completeness: Any = None,
+    normalized_receipt: Any = None,
+    rederived_receipt: Any = None,
+    settlement_artifact: Any = None,
+    pricing_compatibility: Any = None,
+    excluded_records: Any = (),
+    capture_pipeline_fingerprint: str = "",
+    reading_pipeline_fingerprint: str = "",
+) -> AnalyticalReadinessReport:
+    """All six conditions, or ``NOT_ANALYTICALLY_READY`` naming the missing ones.
+
+    Everything absent is a blocker rather than a pass. That is the correction:
+    a function that returns a dataset-ready state must have looked at everything
+    the state names, and one that was told about one condition has looked at one
+    condition.
+    """
+    blockers: list[str] = []
+    satisfied: list[str] = []
+
+    universe = universe_readiness_of(completeness)
+    if universe is UniverseReadiness.UNIVERSE_READY:
+        satisfied.append("chain completeness is FULL_REQUEST_ENUMERATED")
+    else:
+        blockers.append(
+            "the contract universe is not FULL_REQUEST_ENUMERATED from an "
+            "independent source, so what the chain was owed is unknown "
+            "(OPEN_DECISIONS OD-11)"
+        )
+
+    if normalized_receipt is None or rederived_receipt is None:
+        blockers.append(
+            "the chain has not been re-derived from its raw records, so the "
+            "numbers are not bound to bytes anyone can reopen"
+        )
+    elif not normalized_receipt.matches(rederived_receipt):
+        blockers.append(
+            "the chain re-derived from its raw records does not equal the chain "
+            "the numbers were computed from"
+        )
+    else:
+        satisfied.append("trusted normalization: the chain re-derives from its records")
+
+    if settlement_artifact is None:
+        blockers.append(
+            "no open-interest settlement rule was established, and open interest "
+            "is the linear weight on every GEX term (OPEN_DECISIONS OD-26)"
+        )
+    else:
+        satisfied.append(
+            "an open-interest settlement date was derived by a capture-bound rule"
+        )
+
+    if pricing_compatibility is None:
+        blockers.append(
+            "no pricing compatibility report was supplied, so whether our gamma "
+            "and the vendor's mean the same thing is unexamined"
+        )
+    elif pricing_compatibility.blocking_dimensions:
+        blockers.append(
+            "pricing compatibility is unresolved on "
+            f"{[d.dimension.value for d in pricing_compatibility.blocking_dimensions]}"
+        )
+    else:
+        satisfied.append("pricing compatibility is resolved on every dimension")
+
+    dropped = tuple(excluded_records or ())
+    if dropped:
+        blockers.append(
+            f"{len(dropped)} source records were excluded and not accounted for: "
+            f"{sorted(dropped)[:4]}"
+        )
+    else:
+        satisfied.append("no source records were silently excluded")
+
+    if not capture_pipeline_fingerprint or not reading_pipeline_fingerprint:
+        blockers.append(
+            "the capture and reading pipeline fingerprints were not both "
+            "supplied, so nothing states that one configuration produced and "
+            "read this dataset"
+        )
+    elif capture_pipeline_fingerprint != reading_pipeline_fingerprint:
+        blockers.append(
+            f"the records were captured under pipeline "
+            f"{capture_pipeline_fingerprint[:12]}... and are being read under "
+            f"{reading_pipeline_fingerprint[:12]}..."
+        )
+    else:
+        satisfied.append("the capture and reading pipelines are the same")
+
+    return AnalyticalReadinessReport(
+        state=(
+            AnalyticalReadiness.READY_FOR_ANALYTICAL_DATASET
+            if not blockers
+            else AnalyticalReadiness.NOT_ANALYTICALLY_READY
+        ),
+        universe=universe,
+        blockers=tuple(blockers),
+        satisfied=tuple(satisfied),
+    )
 
 
 @dataclass(frozen=True, slots=True)

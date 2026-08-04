@@ -800,3 +800,125 @@ universe it cannot have.
 shipped profile is `READY_FOR_RAW_CAPTURE_ONLY` and
 `NOT_READY_FOR_ANALYTICAL_DATASET`. That was always true. It is now enforced by
 a check rather than asserted in a document.
+
+---
+
+## v2.1.11: who may authorize, and one way to capture
+
+v2.1.10 made coverage a resolver output and refused what a source kind could not
+support. The refusals live in `VerifiedExpectedUniverseArtifact.__post_init__`,
+and they answer *what an artifact may claim*. They were being read as answering
+*who may make one*.
+
+`capture_session` took an artifact and checked `isinstance`. The type is a public
+frozen dataclass. So a caller could construct one naming
+`AUTHORITATIVE_DOCUMENTATION`, `FULL_REQUEST_ENUMERATED`, an evidence id nobody
+had registered and an evidence fingerprint of nothing, and the capture opened
+against it.
+
+### A resolution, re-run
+
+```python
+resolved = pipeline.resolve_expected_universe(
+    declaration=declaration,
+    source_manifest=source_manifest,
+    source_store=source_store,
+)
+
+session = pipeline.capture_session(..., universe_resolution=resolved)
+```
+
+A `UniverseResolution` carries the *inputs*: the declaration, the source
+capture, the verification, and the document extraction where one was involved.
+`capture_session` re-verifies the source and re-derives the artifact, and refuses
+unless the same `artifact_hash` comes out. A forged resolution therefore has to
+supply a source that genuinely produces the claimed artifact — at which point it
+is not a forgery, it is a resolution.
+
+The artifact remains as a serialisable report. Constructing one authorizes
+nothing.
+
+### The source has to be a capture that passed
+
+| Refused | Because |
+|---|---|
+| no `verify_capture` result | existing in a store is not having been verified |
+| a record outside the verified manifest | it was checked against nothing in particular |
+| HTTP 400–599 | an error body parses into whatever rows it happens to contain |
+| `capture_complete=false` | the response is truncated by this repository, not by the vendor |
+| an unsupported `parser_version` | a payload read under different rules is a different payload |
+| an empty operation or request-spec fingerprint | nothing says which request produced it |
+
+A *universe source* is verified with `verify_universe_source`, which waives
+exactly one failure class — `MISSING_ENDPOINT` — because a listing sweep is not
+a chain calculation and holds no index print or open interest. The waived
+failures are carried on the receipt and persisted, so a set-aside check leaves a
+trace.
+
+### The scope and the pipeline are read off the records
+
+`derive_source_scope` reconstructs the request from the stored endpoint and query
+parameters: root, expiration, strike, right, `max_dte`, `strike_range` and
+`min_time`. The declaration's scope is a claim that is compared against it and
+cannot widen it.
+
+`min_time` is the one that matters and the one v2.1.10 dropped. A sweep taken
+with `min_time=15:30:00` returns the contracts that traded after 15:30 — a
+smaller set than the same request without it, and one that re-derives perfectly.
+
+`source_pipeline_fingerprint` is read off the verified records.
+`IDENTICAL_PIPELINE` is the default policy; a difference is waived only by a
+`UniverseOnlyCompatibilityRule` naming both fingerprints and every differing
+parameter, and that rule refuses at construction if any of them decides the
+contract set.
+
+### Documentation identities are extracted
+
+A rule no longer carries contracts. It names a document, an effective period and
+an `extractor_version`; a registered extractor reads the verified bytes and
+emits a `UniverseExtractionArtifact` recording the document hash, the extractor
+version, the rule id, the character ranges read, the identities found and the
+instant the extraction ran. `observed_at` comes from that instant, not from the
+declaration.
+
+Effective periods are enforced against `market_session_date`, and a rule that
+states no period establishes nothing. The production registry is empty: no
+document stating which SPX/SPXW contracts exist has been read (OD-11).
+
+### Recovery compares everything
+
+`recover_capture_artifacts` requires `rederived.artifact_hash ==
+stored.artifact_hash`, and names the first semantic field that moved. v2.1.10
+compared the identity set and the coverage status, so `observed_at`, the source
+scope and the source fingerprints were free.
+
+The whole chain is persisted content-addressed — capture verification (with the
+source manifest), resolution receipt, extraction artifact, verified universe — so
+recovery after a process restart needs no registry anyone populated.
+
+### Readiness names what it checked
+
+`analytical_readiness_of` is now `universe_readiness_of`, returning
+`UNIVERSE_READY` / `UNIVERSE_NOT_READY`. `assess_analytical_readiness` checks all
+six conditions and returns `NOT_ANALYTICALLY_READY` naming each one it could not
+establish. A function returning a dataset-ready state on one of six checks was
+the defect.
+
+### The command
+
+```bash
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture-2026-08-04
+```
+
+Dry run by default, `--execute-live` to contact the vendor. The dry run's
+pipeline is built with a transport whose every method raises. The live run
+refuses a destination inside the repository, requires durable stores, verifies
+what it wrote, computes no GEX and places no orders.
+
+### What this changes about the shipped state
+
+Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
+`ADAPTER_CERTIFIED`. What changed is that the reasons are now checks rather than
+sentences, and there is a command to run when the account exists.

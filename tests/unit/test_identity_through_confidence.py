@@ -37,11 +37,16 @@ def documented_universe(identities):
     """A verified artifact standing for a documented contract listing.
 
     These tests are about identity *arithmetic*: whether two missing and two
-    unexpected cancel, whether ``5000`` and ``5000.00`` are one contract. Since
-    v2.1.10 only a ``VerifiedExpectedUniverseArtifact`` measures completeness,
-    so the artifact is built here rather than resolved -- and its coverage is
+    unexpected cancel, whether ``5000`` and ``5000.00`` are one contract. Only a
+    ``VerifiedExpectedUniverseArtifact`` measures completeness, so the artifact
+    is built here rather than resolved -- and its coverage is
     ``FULL_REQUEST_ENUMERATED`` because a documented listing is the one source
     kind that could reach it.
+
+    Building one directly is exactly what ``capture_session`` stopped accepting
+    in v2.1.11, and that is the division of labour: the *engine* measures
+    against whatever artifact it is given, and the *capture* decides which
+    artifacts exist. These tests exercise the first.
     """
     from src.domain.expected_universe import (
         ExpectedUniverseSourceKind,
@@ -57,6 +62,7 @@ def documented_universe(identities):
         source_operation_fingerprint="",
         source_record_ids=(),
         source_request_spec_fingerprint="",
+        source_pipeline_fingerprint="",
         source_scope=UniverseRequestScope(root="SPXW", requested_at=AS_OF),
         observed_at=AS_OF,
         evidence_fingerprint="v" * 64,

@@ -10,9 +10,19 @@ indistinguishable, downstream, from one a resolver had verified -- the field was
 a constructor argument, it entered the universe hash, and a hash over an
 assertion looks exactly like a hash over a finding.
 
-So verification produces a *different type*. Nothing can hand-construct one that
-means more than it proved, because the coverage status is set by the resolver
-and the resolver will not exceed what the source kind can support.
+So verification produces a *different type*. The coverage status is set by the
+source-specific resolver and refused here when the source kind could not support
+it.
+
+That is a constraint on what an artifact may *say*, and v2.1.10 mistook it for a
+constraint on who may *make* one. This is a public frozen dataclass: a caller can
+construct one directly, name a documentation evidence id that was never
+registered, invent an evidence fingerprint, and hand it to ``capture_session``,
+which checked only ``isinstance``. So v2.1.11 removes the parameter that took
+one. A capture is opened against a :class:`UniverseResolution` -- a receipt that
+carries the declaration and the verified source capture it was established from
+-- and the pipeline re-runs the resolution before the chain operation opens. An
+artifact remains a serialisable *report*; constructing one authorizes nothing.
 """
 
 from __future__ import annotations
@@ -34,12 +44,13 @@ __all__ = [
     "UNIVERSE_RESOLVER_SCHEMA_VERSION",
     "UniverseArtifactError",
     "VerifiedExpectedUniverseArtifact",
+    "first_semantic_difference",
 ]
 
 #: Bumped when the *meaning* of a verified universe changes -- a new coverage
 #: state, a different derivation. An artifact resolved under older rules is
 #: refused rather than compared field by field against newer ones.
-UNIVERSE_RESOLVER_SCHEMA_VERSION = "universe-resolver/2.1.10"
+UNIVERSE_RESOLVER_SCHEMA_VERSION = "universe-resolver/2.1.11"
 
 
 class UniverseArtifactError(ValueError):
@@ -66,6 +77,16 @@ class VerifiedExpectedUniverseArtifact:
     source_operation_fingerprint: str
     source_record_ids: tuple[str, ...]
     source_request_spec_fingerprint: str
+    #: The pipeline configuration the *source* was captured under, read off the
+    #: verified source records. v2.1.10 had no such field, so the compatibility
+    #: check was handed the current pipeline's fingerprint as both the source and
+    #: the target value and compared it with itself.
+    source_pipeline_fingerprint: str
+    #: Reconstructed from the stored endpoint and query parameters of the source
+    #: records, not copied from the declaration. A caller could otherwise state a
+    #: wider scope than the request that produced the bytes, and a scope check
+    #: against a caller's description of the request is a check against the
+    #: caller.
     source_scope: UniverseRequestScope
     #: Derived from the source records, never supplied. v2.1.9 took
     #: ``observed_at`` from the caller, so a listing captured three weeks ago
@@ -74,9 +95,21 @@ class VerifiedExpectedUniverseArtifact:
     #: Digest of the derivation: which bytes, which pages, which document.
     evidence_fingerprint: str
     resolver_version: str = UNIVERSE_RESOLVER_SCHEMA_VERSION
-    #: The declaration this was resolved from, for the audit trail.
+    #: The declaration this was resolved from, for the audit trail. Deliberately
+    #: **outside** :meth:`semantic_payload`, so it is not part of the artifact's
+    #: identity: two callers who declare the same universe from the same records
+    #: at different instants established the same thing, and ``declared_at`` is
+    #: a caller statement nothing reads. Hashing one into the evidence would be
+    #: the pattern this release exists to remove, and it would make recovery
+    #: impossible without persisting the caller's wording as well.
     declaration_hash: str = ""
     documentation_evidence_id: str | None = None
+    #: Digest of the ``CaptureVerification`` receipt that established the source
+    #: records. Empty for a source with no records. Since v2.1.11 a record-backed
+    #: artifact cannot be built without one: existing in a store and hashing to
+    #: its own descriptor is not the same as having come from a capture that
+    #: passed verification.
+    source_verification_fingerprint: str = ""
     _hash: str = field(default="", compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -112,6 +145,20 @@ class VerifiedExpectedUniverseArtifact:
             raise UniverseArtifactError(
                 f"a verified {kind.value} artifact names no source records, so "
                 "nothing can be re-read to confirm it"
+            )
+        if kind.needs_records and not self.source_verification_fingerprint:
+            raise UniverseArtifactError(
+                f"a verified {kind.value} artifact names no capture verification. "
+                "Records that exist and hash to their own descriptors can still "
+                "be an HTTP 500 body, a half-written capture or a response from "
+                "a pipeline that asked a different question; only "
+                "verify_capture() rules those out."
+            )
+        if kind.needs_records and not self.source_pipeline_fingerprint:
+            raise UniverseArtifactError(
+                f"a verified {kind.value} artifact does not say which pipeline "
+                "captured its source, so it cannot be compared against the "
+                "pipeline capturing the chain"
             )
         object.__setattr__(self, "_hash", digest_of(self.semantic_payload()))
 
@@ -156,11 +203,12 @@ class VerifiedExpectedUniverseArtifact:
             "source_operation_fingerprint": self.source_operation_fingerprint,
             "source_record_ids": sorted(self.source_record_ids),
             "source_request_spec_fingerprint": self.source_request_spec_fingerprint,
+            "source_pipeline_fingerprint": self.source_pipeline_fingerprint,
             "source_scope": self.source_scope.semantic_payload(),
             "observed_at": self.observed_at.isoformat(),
             "evidence_fingerprint": self.evidence_fingerprint,
-            "declaration_hash": self.declaration_hash,
             "documentation_evidence_id": self.documentation_evidence_id,
+            "source_verification_fingerprint": self.source_verification_fingerprint,
         }
 
     @property
@@ -175,9 +223,45 @@ class VerifiedExpectedUniverseArtifact:
     def as_dict(self) -> dict[str, Any]:
         return {
             **self.semantic_payload(),
+            "declaration_hash": self.declaration_hash,
             "identity_count": len(self.identity_set),
             "artifact_hash": self.artifact_hash,
             "independently_observed": self.independently_observed,
             "establishes_completeness": self.establishes_completeness,
             "verified": True,
         }
+
+
+def first_semantic_difference(
+    stored: VerifiedExpectedUniverseArtifact,
+    rederived: VerifiedExpectedUniverseArtifact,
+) -> str:
+    """The first field of the artifact that moved, or ``""`` if none did.
+
+    Recovery compares ``artifact_hash``, which is the complete check: every
+    semantic field is under it, so nothing can be edited without the digest
+    moving. A digest mismatch on its own tells an operator that *something*
+    changed and nothing about what, which is not a usable refusal -- so this
+    walks the same canonical payload the hash is taken over and names the first
+    disagreement.
+
+    v2.1.10 compared only the identity set and the coverage status, which left
+    ``observed_at``, the source scope, the source fingerprints and the
+    documentation evidence id free to be replaced. A stale listing edited to look
+    current recovered cleanly.
+    """
+    left, right = stored.semantic_payload(), rederived.semantic_payload()
+    for key in sorted(set(left) | set(right)):
+        mine, theirs = left.get(key), right.get(key)
+        if mine == theirs:
+            continue
+        if key == "identities":
+            missing = sorted(set(mine or ()) - set(theirs or ()))
+            extra = sorted(set(theirs or ()) - set(mine or ()))
+            return (
+                f"identities differ: {len(missing)} stored but not re-derived "
+                f"({missing[:3]}), {len(extra)} re-derived but not stored "
+                f"({extra[:3]})"
+            )
+        return f"{key} is {mine!r} in the stored artifact and {theirs!r} re-derived"
+    return ""

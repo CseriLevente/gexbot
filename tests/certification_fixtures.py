@@ -305,7 +305,7 @@ def captured_chain(
     pipeline: ThetaDataResearchPipeline | None = None,
     *,
     store: Any = None,
-    verified_expected_universe: Any = None,
+    universe_resolution: Any = None,
     declared_expected_universe: Any = None,
     settlement_rule: Any = _UNSET,
     as_of: Any = None,
@@ -323,9 +323,10 @@ def captured_chain(
     Passing ``settlement_rule=None`` asks for the honest production state: a
     capture that established no rule.
 
-    Two universe parameters since v2.1.10. ``verified_expected_universe`` takes
-    a resolved artifact; ``declared_expected_universe`` takes an unresolved
-    declaration and records it as diagnostic-only.
+    Two universe parameters. ``universe_resolution`` takes the receipt
+    ``pipeline.resolve_expected_universe()`` returned, which the capture re-runs;
+    ``declared_expected_universe`` takes an unresolved declaration and records it
+    as diagnostic-only.
     """
     from src.adapters.artifact_store import InMemoryArtifactStore
 
@@ -344,7 +345,7 @@ def captured_chain(
         store=raw_store,
         session_id=f"fetch-{id(raw_store):x}",
         as_of=moment,
-        verified_expected_universe=verified_expected_universe,
+        universe_resolution=universe_resolution,
         declared_expected_universe=declared_expected_universe,
         settlement_rule=rule,
         artifact_store=artifacts,
@@ -364,8 +365,64 @@ def captured_chain(
         pipeline=built,
         artifacts=artifacts,
         settlement_artifact=rule,
-        expected_universe=verified_expected_universe,
+        expected_universe=(
+            universe_resolution.artifact if universe_resolution is not None else None
+        ),
     )
+
+
+def universe_declaration(taken: CapturedChain, **changes: Any) -> Any:
+    """A declaration naming this capture's quote response as its source.
+
+    The *unbounded* scope, because the fixture pipeline's chain request sends
+    ``expiration="*"`` with no DTE, strike or time filter -- which is what the
+    resolver reconstructs from the stored query parameters.
+    """
+    from src.domain.expected_universe import (
+        ExpectedContractUniverse,
+        ExpectedUniverseSourceKind,
+    )
+    from src.domain.universe_scope import UniverseRequestScope
+
+    payload: dict[str, Any] = {
+        "identities": frozenset(q.contract.canonical_id for q in taken.chain.quotes),
+        "source_kind": ExpectedUniverseSourceKind.OBSERVED_SNAPSHOT_ROWS,
+        "source_record_ids": tuple(
+            taken.manifest.records_for(Endpoint.OPTION_QUOTE_SNAPSHOT.value)[:1]
+        ),
+        "scope": UniverseRequestScope(root="SPXW", requested_at=AS_OF),
+        "declared_at": AS_OF,
+    }
+    payload.update(changes)
+    return ExpectedContractUniverse(**payload)
+
+
+def universe_resolution(
+    taken: CapturedChain, *, declaration: Any = None, **changes: Any
+) -> Any:
+    """Resolve a universe out of this capture, through the pipeline.
+
+    The pipeline route is the only one that produces something
+    ``capture_session`` accepts: it runs ``verify_capture`` over the source
+    before reading a record, and the capture re-runs the whole resolution.
+    """
+    return taken.pipeline.resolve_expected_universe(
+        declaration=(
+            declaration
+            if declaration is not None
+            else universe_declaration(taken, **changes)
+        ),
+        source_manifest=taken.manifest,
+        source_store=taken.store,
+        as_of=AS_OF,
+    )
+
+
+def universe_artifact(taken: CapturedChain, **changes: Any) -> Any:
+    """The artifact a resolution established, for tests asserting on its fields."""
+    resolution = universe_resolution(taken, **changes)
+    assert resolution.established, resolution.failure
+    return resolution.artifact
 
 
 #: The id a fixture references. Registered against a document that really

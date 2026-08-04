@@ -228,20 +228,24 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.10` | `pyproject.toml` | anything ships |
+| Package version | `2.1.11` | `pyproject.toml` | anything ships |
 | Parser version | `thetadata-v3-parser/2.1.10` | `src/adapters/raw_store.py` | vendor-payload interpretation changes |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
 | Manifest schema | `raw-capture-manifest/2.1.10` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
-| Certification schema | `adapter-certification/2.1.10` | `src/adapters/certification.py` | what a readiness verdict means changes |
+| Certification schema | `adapter-certification/2.1.11` | `src/adapters/certification.py` | what a readiness verdict means changes |
 | Validation schema | `adapter-validation/2.1.10` | `src/adapters/validation.py` | what a validation report means changes |
 | Normalization schema | `normalized-chain/2.1.10` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
 | Request-spec schema | `thetadata-request-spec/2.1.10` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
 | Capture-operation schema | `capture-operation/2.1.10` | `src/adapters/capture_operation.py` | what one capture operation fixes changes |
-| Expected-universe schema | `expected-universe/2.1.10` | `src/domain/expected_universe.py` | what a universe hash covers changes |
+| Expected-universe schema | `expected-universe/2.1.11` | `src/domain/expected_universe.py` | what a universe hash covers changes |
 | Settlement-evidence schema | `settlement-evidence/2.1.10` | `src/domain/settlement.py` | what a settlement rule *means* changes |
 | Capture-artifact envelope | `capture-artifact/2.1.10` | `src/adapters/artifact_store.py` | how a stored artifact is wrapped changes |
-| Universe-resolver schema | `universe-resolver/2.1.10` | `src/domain/universe_artifact.py` | what a coverage state *means* changes |
+| Universe-resolver schema | `universe-resolver/2.1.11` | `src/domain/universe_artifact.py` | what a coverage state *means* changes |
 | Universe-scope schema | `universe-scope/2.1.10` | `src/domain/universe_scope.py` | what makes two requests comparable changes |
+| Universe-documentation schema | `universe-documentation/2.1.11` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
+| Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
+| Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
+| Operator-report schema | `raw-capture-run/2.1.11` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

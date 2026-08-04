@@ -241,6 +241,35 @@ status is reported as `PARTIALLY_OBSERVED` — never `COMPLETE`.
 repository has verified. Inventing a URL and shipping it as though it were
 confirmed would be worse than reporting the limitation.
 
+**What v2.1.11 changed.** Who may authorize a universe, and what a document
+has to do to state one.
+
+Coverage being a resolver output is worth nothing if the resolver's *output
+type* is the thing the capture checks. `VerifiedExpectedUniverseArtifact` is a
+public frozen dataclass, and v2.1.10's `capture_session` checked `isinstance`,
+so a caller could construct one claiming `AUTHORITATIVE_DOCUMENTATION` and
+`FULL_REQUEST_ENUMERATED` against an evidence id nobody had registered. A
+capture is now opened against a `UniverseResolution` -- the declaration and the
+source capture -- which the pipeline re-runs before the chain operation opens.
+
+Three narrower things followed:
+
+* a universe source must come from a capture that passed `verify_capture`, and
+  each named record must be 2xx, completely written and read by a supported
+  parser. Hashing to your own descriptor is a statement about storage;
+* the source scope and pipeline fingerprint are reconstructed from the stored
+  request rather than taken from the declaration, so `min_time` -- which decides
+  which contracts come back -- reaches the comparison;
+* a documentation rule can no longer carry an identity list. It names a document
+  and a versioned extractor, and the identities are what that extractor reads
+  out of the verified bytes, recorded with the character ranges it read them
+  from. Effective periods are checked against the market session.
+
+**None of this makes a full universe reachable.** `VENDOR_CONTRACT_LIST` and
+`CAPTURED_PAGINATION_METADATA` are still unsupported for want of an endpoint,
+and the universe documentation registry is still empty for want of a document.
+The shipped profile is unchanged: `NOT_READY_FOR_ANALYTICAL_DATASET`.
+
 **What v2.1.10 changed.** Coverage is a *resolver output*, and the resolver
 refuses what it cannot establish.
 
@@ -318,9 +347,18 @@ shaped to fit whatever arrived.
 subscription actually exposes, and its response shape recorded as a fixture.
 Then mark that endpoint `is_dedicated_contract_list=True` in
 `RESPONSE_CAPABILITIES`, capture it, resolve it with
-`resolve_expected_universe`, and pass the resulting artifact to
-`capture_session(verified_expected_universe=...)`. Completeness becomes
-measurable at that point and not before.
+`pipeline.resolve_expected_universe(declaration=..., source_manifest=...,
+source_store=...)`, and pass the resulting `UniverseResolution` to
+`capture_session(universe_resolution=...)`. Completeness becomes measurable at
+that point and not before.
+
+Since v2.1.11 there is a command that takes the capture:
+
+```bash
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture --execute-live
+```
 
 ---
 

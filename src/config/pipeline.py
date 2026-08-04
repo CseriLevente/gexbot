@@ -47,7 +47,7 @@ from src.config.thetadata import (
     ThetaDataConfigError,
     ThetaDataRuntime,
 )
-from src.domain.digests import short_id
+from src.domain.digests import digest_of, short_id
 from src.domain.iv import IVSource
 from src.domain.model_spec import (
     DividendSource,
@@ -878,17 +878,117 @@ def _universe_evidence(universe: Any) -> dict[str, Any]:
     }
 
 
-def _verified_universe(value: Any) -> Any:
-    """Narrow a caller's universe to a *verified artifact*, or refuse it.
+@dataclass(frozen=True, slots=True)
+class UniverseResolution:
+    """A resolution, and everything needed to run it again.
 
-    v2.1.9 took an ``ExpectedContractUniverse`` here -- a declaration -- and
-    verified it later, at replay. So the chain operation was stamped with the
-    hash of an unresolved claim, and whether that claim held was discovered
-    after the capture it was supposed to characterise.
+    The object v2.1.10 did not have. ``capture_session`` took a
+    ``VerifiedExpectedUniverseArtifact`` and checked ``isinstance`` -- but that
+    is a public frozen dataclass, so a caller could construct one claiming
+    ``AUTHORITATIVE_DOCUMENTATION`` and ``FULL_REQUEST_ENUMERATED``, name an
+    evidence id nobody had registered, invent an evidence fingerprint, and be
+    believed. The refusals inside the artifact constrain what it may *say*; they
+    were mistaken for a constraint on who may make one.
 
-    The lifecycle is now: capture the source, resolve it, persist the artifact,
-    *then* open the chain operation under the artifact's hash. This function is
-    where the type system enforces the order.
+    A resolution instead carries the *inputs*: the declaration, the source
+    capture, and the extraction where a document was involved. The pipeline
+    re-runs the whole resolution before opening the chain operation and requires
+    the same artifact hash to come out. A forged resolution therefore has to
+    supply a source capture that genuinely produces the claimed artifact, at
+    which point it is not a forgery -- it is a resolution.
+    """
+
+    declaration: Any
+    artifact: Any = None
+    failure: str = ""
+    source_manifest: Any = None
+    source_store: Any = None
+    source_verification: Any = None
+    extraction: Any = None
+    session_date: Any = None
+
+    @property
+    def established(self) -> bool:
+        return self.artifact is not None and not self.failure
+
+    @property
+    def coverage_status(self) -> Any:
+        from src.domain.expected_universe import UniverseCoverageStatus
+
+        if self.artifact is None:
+            return UniverseCoverageStatus.UNKNOWN_COVERAGE
+        return self.artifact.coverage_status
+
+    @property
+    def artifact_hash(self) -> str:
+        return self.artifact.artifact_hash if self.artifact is not None else ""
+
+    @property
+    def display_id(self) -> str:
+        return self.artifact.display_id if self.artifact is not None else "unresolved"
+
+    def semantic_payload(self) -> dict[str, Any]:
+        """The receipt. What was resolved, from what, by which rules."""
+        from src.domain.universe_artifact import UNIVERSE_RESOLVER_SCHEMA_VERSION
+
+        return {
+            "schema_version": UNIVERSE_RESOLVER_SCHEMA_VERSION,
+            "declaration_hash": getattr(self.declaration, "declaration_hash", ""),
+            "artifact_hash": self.artifact_hash,
+            "coverage_status": self.coverage_status.value,
+            "source_manifest_hash": getattr(self.source_manifest, "manifest_hash", ""),
+            "source_verified": bool(
+                getattr(self.source_verification, "verified", False)
+            ),
+            "extraction_fingerprint": (
+                self.extraction.fingerprint if self.extraction is not None else ""
+            ),
+            "session_date": (
+                self.session_date.isoformat() if self.session_date else None
+            ),
+        }
+
+    @property
+    def receipt_hash(self) -> str:
+        return digest_of(self.semantic_payload())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.semantic_payload(),
+            "receipt_hash": self.receipt_hash,
+            "established": self.established,
+            "failure": self.failure,
+            "artifact": self.artifact.as_dict() if self.artifact else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopeFacts:
+    """The parts of a record ``derive_source_scope`` reads.
+
+    Lets the *chain* request go through the same reconstruction as a source
+    capture, so the two scopes are built by one function rather than by two that
+    have to be kept in step.
+    """
+
+    endpoint: str
+    query_params: dict[str, Any]
+    requested_as_of: Any
+    request_started_at: Any
+
+
+def _chain_scope_endpoint() -> str:
+    from src.adapters.thetadata.endpoints import Endpoint
+
+    return Endpoint.OPTION_QUOTE_SNAPSHOT.value
+
+
+def _universe_resolution(value: Any) -> Any:
+    """Narrow a caller's universe argument to a *resolution*, or refuse it.
+
+    v2.1.9 took a declaration and verified it at replay. v2.1.10 took a verified
+    artifact and checked its type. This takes the resolution, and
+    ``capture_session`` re-runs it.
     """
     if value is None:
         return None
@@ -899,14 +999,31 @@ def _verified_universe(value: Any) -> Any:
         raise PipelineConsistencyError(
             f"{value.display_id!r} is an ExpectedContractUniverse, which is a "
             "declaration rather than evidence. Resolve it with "
-            "resolve_expected_universe() first and pass the "
-            "VerifiedExpectedUniverseArtifact, or pass it as "
-            "declared_expected_universe to record it as diagnostic-only."
+            "pipeline.resolve_expected_universe(declaration=..., "
+            "source_manifest=..., source_store=...) and pass the resulting "
+            "UniverseResolution, or pass it as declared_expected_universe to "
+            "record it as diagnostic-only."
         )
-    if not isinstance(value, VerifiedExpectedUniverseArtifact):
+    if isinstance(value, VerifiedExpectedUniverseArtifact):
         raise PipelineConsistencyError(
-            f"verified_expected_universe must be a "
-            f"VerifiedExpectedUniverseArtifact, got {type(value).__name__}"
+            f"{value.display_id!r} is a VerifiedExpectedUniverseArtifact, which "
+            "is a *report* of a resolution rather than the resolution. It is a "
+            "public dataclass: anyone can construct one claiming "
+            "FULL_REQUEST_ENUMERATED from a documentation id that was never "
+            "registered. Pass the UniverseResolution that "
+            "pipeline.resolve_expected_universe() returned, which carries the "
+            "declaration and the verified source capture so this pipeline can "
+            "establish the same artifact itself."
+        )
+    if not isinstance(value, UniverseResolution):
+        raise PipelineConsistencyError(
+            f"universe_resolution must be a UniverseResolution, got "
+            f"{type(value).__name__}"
+        )
+    if not value.established:
+        raise PipelineConsistencyError(
+            "this universe resolution established nothing"
+            + (f": {value.failure}" if value.failure else "")
         )
     return value
 
@@ -1003,8 +1120,18 @@ def _settlement_date_for_fetch(session: Any, open_interest_as_of: Any) -> Any:
     return artifact.resolved_settlement_date
 
 
-def _persist_artifacts(store: Any, *, settlement: Any, universe: Any) -> None:
-    """Write the objects the stamped digests name, so replay can recover them."""
+def _persist_artifacts(
+    store: Any, *, settlement: Any, universe: Any, resolution: Any = None
+) -> None:
+    """Write the whole evidence chain, so replay depends on no live object.
+
+    v2.1.10 persisted the settlement rule and the verified universe. Recovering
+    a documentation-backed universe then still needed
+    ``UNIVERSE_DOCUMENTATION_RULES`` to have been populated *in the same
+    process*, because the identities lived on the registered rule. A capture
+    whose evidence evaporates when the interpreter exits is a capture whose
+    evidence nobody can check.
+    """
     from src.adapters.artifact_store import ArtifactKind
 
     if settlement is not None:
@@ -1022,6 +1149,122 @@ def _persist_artifacts(store: Any, *, settlement: Any, universe: Any) -> None:
             universe.semantic_payload(),
             sources=tuple(universe.source_record_ids),
         )
+    if resolution is None:
+        return
+    store.put(
+        ArtifactKind.UNIVERSE_RESOLUTION,
+        resolution.semantic_payload(),
+        sources=tuple(getattr(resolution.declaration, "source_record_ids", ())),
+    )
+    if resolution.source_verification is not None:
+        from src.adapters.universe_resolvers import verification_receipt
+
+        store.put(
+            ArtifactKind.CAPTURE_VERIFICATION,
+            verification_receipt(
+                resolution.source_verification, manifest=resolution.source_manifest
+            ),
+            sources=tuple(resolution.source_verification.confirmed_record_ids),
+        )
+    if resolution.extraction is not None:
+        store.put(
+            ArtifactKind.DOCUMENTATION_EVIDENCE,
+            resolution.extraction.semantic_payload(),
+            sources=(resolution.extraction.document_content_hash,),
+        )
+
+
+def _recover_source_manifest(
+    artifact: Any, *, artifact_store: Any, chain_manifest: Any
+) -> tuple[Any, str]:
+    """The manifest of the capture this universe was resolved from.
+
+    A universe's source records belong to an earlier operation -- a listing is
+    captured before the chain it describes -- so the chain's own manifest does
+    not name them. The source manifest is persisted beside the capture and
+    recovered here by the digest the artifact carries, which is also the store's
+    key for it.
+    """
+    from src.adapters.raw_store import RawCaptureManifest
+    from src.domain.expected_universe import ExpectedUniverseSourceKind
+
+    if not ExpectedUniverseSourceKind(artifact.source_kind).needs_records:
+        return None, ""
+    key = artifact.source_verification_fingerprint
+    payload = artifact_store.payload_of(key) if artifact_store is not None else None
+    if payload is None:
+        # A source captured in the same operation as the chain needs no separate
+        # manifest, and that is the ordinary single-session case.
+        named = {entry.record_id for entry in getattr(chain_manifest, "records", ())}
+        if set(artifact.source_record_ids) <= named:
+            return chain_manifest, ""
+        return None, (
+            f"this universe was resolved against capture verification "
+            f"{short_id(key)}... which is not in the artifact store, and its "
+            "source records are not in this chain's manifest either. Until "
+            "v2.1.11 the source manifest was not persisted, so a universe from "
+            "an earlier operation could not be re-verified at all."
+        )
+    stored = payload.get("source_manifest")
+    if not stored:
+        return None, "the stored capture verification carries no source manifest"
+    try:
+        return RawCaptureManifest.rebuilt_from(stored), ""
+    except Exception as error:
+        return None, f"the stored source manifest does not reconstruct: {error}"
+
+
+def _recover_extraction(artifact: Any, *, artifact_store: Any) -> tuple[Any, str]:
+    """The stored reading of a universe document, for a documentation universe.
+
+    Recovery cannot simply re-run the extraction: a fresh run stamps a fresh
+    ``extraction_executed_at``, which is inside the universe hash, so the
+    comparison would never agree. It also must not depend on
+    ``UNIVERSE_DOCUMENTATION_RULES`` still holding the identities, which is
+    process-global state a caller populated -- and until v2.1.11 that is where
+    the identities lived. So the extraction is persisted at capture, recovered
+    here, and re-checked against the document's bytes by the resolver.
+    """
+    from src.adapters.universe_evidence import UniverseExtractionArtifact
+    from src.domain.expected_universe import ExpectedUniverseSourceKind
+
+    if (
+        artifact.source_kind
+        is not ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION
+    ):
+        return None, ""
+    if artifact_store is None:
+        return None, (
+            "this capture rests on a documentation universe and no artifact "
+            "store was supplied, so the reading of that document cannot be "
+            "produced"
+        )
+    payload = artifact_store.payload_of(artifact.evidence_fingerprint)
+    if payload is None:
+        return None, (
+            f"the extraction {short_id(artifact.evidence_fingerprint)}... this "
+            "universe was read from is not in the artifact store. Until v2.1.11 "
+            "the identities lived on a registered rule in memory, so recovery "
+            "worked only in the process that had registered it."
+        )
+    try:
+        return (
+            UniverseExtractionArtifact(
+                rule_identifier=payload["rule_identifier"],
+                extractor_version=payload["extractor_version"],
+                document_content_hash=payload["document_content_hash"],
+                document_verified_at=_iso_instant(payload["document_verified_at"]),
+                document_effective_date=_iso_date(payload["document_effective_date"]),
+                extraction_executed_at=_iso_instant(payload["extraction_executed_at"]),
+                identities=frozenset(payload["identities"]),
+                source_ranges=tuple(
+                    (int(pair[0]), int(pair[1])) for pair in payload["source_ranges"]
+                ),
+            ),
+            "",
+        )
+    except Exception as error:
+        return None, f"the stored universe extraction does not reconstruct: {error}"
 
 
 def _first_field_difference(supplied: Any, rederived: Any) -> str:
@@ -1391,11 +1634,13 @@ class ThetaDataResearchPipeline:
         session_id: str,
         as_of: datetime,
         capture_origin: Any = None,
-        verified_expected_universe: Any = None,
+        universe_resolution: Any = None,
         declared_expected_universe: Any = None,
         settlement_rule: Any = None,
         artifact_store: Any = None,
         universe_max_age: Any = None,
+        pipeline_compatibility: Any = None,
+        universe_compatibility_waiver: Any = None,
     ) -> Any:
         """A capture session stamped with this pipeline's identity.
 
@@ -1423,19 +1668,21 @@ class ThetaDataResearchPipeline:
         alongside would be offering the answer to a question the rule exists to
         answer.
 
-        The universe comes in two forms since v2.1.10, and the split is the
-        point. ``verified_expected_universe`` takes a
-        ``VerifiedExpectedUniverseArtifact`` -- something a resolver produced by
-        reading stored records -- and its scope and timing are checked against
-        this capture before the operation is opened.
+        The universe comes in two forms, and the split is the point.
+        ``universe_resolution`` takes the :class:`UniverseResolution` returned by
+        :meth:`resolve_expected_universe`; this method **re-runs that
+        resolution** -- re-verifying the source capture and re-deriving the
+        artifact -- and refuses unless the same artifact hash comes out.
         ``declared_expected_universe`` takes an unresolved
         ``ExpectedContractUniverse``, records it for diagnostics, and stamps
         nothing: it can never make completeness independent.
 
-        v2.1.9 had one parameter, took the declaration, and verified it at
-        *replay*. So the chain operation was stamped with the hash of a claim
-        nobody had checked, and whether the claim held was discovered after the
-        capture it was supposed to characterise.
+        v2.1.9 took the declaration and verified it at *replay*, so the chain
+        operation was stamped with the hash of a claim nobody had checked.
+        v2.1.10 took a ``VerifiedExpectedUniverseArtifact`` and checked
+        ``isinstance``, which is a check that a caller can satisfy by
+        constructing one: the type's refusals say what an artifact may claim,
+        not who may claim it.
         """
         from src.adapters.raw_store import CaptureOrigin, CaptureSession
         from src.adapters.thetadata.client import capture_origin_of
@@ -1459,20 +1706,24 @@ class ThetaDataResearchPipeline:
                 "weight on every GEX term."
             )
 
-        if verified_expected_universe is not None and (
-            declared_expected_universe is not None
-        ):
+        if universe_resolution is not None and (declared_expected_universe is not None):
             raise PipelineConsistencyError(
-                "a capture session takes a verified universe or a declared one, "
-                "not both: the two would disagree about whether completeness "
-                "was measured, and the disagreement would be settled by "
-                "whichever the fetch path read first"
+                "a capture session takes a universe resolution or a declared "
+                "universe, not both: the two would disagree about whether "
+                "completeness was measured, and the disagreement would be "
+                "settled by whichever the fetch path read first"
             )
-        universe = _verified_universe(verified_expected_universe)
+        resolution = _universe_resolution(universe_resolution)
         declared = _declared_universe(declared_expected_universe)
-        if universe is not None:
+        universe: Any = None
+        if resolution is not None:
+            universe = self._revalidate_universe(resolution, session_date=session_date)
             self._require_compatible_universe(
-                universe, as_of=as_of, max_age=universe_max_age
+                universe,
+                as_of=as_of,
+                max_age=universe_max_age,
+                policy=pipeline_compatibility,
+                waiver=universe_compatibility_waiver,
             )
 
         recipe = self.normalization_recipe(
@@ -1492,7 +1743,12 @@ class ThetaDataResearchPipeline:
             ),
         )
         if artifact_store is not None:
-            _persist_artifacts(artifact_store, settlement=artifact, universe=universe)
+            _persist_artifacts(
+                artifact_store,
+                settlement=artifact,
+                universe=universe,
+                resolution=resolution,
+            )
         return CaptureSession(
             store=store,
             session_id=session_id,
@@ -1546,20 +1802,167 @@ class ThetaDataResearchPipeline:
         claim about what was asked, and the thing it would be compared against
         is the actual request.
         """
+        from src.adapters.universe_resolvers import derive_source_scope
         from src.domain.universe_scope import UniverseRequestScope
 
         request = self.runtime.default_chain_request
-        return UniverseRequestScope(
-            root=request.symbol,
-            max_dte=getattr(request, "max_dte", None),
-            strike_range=getattr(request, "strike_range", None),
-            rights=("call", "put"),
-            request_filters=(),
-            requested_at=requested_at,
+        # Built from the same ``as_query`` the client sends, so every filter that
+        # narrows the contract set is in the comparison. v2.1.10 named only
+        # ``max_dte`` and ``strike_range``, so a chain requested with
+        # ``min_time`` or an explicit ``right`` compared as unbounded.
+        derived = derive_source_scope(
+            {
+                "chain-request": _ScopeFacts(
+                    endpoint=_chain_scope_endpoint(),
+                    query_params=dict(request.as_query(supports_filters=True)),
+                    requested_as_of=requested_at,
+                    request_started_at=requested_at,
+                )
+            }
+        )
+        if isinstance(derived, UniverseRequestScope):
+            return derived
+        raise PipelineConsistencyError(
+            f"this pipeline's chain request does not reconstruct into a "
+            f"comparable scope: {derived}"
         )
 
+    def verify_source_capture(
+        self, *, manifest: Any, store: Any, plan: Any = None
+    ) -> Any:
+        """Check a *source* capture against its store, before reading it.
+
+        Anchored to the pipeline fingerprint the records themselves carry, not
+        to this pipeline's. That is not circular: ``verify_capture`` compares
+        every field of every manifest descriptor against the stored record, so
+        anchoring on the records makes the manifest prove it describes the bytes.
+        Whether the source's configuration may serve *this* chain is a separate
+        question, answered by ``check_source_compatibility`` under an explicit
+        policy.
+        """
+        from src.adapters.certification import verify_universe_source
+
+        named = {entry.record_id for entry in getattr(manifest, "records", ())}
+        anchors = {
+            record.pipeline_fingerprint
+            for record in store.records()
+            if record.record_id in named
+        }
+        return verify_universe_source(
+            manifest,
+            store,
+            plan=plan if plan is not None else self.capture_plan,
+            expected_pipeline_fingerprint=(
+                next(iter(anchors)) if len(anchors) == 1 else ""
+            ),
+        )
+
+    def resolve_expected_universe(
+        self,
+        *,
+        declaration: Any,
+        source_manifest: Any = None,
+        source_store: Any = None,
+        source_plan: Any = None,
+        session_date: Any = None,
+        registry: Any = None,
+        extraction: Any = None,
+        as_of: datetime | None = None,
+    ) -> UniverseResolution:
+        """Establish what a declaration covers, from a *verified* source capture.
+
+        The only supported way to produce something ``capture_session`` will
+        accept. It runs ``verify_capture`` over the source before a byte of it is
+        read, so a universe cannot rest on an HTTP 500 body, a half-written
+        record, or a response captured under a different request specification.
+
+        Returns a resolution whether or not it succeeded: ``established`` says
+        which, and ``failure`` says why not. ``capture_session`` refuses an
+        unestablished one, so a caller who ignores the result gets a refusal at
+        the capture rather than a capture with no universe.
+        """
+        from src.adapters.universe_resolvers import resolve_expected_universe
+        from src.gex.sessions import market_session_date
+
+        session = session_date
+        if session is None and as_of is not None:
+            session = market_session_date(as_of)
+
+        verification = (
+            self.verify_source_capture(
+                manifest=source_manifest, store=source_store, plan=source_plan
+            )
+            if source_manifest is not None and source_store is not None
+            else None
+        )
+        outcome = resolve_expected_universe(
+            declaration,
+            manifest=source_manifest,
+            store=source_store,
+            verification=verification,
+            registry=registry,
+            session_date=session,
+            extraction=extraction,
+        )
+        return UniverseResolution(
+            declaration=declaration,
+            artifact=outcome.artifact,
+            failure=outcome.failure,
+            source_manifest=source_manifest,
+            source_store=source_store,
+            source_verification=verification,
+            extraction=outcome.extraction,
+            session_date=session,
+        )
+
+    def _revalidate_universe(self, resolution: Any, *, session_date: Any) -> Any:
+        """Run the resolution again and require the same artifact to come out.
+
+        This is what makes a resolution evidence rather than a claim. The
+        receipt carries the declaration and the source capture; the pipeline
+        re-verifies that capture and re-derives the artifact here, and compares
+        the full hash. A caller who hand-builds a resolution around a fabricated
+        artifact has to supply a source that genuinely produces it.
+        """
+        from src.domain.universe_artifact import first_semantic_difference
+
+        replayed = self.resolve_expected_universe(
+            declaration=resolution.declaration,
+            source_manifest=resolution.source_manifest,
+            source_store=resolution.source_store,
+            session_date=(
+                resolution.session_date
+                if resolution.session_date is not None
+                else session_date
+            ),
+            extraction=resolution.extraction,
+        )
+        if not replayed.established:
+            raise PipelineConsistencyError(
+                "this universe resolution does not hold when it is run again: "
+                f"{replayed.failure}"
+            )
+        if replayed.artifact.artifact_hash != resolution.artifact_hash:
+            raise PipelineConsistencyError(
+                "re-running this universe resolution produced a different "
+                "artifact than the one it carries -- "
+                + (
+                    first_semantic_difference(resolution.artifact, replayed.artifact)
+                    or "the difference is not in a field either payload names"
+                )
+                + ". A resolution is accepted because this pipeline can "
+                "establish it, not because it arrived in the right type."
+            )
+        return replayed.artifact
+
     def _require_compatible_universe(
-        self, artifact: Any, *, as_of: datetime, max_age: Any = None
+        self,
+        artifact: Any,
+        *,
+        as_of: datetime,
+        max_age: Any = None,
+        policy: Any = None,
+        waiver: Any = None,
     ) -> None:
         """Refuse a verified universe that does not describe *this* chain.
 
@@ -1568,9 +1971,14 @@ class ThetaDataResearchPipeline:
         listing was about this request: a narrower or older sweep re-derives
         just as cleanly, and on a narrower scope a perfect re-derivation is
         exactly what a false ``MEASURED_COMPLETE`` looks like.
+
+        The pipeline comparison uses the source fingerprint the artifact carries.
+        v2.1.10 passed ``self.fingerprint()`` as both sides, so the check that
+        two configurations agreed was a string compared with itself.
         """
         from src.adapters.universe_resolvers import (
             DEFAULT_MAX_UNIVERSE_AGE,
+            PipelineCompatibilityPolicy,
             check_source_compatibility,
         )
 
@@ -1579,8 +1987,13 @@ class ThetaDataResearchPipeline:
             chain_scope=self.request_scope(requested_at=as_of),
             chain_requested_at=as_of,
             chain_pipeline_fingerprint=self.fingerprint(),
-            source_pipeline_fingerprint=self.fingerprint(),
             max_age=max_age if max_age is not None else DEFAULT_MAX_UNIVERSE_AGE,
+            policy=(
+                policy
+                if policy is not None
+                else PipelineCompatibilityPolicy.IDENTICAL_PIPELINE
+            ),
+            waiver=waiver,
         )
         if reasons:
             raise PipelineConsistencyError(
@@ -2463,7 +2876,11 @@ class ThetaDataResearchPipeline:
                 )
             else:
                 recovered_universe, universe_failure = self._recover_universe(
-                    payload, universe_key=universe_key, manifest=manifest, store=store
+                    payload,
+                    universe_key=universe_key,
+                    manifest=manifest,
+                    store=store,
+                    artifact_store=artifact_store,
                 )
                 if universe_failure:
                     failures.append(universe_failure)
@@ -2478,25 +2895,34 @@ class ThetaDataResearchPipeline:
         )
 
     def _recover_universe(
-        self, payload: dict[str, Any], *, universe_key: str, manifest: Any, store: Any
+        self,
+        payload: dict[str, Any],
+        *,
+        universe_key: str,
+        manifest: Any,
+        store: Any,
+        artifact_store: Any = None,
     ) -> tuple[Any, str]:
         """Rebuild the *verified artifact* a chain operation was stamped with.
 
-        Returns the artifact, or a reason it could not be produced. Three
-        checks, and the third is the one v2.1.9 lacked:
+        Returns the artifact, or a reason it could not be produced:
 
         1. the stored payload reconstructs into an artifact;
         2. that artifact hashes to the digest the records carry;
-        3. its identities still follow from the records it names.
+        3. re-resolving it produces a **semantically identical** artifact.
 
-        v2.1.9 reconstructed the *declaration* and re-resolved it, then returned
-        the declaration. So what reached completeness was the object the caller
-        had described rather than the object the resolver had verified, and the
-        difference between the two is the whole of this release.
+        The third is what changed in v2.1.11. v2.1.10 compared the identity set
+        and the coverage status, which are two fields of thirteen: ``observed_at``
+        and ``source_scope`` were free, so a listing captured three weeks ago
+        could be edited to look like this morning's and recover cleanly. The
+        comparison is now the whole artifact hash, and a mismatch names the first
+        field that moved rather than reporting two digests.
         """
-        from src.adapters.universe_resolvers import resolve_expected_universe
         from src.domain.expected_universe import ExpectedContractUniverse
-        from src.domain.universe_artifact import VerifiedExpectedUniverseArtifact
+        from src.domain.universe_artifact import (
+            VerifiedExpectedUniverseArtifact,
+            first_semantic_difference,
+        )
         from src.domain.universe_scope import UniverseRequestScope
 
         scope_payload = payload.get("source_scope") or {}
@@ -2510,6 +2936,9 @@ class ThetaDataResearchPipeline:
                 source_request_spec_fingerprint=payload[
                     "source_request_spec_fingerprint"
                 ],
+                source_pipeline_fingerprint=payload.get(
+                    "source_pipeline_fingerprint", ""
+                ),
                 source_scope=UniverseRequestScope(
                     root=scope_payload.get("root", "UNSPECIFIED"),
                     expirations=(
@@ -2537,6 +2966,9 @@ class ThetaDataResearchPipeline:
                 resolver_version=payload["resolver_version"],
                 declaration_hash=payload.get("declaration_hash", ""),
                 documentation_evidence_id=payload.get("documentation_evidence_id"),
+                source_verification_fingerprint=payload.get(
+                    "source_verification_fingerprint", ""
+                ),
             )
         except Exception as error:
             return None, f"the stored universe artifact does not reconstruct: {error}"
@@ -2559,25 +2991,36 @@ class ThetaDataResearchPipeline:
             documentation_evidence_id=artifact.documentation_evidence_id,
             declared_at=artifact.observed_at,
         )
-        resolved = resolve_expected_universe(
-            declaration, manifest=manifest, store=store
+        extraction, extraction_failure = _recover_extraction(
+            artifact, artifact_store=artifact_store
+        )
+        if extraction_failure:
+            return None, extraction_failure
+        source_manifest, manifest_failure = _recover_source_manifest(
+            artifact, artifact_store=artifact_store, chain_manifest=manifest
+        )
+        if manifest_failure:
+            return None, manifest_failure
+        resolved = self.resolve_expected_universe(
+            declaration=declaration,
+            source_manifest=source_manifest,
+            source_store=store,
+            session_date=_session_of(artifact.observed_at),
+            extraction=extraction,
         )
         if not resolved.established:
             return None, (
                 f"the capture-bound expected universe does not follow from its "
                 f"source: {resolved.failure}"
             )
-        assert resolved.artifact is not None
-        if resolved.artifact.identity_set != artifact.identity_set:
+        if resolved.artifact.artifact_hash != artifact.artifact_hash:
             return None, (
-                "re-deriving the universe from its records produced a different "
-                "contract set than the stamped artifact records"
-            )
-        if resolved.artifact.coverage_status is not artifact.coverage_status:
-            return None, (
-                f"the stamped artifact claims coverage "
-                f"{artifact.coverage_status.value} and re-deriving it produces "
-                f"{resolved.artifact.coverage_status.value}"
+                "re-deriving this universe from its source produces a different "
+                "artifact than the capture was stamped with -- "
+                + (
+                    first_semantic_difference(artifact, resolved.artifact)
+                    or "the difference is not in a field either payload names"
+                )
             )
         return artifact, ""
 

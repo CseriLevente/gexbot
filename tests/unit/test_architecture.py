@@ -511,7 +511,9 @@ def test_a_chain_capture_cannot_take_an_unresolved_universe_as_evidence() -> Non
 
     v2.1.9 took the declaration on ``capture_session`` and verified it at
     replay, so the chain operation was stamped with the hash of a claim nobody
-    had checked.
+    had checked. v2.1.10 took the resolver's *output* and checked its type --
+    but that type is a public frozen dataclass, so the check was one a caller
+    could satisfy by constructing one.
     """
     import inspect
 
@@ -520,11 +522,90 @@ def test_a_chain_capture_cannot_take_an_unresolved_universe_as_evidence() -> Non
     parameters = set(
         inspect.signature(ThetaDataResearchPipeline.capture_session).parameters
     )
-    assert "verified_expected_universe" in parameters
+    assert "universe_resolution" in parameters
     assert "declared_expected_universe" in parameters
     # The ambiguous name is gone, so no call site can be unclear about which it
-    # is handing over.
+    # is handing over -- and so is the one that took a constructible verdict.
     assert "expected_universe" not in parameters
+    assert "verified_expected_universe" not in parameters
+
+
+#: Pipeline methods the documentation used to tell operators to call. Both were
+#: removed in v2.1.5, when capturing and computing were separated and the
+#: calculation gained a gate -- and the instructions were not updated, so anyone
+#: following them got an ``AttributeError``.
+REMOVED_PIPELINE_METHODS = ("capture_and_compute", "compute_gex(")
+
+
+def test_the_documentation_describes_apis_that_exist() -> None:
+    """The named regression.
+
+    Scoped to **fenced code blocks**, because that is what an operator copies.
+    Prose recording that a method was removed is the useful kind of mention and
+    has to stay possible; a runnable snippet calling one is an instruction that
+    ends in ``AttributeError``.
+    """
+    from src.config.pipeline import ThetaDataResearchPipeline
+
+    assert not hasattr(ThetaDataResearchPipeline, "capture_and_compute")
+    assert not hasattr(ThetaDataResearchPipeline, "compute_gex")
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+    for page in [root / "README.md", *sorted((root / "docs").rglob("*.md"))]:
+        inside = False
+        for line in page.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("```"):
+                inside = not inside
+                continue
+            if not inside:
+                continue
+            for method in REMOVED_PIPELINE_METHODS:
+                if method in line:
+                    offenders.append(f"{page.name}: {line.strip()[:90]}")
+    assert not offenders, offenders
+
+
+def test_the_only_operator_command_is_the_raw_capture() -> None:
+    """``src/tools`` is where a command goes, and there is one.
+
+    Added in v2.1.11, which is also the release that added a command at all. A
+    second entry point here would be the natural place for "just run the
+    strategy once" to appear, so the check is that there is nothing else.
+    """
+    tools = SRC / "tools"
+    modules = sorted(p.name for p in tools.glob("*.py") if p.name != "__init__.py")
+    assert modules == ["capture_thetadata_once.py"], modules
+
+
+def test_the_capture_command_cannot_trade_or_calculate() -> None:
+    """It captures bytes. Anything else it did would be unreviewed.
+
+    AST-based, so the docstring explaining that it computes nothing does not
+    look like it computing something.
+    """
+    import ast
+
+    tree = ast.parse(
+        (SRC / "tools" / "capture_thetadata_once.py").read_text(encoding="utf-8")
+    )
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    } | {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    forbidden = called & {
+        "compute_trusted_gex",
+        "compute_diagnostic_gex",
+        "compute_gex_snapshot",
+        "place_order",
+        "submit_order",
+    }
+    assert not forbidden, forbidden
 
 
 def test_the_settlement_date_is_a_typed_field_not_a_metadata_key() -> None:

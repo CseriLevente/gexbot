@@ -301,12 +301,24 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.10"
+    assert package["project"]["version"] == "2.1.11"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
+    # The engine and parser stay at 2.1.10: v2.1.11 changed what a universe has
+    # to prove, not how a payload is read or how a gamma is computed. A version
+    # bumped because a release happened says nothing about what changed.
     assert "gex-engine/2.1.10" in text
     assert "thetadata-v3-parser/2.1.10" in text
-    # The two v2.1.9 schemas. A version table that stops being exhaustive stops
-    # being the thing a reader consults.
+    # A version table that stops being exhaustive stops being the thing a reader
+    # consults, so every schema this release touched is in it.
     assert "settlement-evidence/2.1.10" in text
-    assert "expected-universe/2.1.10" in text
+    for version in (
+        "expected-universe/2.1.11",
+        "universe-resolver/2.1.11",
+        "adapter-certification/2.1.11",
+        "universe-documentation/2.1.11",
+        "universe-extraction/2.1.11",
+        "capture-verification/2.1.11",
+        "raw-capture-run/2.1.11",
+    ):
+        assert version in text, version

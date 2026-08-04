@@ -326,22 +326,53 @@ names a synthetic underlying or leaves raw capture off. Both were possible in
 v2.1.3: the first computes real vendor gammas against an underlying labelled
 invented, the second pays for responses and discards them.
 
-```python
-from src.adapters.transport import FakeTransport
-from src.config.pipeline import ThetaDataResearchPipeline
-from src.config.schema import load_config
+### The command (v2.1.11)
 
-pipeline = ThetaDataResearchPipeline.from_loaded_config(
-    load_config("config/thetadata_capture.yaml")
-)
-snapshot = pipeline.capture_and_compute(as_of=..., spot=...)
+There is one supported way to run it, and it is a dry run unless told otherwise.
+
+```bash
+# Resolve the configuration and print what a live run would do. Sends nothing.
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture-2026-08-04
+
+# The same, actually contacting the vendor.
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture-2026-08-04 \
+  --execute-live
 ```
 
-`capture_and_compute` is the whole run in one call, and there is no way to
-perform it and end up with a snapshot that does not say which configuration,
-which model and which compatibility decision produced it. v2.1.3 required four
-steps, each optional, including a `pipeline=pipeline` keyword that had to be
-remembered.
+The dry run prints the resolved configuration, the pipeline fingerprint, the
+capture-plan fingerprint, the required endpoints, the subscription tier, the
+raw-store destination, the capture readiness, and the calculation and analytical
+blockers. It builds the pipeline with a transport whose every method raises, so
+"no request was made" is a property of the object rather than of the control
+flow.
+
+The live run opens one capture operation, fetches the index snapshot, the option
+quotes, the open interest and the first-order greeks, preserves every response,
+writes `manifest.json` and `capture-summary.json`, scans the store for integrity
+and verifies the manifest against it. Then it prints the session id, the
+operation id, the manifest hash, the record ids, the per-endpoint status, the
+parser version and where everything went.
+
+It refuses an output directory inside this repository. v2.1.5 shipped 573
+fixture payloads in a release archive because a capture was written into the
+namespace the checkout manages.
+
+**It computes no GEX.** Eight load-bearing vendor conventions are unknown, so a
+number from these bytes would have no stated meaning -- and comparing those
+conventions against the captured responses is what the session is for. The
+capture also establishes no open-interest settlement rule, which makes it
+permanently raw-only: the rule is chosen when a session opens and there is no
+argument through which one can be supplied later (OD-26).
+
+> Earlier drafts of this page described `pipeline.capture_and_compute(...)`,
+> removed in v2.1.5, alongside `pipeline.compute_gex(...)`, removed in the same
+> release when computing and capturing were separated and the calculation gained
+> a gate. The instructions were not updated, so an operator following them got
+> an `AttributeError` — which is what the command above replaces.
 
 `ThetaDataRuntime.fetch_chain` no longer accepts `request=`. The request is the
 session's, derived once from the configuration: a caller who could substitute

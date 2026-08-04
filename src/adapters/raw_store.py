@@ -1926,6 +1926,117 @@ class RawCaptureManifest:
         return cls(session_id="", capture_enabled=False)
 
     @classmethod
+    def rebuilt_from(cls, payload: dict[str, Any]) -> RawCaptureManifest:
+        """Reconstruct a manifest from a stored ``semantic_payload``.
+
+        Added in v2.1.11 so a *source* capture's manifest can be persisted
+        beside the artifacts it supports and re-verified later. A universe is
+        resolved against records that belong to an earlier operation, so the
+        chain's own manifest does not name them; without this, recovery would
+        have to rebuild the claim from the store it is supposed to be checked
+        against, which checks nothing.
+
+        The manifest hash is not stored and not trusted: it is recomputed from
+        the reconstructed descriptors, so a payload edited in the artifact store
+        produces a manifest that no longer matches the digest the resolution
+        receipt recorded.
+        """
+        return cls(
+            session_id=str(payload.get("session_id", "")),
+            records=tuple(
+                sorted(
+                    (
+                        ManifestRecord(
+                            record_id=entry["record_id"],
+                            endpoint=entry["endpoint"],
+                            payload_hash=entry["payload_hash"],
+                            parameter_hash=entry["parameter_hash"],
+                            request_id=entry.get("request_id", ""),
+                            request_sequence=int(entry.get("request_sequence", 0)),
+                            http_status=int(entry.get("http_status", 200)),
+                            request_started_at=_moment_or_none(
+                                entry.get("request_started_at")
+                            ),
+                            response_received_at=_moment_or_none(
+                                entry.get("response_received_at")
+                            ),
+                            parser_version=entry.get("parser_version", PARSER_VERSION),
+                            vendor_schema_version=entry.get("vendor_schema_version"),
+                            capture_origin=CaptureOrigin(
+                                entry.get(
+                                    "capture_origin", CaptureOrigin.UNKNOWN_ORIGIN.value
+                                )
+                            ),
+                            byte_length=int(entry.get("byte_length", 0)),
+                            capture_complete=bool(entry.get("capture_complete", True)),
+                            capture_session_id=entry.get("capture_session_id", ""),
+                            pipeline_fingerprint=entry.get("pipeline_fingerprint", ""),
+                            capture_plan_fingerprint=entry.get(
+                                "capture_plan_fingerprint", ""
+                            ),
+                            request_spec_fingerprint=entry.get(
+                                "request_spec_fingerprint", ""
+                            ),
+                            normalization_recipe_fingerprint=entry.get(
+                                "normalization_recipe_fingerprint", ""
+                            ),
+                            operation_id=entry.get("operation_id", ""),
+                            operation_fingerprint=entry.get(
+                                "operation_fingerprint", ""
+                            ),
+                            normalization_recipe_hash=entry.get(
+                                "normalization_recipe_hash", ""
+                            ),
+                            requested_as_of=_moment_or_none(
+                                entry.get("requested_as_of")
+                            ),
+                            effective_valuation_timestamp=_moment_or_none(
+                                entry.get("effective_valuation_timestamp")
+                            ),
+                            valuation_timestamp_rule=entry.get(
+                                "valuation_timestamp_rule", ""
+                            ),
+                            expected_universe_fingerprint=entry.get(
+                                "expected_universe_fingerprint", ""
+                            ),
+                            open_interest_date_rule_fingerprint=entry.get(
+                                "open_interest_date_rule_fingerprint", ""
+                            ),
+                            spot_synchronization_policy_fingerprint=entry.get(
+                                "spot_synchronization_policy_fingerprint", ""
+                            ),
+                        )
+                        for entry in payload.get("records", ())
+                    ),
+                    key=lambda entry: entry.record_id,
+                )
+            ),
+            capture_enabled=bool(payload.get("capture_enabled", True)),
+            capture_plan_fingerprint=payload.get("capture_plan_fingerprint", ""),
+            pipeline_fingerprint=payload.get("pipeline_fingerprint", ""),
+            parser_version=payload.get("parser_version", PARSER_VERSION),
+            schema_version=payload.get("schema_version", MANIFEST_SCHEMA_VERSION),
+            declared_capture_origin=CaptureOrigin(
+                payload.get(
+                    "declared_capture_origin", CaptureOrigin.UNKNOWN_ORIGIN.value
+                )
+            ),
+        )
+
+    def semantic_payload(self) -> dict[str, Any]:
+        """Everything :meth:`rebuilt_from` needs, and nothing derived."""
+        return {
+            "schema_version": self.schema_version,
+            "session_id": self.session_id,
+            "capture_enabled": self.capture_enabled,
+            "capture_plan_fingerprint": self.capture_plan_fingerprint,
+            "pipeline_fingerprint": self.pipeline_fingerprint,
+            "parser_version": self.parser_version,
+            "declared_capture_origin": self.declared_capture_origin.value,
+            "records": [record.semantic_payload() for record in self.records],
+        }
+
+    @classmethod
     def from_session(
         cls,
         session: CaptureSession,

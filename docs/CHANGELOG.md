@@ -1,5 +1,114 @@
 # Changelog
 
+## 2.1.11 - universe-evidence authenticity, and one way to capture
+
+Two objectives. Make universe evidence follow from verified source facts rather
+than from having the right dataclass type, and give the first paid ThetaData
+session a single command that cannot fire by accident.
+
+The v2.1.10 defect is short to state. `VerifiedExpectedUniverseArtifact` is a
+public frozen dataclass whose `__post_init__` refuses a coverage its source kind
+could not reach. That constrains what an artifact may *say*, and it was mistaken
+for a constraint on who may *make* one: `capture_session` took an artifact and
+checked `isinstance`. So
+
+```python
+VerifiedExpectedUniverseArtifact(
+    source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
+    coverage_status=UniverseCoverageStatus.FULL_REQUEST_ENUMERATED,
+    documentation_evidence_id="a-document-nobody-registered",
+    evidence_fingerprint="f" * 64,
+    ...
+)
+```
+
+constructed, passed the check, and opened a capture claiming a complete
+universe.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.10 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | A constructible artifact authorized completeness | The type's refusals say what it may claim, not who may claim it | `capture_session(universe_resolution=...)` takes a `UniverseResolution` -- the declaration plus the source capture -- and **re-runs the resolution**, requiring the same artifact hash |
+| 2 | The resolver read from any object with `records()` | An HTTP 500 body, a half-written record or an unsupported parser was evidence if it hashed to its own descriptor | `verified_universe_source` requires a `verify_capture` result covering every named record, and refuses non-2xx, `capture_complete=false` and unsupported parser versions per record |
+| 3 | The pipeline comparison received one fingerprint twice | `check_source_compatibility(chain=self.fingerprint(), source=self.fingerprint())` compared a string with itself | `source_pipeline_fingerprint` is read off the verified records. `PipelineCompatibilityPolicy.IDENTICAL_PIPELINE` by default; a difference is waived only by a `UniverseOnlyCompatibilityRule`, which refuses at construction if any differing parameter decides the contract set |
+| 4 | The source scope came from the declaration | A sweep taken with `min_time=15:30:00` could present itself as unbounded, and it re-derives perfectly | `derive_source_scope` reconstructs root, expiration, strike, right, `max_dte`, `strike_range` and `min_time` from the stored query parameters. The declaration's scope becomes a claim that is compared and cannot widen the derived one |
+| 5 | A documentation rule carried `identities=frozenset(...)` | A hash of real bytes authenticated a list that came from the caller | The field is gone. A rule names a document and an `extractor_version`; identities come from a registered extractor reading the verified bytes, recorded with the character ranges they were read from |
+| 6 | Effective periods were never checked | A rule effective from 2030 established a March 2026 universe | `period_refusals(session)` runs before resolution, against `market_session_date`. Not-yet-effective, expired and no-period-at-all are three distinct refusals |
+| 7 | `observed_at` for a document was `universe.declared_at` | A caller's timestamp decided how stale a document reading was | `UniverseExtractionArtifact.extraction_executed_at`, alongside the document's verification instant and effective date |
+| 8 | Recovery compared two fields of thirteen | A stale listing edited to look current recovered cleanly | Full `artifact_hash` equality, with `first_semantic_difference` naming the first field that moved |
+| 9 | The evidence chain lived partly in process globals | Recovering a documentation universe needed the registry populated in the same process | The capture-verification receipt (with the source manifest), the resolution receipt, the extraction artifact and the verified universe are all content-addressed in the artifact store |
+| 10 | `analytical_readiness_of` checked one of five conditions | It could return `READY_FOR_ANALYTICAL_DATASET` for a chain with an unknown settlement date and unresolved pricing | Renamed `universe_readiness_of` -> `UNIVERSE_READY` / `UNIVERSE_NOT_READY`. `assess_analytical_readiness` checks six conditions and names every one it could not establish |
+| 11 | Pagination metadata was read loosely | Two responses claiming page 3 collapsed into one; a `total_results` disagreement was discarded; several terminal pages counted as one | Duplicate pages, disagreeing totals, zero or several terminal pages and duplicate partition fingerprints are each refused, and full coverage requires the identity count to equal `total_results` |
+| 12 | There was no capture command | The sequence lived only in test fixtures, and the docs described `capture_and_compute` and `compute_gex`, removed in v2.1.5 | `python -m src.tools.capture_thetadata_once`, dry run by default |
+
+### The operator path
+
+```bash
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture-2026-08-04
+```
+
+Without `--execute-live` it sends nothing -- and not by declining to: the
+pipeline is built with a transport whose every method raises, so the absence of
+a request is a property of the object rather than of the control flow. It prints
+the resolved configuration, the pipeline and capture-plan fingerprints, the
+required endpoints, the tier, the destination, the capture readiness and the
+calculation and analytical blockers.
+
+With `--execute-live` it opens one operation, fetches the index snapshot, the
+quotes, the open interest and the first-order greeks, preserves every response,
+writes `manifest.json` and `capture-summary.json`, scans the store and verifies
+the manifest against it. It refuses an output directory inside the repository,
+requires durable stores, computes no GEX and places no orders.
+
+The capture it takes establishes no settlement rule, which makes it permanently
+raw-only. That is deliberate: which session open interest settled in weights
+every GEX term, and the rule is fixed when a session opens (OD-26).
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | **no change** |
+| `EXPECTED_MODEL_FINGERPRINT` | `32b4694cef709838` | unchanged | **no change** |
+| `EXPECTED_OUTPUT_HASH` | `0e536883...` | unchanged | **no change** |
+
+Nothing moved, and that is the finding. v2.1.11 changed who may authorize a
+universe, where a source scope is read from and what recovery compares. None of
+that is an input to a GEX computed from a synthetic chain with no capture and no
+universe, so a release that moved these would have changed the maths while
+claiming to change the evidence rules.
+
+`MODEL_VERSION` and `PARSER_VERSION` stay at `2.1.10` for the same reason: a
+version bumped because a release happened conveys nothing.
+
+### Behavioural changes worth knowing
+
+* `capture_session(verified_expected_universe=...)` is **gone**. Use
+  `pipeline.resolve_expected_universe(declaration=..., source_manifest=...,
+  source_store=...)` and pass the result as `universe_resolution=`.
+* `analytical_readiness_of` is **gone**. Use `universe_readiness_of` for the
+  completeness question or `assess_analytical_readiness` for the verdict.
+* `UniverseDocumentationRule(identities=...)` and `UniverseDerivation` are
+  **gone**. A rule names an `extractor_version`; `effective_from` is now
+  optional so that "states no period" is representable and refusable.
+* `VerifiedExpectedUniverseArtifact` gained `source_pipeline_fingerprint` and
+  `source_verification_fingerprint`, both required for a record-backed source.
+  `declaration_hash` left the semantic payload: it is a hash of a caller
+  statement, and hashing one into the evidence is the pattern being removed.
+* `read_pagination_metadata` now raises where it previously returned a
+  permissive result.
+
+---
+
 ## 2.1.10 - expected-universe coverage evidence
 
 v2.1.9 made a universe *resolvable*: the resolver reopened the records it named

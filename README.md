@@ -20,7 +20,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2238 tests, 90% coverage
+.venv/Scripts/python.exe -m pytest         # 2289 tests, 90% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no
@@ -137,6 +137,14 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Completeness independence is typed | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the artifact hash and coverage status decide it, never the `expected_source` label |
 | One market-session date helper | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `America/New_York`, with an AST test that no other site derives one |
 | `READY_FOR_ANALYTICAL_DATASET` | `NOT_READY` — requires `FULL_REQUEST_ENUMERATED` coverage, and no verified contract-list or pagination source exists (OD-11) |
+| One-shot raw-capture command | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES`; `python -m src.tools.capture_thetadata_once`, dry run by default, refuses a destination inside the repository, computes no GEX |
+| Universe evidence authorized by a resolution, not a type | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `capture_session` re-runs the resolution and compares the artifact hash |
+| Universe sources come from a verified capture | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; non-2xx, incomplete writes and unsupported parsers are refused |
+| Source pipeline and request scope derived from the records | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `min_time` and every other contract-set filter is read back out of the stored request |
+| Documentation identities extracted from bytes | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a rule names a document and an extractor version and cannot carry an identity list |
+| Documentation effective periods enforced | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; via the shared New York market-session helper |
+| Recovery compares the whole semantic artifact | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; artifact-hash equality, with the first differing field named |
+| `assess_analytical_readiness` checks all six conditions | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; the completeness-only function is now `universe_readiness_of` |
 | Trusted API derives its own authority | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; it takes evidence, not a verdict |
 | Records stamped with pipeline, plan, request spec and recipe | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture cannot be relabelled as another pipeline's |
 | Canonical expected request per endpoint | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; a capture taken at `rate_value=4.2` does not verify against a pipeline configured with 3.1 |
@@ -145,7 +153,7 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | `READY_FOR_ANALYTICAL_DATASET` as a separate axis | `PLANNED` — the requirements are written down; nothing consumes an analytical dataset yet, by design |
 | Graded provenance (PLANNED / OBSERVED / VALIDATED) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; derived from a named raw record, never asserted |
 | Typed pricing dimensions and attestations | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; no comparison has been run, so nothing carries `LIVE_COMPARISON` evidence |
-| Canonical pipeline API (`fetch_chain` / `compute_gex` / `capture_and_compute`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
+| Canonical pipeline API (`capture_session` / `fetch_chain` / `compute_diagnostic_gex` / `compute_trusted_gex`) | `IMPLEMENTED` · `TESTED_SYNTHETICALLY`; `compute_gex` and `capture_and_compute` were removed in v2.1.5 when capturing and computing were separated |
 | ThetaData capture profile (`config/thetadata_capture.yaml`) | `IMPLEMENTED` · **never run** · `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | Pricing mode derived from IV provenance | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |
 | Vendor/local rate and dividend value comparison | `IMPLEMENTED` · `TESTED_SYNTHETICALLY` |

@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 #: Bumped when the *meaning* of a universe hash changes.
-EXPECTED_UNIVERSE_SCHEMA_VERSION = "expected-universe/2.1.10"
+EXPECTED_UNIVERSE_SCHEMA_VERSION = "expected-universe/2.1.11"
 
 
 class UniverseCoverageStatus(str, Enum):

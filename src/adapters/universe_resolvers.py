@@ -1,33 +1,40 @@
 """Turning a universe declaration into a statement about how much was covered.
 
 v2.1.9 made a universe *resolvable*: the resolver reopened the records it named
-and re-derived the identities. That closed "a caller typed a list and labelled
-it a vendor listing", and it left the harder half open.
+and re-derived the identities. v2.1.10 made coverage *derived*: each source kind
+got its own check, and no check could reach a coverage its evidence could not
+support.
 
-Proving a set of identities occurs in stored records is not proving those
-records enumerate the **complete universe the request should have returned**. A
-truncated response enumerates its own rows perfectly. Two consequences:
+Both left the same shape of hole, one level up. v2.1.10's resolver proved things
+about records; it did not ask where the records came from. Concretely:
 
-* the resolver accepted any endpoint with one row per contract as a
-  ``VENDOR_CONTRACT_LIST``, so an ``/v3/option/snapshot/quote`` response
-  established ``MEASURED_COMPLETE`` for the whole chain;
-* ``complete_for_request`` was a constructor argument, hashed into the universe,
-  which made a caller's Boolean look like a finding.
+* it read from any object with ``records()`` and ``get_payload()``, so an HTTP
+  500 body, a half-written capture, or a response captured under a different
+  configuration was verified evidence as long as it hashed to its own
+  descriptor. Hashing to your own descriptor is a statement about storage, not
+  about the response;
+* the *scope* came from ``ExpectedContractUniverse.scope`` -- the caller's
+  description of the request -- so a listing fetched with ``min_time=15:30:00``
+  could be declared unbounded and pass the compatibility check;
+* the pipeline comparison was handed the current pipeline's fingerprint as both
+  the source and the target value, so it compared a string with itself.
 
-Here coverage is *derived*. Each source kind has its own check, each check can
-only reach the coverage its evidence supports, and the result is a
-:class:`VerifiedExpectedUniverseArtifact` -- a different type from the
-declaration, so nothing downstream can mistake one for the other.
+So v2.1.11 requires a *verified source capture*: a manifest, its store, and a
+``verify_capture`` result covering every record the universe names. The scope and
+the pipeline fingerprint are reconstructed from the stored request facts and
+compared against what the declaration claims.
 
 What each kind can reach today:
 
 * **dedicated contract list** -- ``FULL_REQUEST_ENUMERATED``. No ThetaData
   endpoint qualifies, so this resolves to a refusal (OD-11);
 * **captured pagination metadata** -- ``FULL_REQUEST_ENUMERATED`` with every
-  declared page present. No ThetaData snapshot returns page metadata, so this
-  also refuses;
-* **authoritative documentation** -- ``FULL_REQUEST_ENUMERATED`` from a
-  *universe* rule that lists or derives identities. The registry is empty;
+  page present, exactly one terminal page, and an identity count matching the
+  vendor's ``total_results``. No ThetaData snapshot returns page metadata, so
+  this also refuses;
+* **authoritative documentation** -- ``FULL_REQUEST_ENUMERATED`` from identities
+  a versioned extractor read out of verified document bytes, inside the rule's
+  effective period. The registry is empty;
 * **observed snapshot rows** -- ``OBSERVED_SUBSET``, verifiably, today;
 * **caller declared** -- ``UNKNOWN_COVERAGE``.
 """
@@ -38,12 +45,16 @@ import csv
 import hashlib
 import io
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from src.adapters.errors import ThetaDataProvenanceError
 from src.adapters.thetadata.endpoints import capabilities_of
-from src.adapters.universe_evidence import read_pagination_metadata
+from src.adapters.universe_evidence import (
+    UniverseExtractionArtifact,
+    read_pagination_metadata,
+)
 from src.domain.completeness import ContractIdentity, contract_identity
 from src.domain.digests import digest_of
 from src.domain.expected_universe import (
@@ -58,21 +69,135 @@ from src.domain.universe_artifact import (
 from src.domain.universe_scope import UniverseRequestScope
 
 __all__ = [
+    "CONTRACT_SET_PARAMETERS",
     "DEFAULT_MAX_UNIVERSE_AGE",
     "IDENTITY_COLUMNS",
+    "PipelineCompatibilityPolicy",
     "ResolvedExpectedUniverse",
+    "UniverseOnlyCompatibilityRule",
+    "VerifiedUniverseSource",
     "check_source_compatibility",
+    "derive_source_scope",
     "resolve_expected_universe",
+    "verification_receipt",
 ]
 
 #: Columns a contract identity is built from. All must be present, or the
 #: payload is not an enumeration of contracts whatever endpoint served it.
 IDENTITY_COLUMNS = ("symbol", "expiration", "strike", "right")
 
+#: Query parameters that change **which contracts** a response contains. Every
+#: one of these is reconstructed into the source scope, and no pipeline
+#: difference in any of them can be waived.
+#:
+#: ``min_time`` is the one v2.1.10 dropped. A sweep taken with
+#: ``min_time=15:30:00`` returns only contracts that traded after 15:30, which is
+#: a smaller contract set than the same request without it -- and a smaller set
+#: that re-derives perfectly.
+CONTRACT_SET_PARAMETERS = (
+    "expiration",
+    "max_dte",
+    "min_time",
+    "right",
+    "strike",
+    "strike_range",
+    "symbol",
+)
+
 #: How stale a universe source may be before it stops describing the chain it is
 #: measured against. Two sessions: a listing from yesterday is a reasonable
 #: thing to reuse, one from last month is a different market's contract set.
 DEFAULT_MAX_UNIVERSE_AGE = timedelta(days=2)
+
+
+class PipelineCompatibilityPolicy(str, Enum):
+    """How a source pipeline difference is treated."""
+
+    #: The source and the chain must have been captured under the same pipeline
+    #: configuration. The default and the shipped policy.
+    IDENTICAL_PIPELINE = "IDENTICAL_PIPELINE"
+    #: A registered :class:`UniverseOnlyCompatibilityRule` states that the two
+    #: configurations differ only in ways that cannot change the contract set.
+    UNIVERSE_ONLY_DOCUMENTED = "UNIVERSE_ONLY_DOCUMENTED"
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseOnlyCompatibilityRule:
+    """A written statement that two pipelines ask the same *contract* question.
+
+    Enumerating a universe under one configuration and capturing a chain under
+    another is legitimate -- a listing sweep may use a longer timeout or a
+    different rate parameter without changing which contracts come back. Saying
+    so has to be deliberate and specific, which is what this is: it names both
+    fingerprints and every parameter that differs, and refuses at construction
+    if any of them is one that decides the contract set.
+    """
+
+    rule_id: str
+    source_pipeline_fingerprint: str
+    target_pipeline_fingerprint: str
+    differing_parameters: tuple[str, ...]
+    rationale: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "differing_parameters", tuple(sorted(self.differing_parameters))
+        )
+        for name in ("rule_id", "rationale"):
+            if not str(getattr(self, name)).strip():
+                raise ThetaDataProvenanceError(
+                    f"UniverseOnlyCompatibilityRule.{name} is empty; a waiver "
+                    "nobody has to justify is not a policy"
+                )
+        for fingerprint in (
+            self.source_pipeline_fingerprint,
+            self.target_pipeline_fingerprint,
+        ):
+            if len(fingerprint) != 64:
+                raise ThetaDataProvenanceError(
+                    "a universe-only compatibility rule must name both full "
+                    "pipeline fingerprints; a waiver that does not say which "
+                    "two configurations it covers covers all of them"
+                )
+        forbidden = sorted(
+            set(self.differing_parameters) & set(CONTRACT_SET_PARAMETERS)
+        )
+        if forbidden:
+            raise ThetaDataProvenanceError(
+                f"{forbidden} decide which contracts a request returns, so a "
+                "difference in them is not universe-only. A universe captured "
+                "under min_time=15:30:00 enumerates the contracts that traded "
+                "after 15:30, and it re-derives perfectly."
+            )
+
+    def permits(self, *, source: str, target: str) -> bool:
+        return (
+            source == self.source_pipeline_fingerprint
+            and target == self.target_pipeline_fingerprint
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedUniverseSource:
+    """A source capture that passed verification, and what it was captured by.
+
+    Built by :func:`verified_universe_source`. There is no path that reads
+    records out of a bare store: v2.1.10 took ``store: Any``, so anything with
+    a ``records()`` method was a capture.
+    """
+
+    payloads: dict[str, str]
+    descriptors: dict[str, Any]
+    pipeline_fingerprint: str
+    verification_fingerprint: str
+    scope: UniverseRequestScope
+
+    @property
+    def observed_at(self) -> datetime:
+        latest: datetime = max(
+            d.response_received_at for d in self.descriptors.values()
+        )
+        return latest
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +207,10 @@ class ResolvedExpectedUniverse:
     artifact: VerifiedExpectedUniverseArtifact | None = None
     failure: str = ""
     derived_identities: tuple[ContractIdentity, ...] = ()
+    #: The extraction this rests on, for a documentation-backed universe. Held
+    #: so the capture can persist it: recovery must be able to re-check the
+    #: reading without the registry that was populated in another process.
+    extraction: UniverseExtractionArtifact | None = None
 
     @property
     def established(self) -> bool:
@@ -107,6 +236,7 @@ class ResolvedExpectedUniverse:
             "failure": self.failure,
             "derived_identity_count": len(self.derived_identities),
             "artifact": self.artifact.as_dict() if self.artifact else None,
+            "extraction": self.extraction.as_dict() if self.extraction else None,
         }
 
 
@@ -119,14 +249,23 @@ def resolve_expected_universe(
     *,
     manifest: Any = None,
     store: Any = None,
+    verification: Any = None,
     operation: Any = None,
     registry: Any = None,
+    session_date: date | None = None,
+    extraction: UniverseExtractionArtifact | None = None,
 ) -> ResolvedExpectedUniverse:
     """Establish what a declaration actually covers, or say why nothing follows.
 
-    ``manifest`` names the *source* capture -- the responses the universe was
-    read out of. ``operation`` is that capture's operation identity, which is
-    what the artifact records so a later chain can check scope and timing.
+    ``manifest``, ``store`` and ``verification`` describe the *source* capture --
+    the responses the universe was read out of, and the ``verify_capture`` result
+    that says the capture holds. ``operation`` is that capture's operation
+    identity.
+
+    ``session_date`` is the market session the universe will be applied to,
+    needed to check a documentation rule's effective period. ``extraction`` is a
+    previously stored reading of that document, supplied on the recovery path so
+    the instant the extraction happened is not silently replaced by now.
     """
     kind = ExpectedUniverseSourceKind(universe.source_kind)
 
@@ -137,25 +276,28 @@ def resolve_expected_universe(
         return _resolve_caller_declared(universe)
 
     if kind is ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION:
-        return _resolve_documented(universe, registry=registry)
+        return _resolve_documented(
+            universe,
+            registry=registry,
+            session_date=session_date,
+            extraction=extraction,
+        )
+
+    source = verified_universe_source(
+        universe, manifest=manifest, store=store, verification=verification
+    )
+    if isinstance(source, ResolvedExpectedUniverse):
+        return source
 
     if kind is ExpectedUniverseSourceKind.VENDOR_CONTRACT_LIST:
-        return _resolve_contract_list(
-            universe, manifest=manifest, store=store, operation=operation
-        )
-
+        return _resolve_contract_list(universe, source=source, operation=operation)
     if kind is ExpectedUniverseSourceKind.CAPTURED_PAGINATION_METADATA:
-        return _resolve_paginated(
-            universe, manifest=manifest, store=store, operation=operation
-        )
-
-    return _resolve_snapshot_rows(
-        universe, manifest=manifest, store=store, operation=operation
-    )
+        return _resolve_paginated(universe, source=source, operation=operation)
+    return _resolve_snapshot_rows(universe, source=source, operation=operation)
 
 
 # =============================================================================
-# The four source-specific checks
+# The source-specific checks
 # =============================================================================
 
 
@@ -177,6 +319,7 @@ def _resolve_caller_declared(
             source_operation_fingerprint="",
             source_record_ids=(),
             source_request_spec_fingerprint="",
+            source_pipeline_fingerprint="",
             source_scope=scope,
             observed_at=universe.declared_at,
             evidence_fingerprint=digest_of(
@@ -189,15 +332,18 @@ def _resolve_caller_declared(
 
 
 def _resolve_documented(
-    universe: ExpectedContractUniverse, *, registry: Any
+    universe: ExpectedContractUniverse,
+    *,
+    registry: Any,
+    session_date: date | None,
+    extraction: UniverseExtractionArtifact | None,
 ) -> ResolvedExpectedUniverse:
-    """A universe stated by a registered, content-verified *universe* document.
+    """A universe a versioned extractor read out of a verified document.
 
-    Looked up in ``UNIVERSE_DOCUMENTATION_RULES``, not in the settlement
-    registry. v2.1.9 consulted the settlement one, so a document about
-    open-interest settlement conventions -- content-verified, entirely genuine,
-    and silent on which options exist -- established a universe of whatever
-    identities sat beside it in the declaration.
+    Three things v2.1.10 did not do. It looked the rule up in the universe
+    registry (which was the v2.1.10 fix), took ``rule.identities`` -- a
+    caller-supplied list sitting beside a genuine document hash -- never checked
+    the rule's effective period, and dated the result from the declaration.
     """
     from src.adapters.universe_evidence import UNIVERSE_DOCUMENTATION_RULES
 
@@ -215,11 +361,20 @@ def _resolve_documented(
             "v2.1.9 let it define a universe. "
             f"Registered universe ids: {list(rules.registered_ids())}"
         )
-    if not getattr(rule, "established", False):
+    if not rule.established:
         return _failed(
             f"universe rule {evidence_id!r} has not been content verified; a "
             "hash nobody computed is not a hash"
         )
+    if session_date is None:
+        return _failed(
+            f"universe rule {evidence_id!r} states an effective period and this "
+            "resolution names no market session to check it against, so whether "
+            "the document describes the market being captured is unknown"
+        )
+    period = rule.period_refusals(session_date)
+    if period:
+        return _failed("; ".join(period))
     if universe.scope is not None and not rule.scope.covers(universe.scope).compatible:
         reasons = rule.scope.covers(universe.scope).reasons
         return _failed(
@@ -228,64 +383,66 @@ def _resolve_documented(
         )
 
     try:
-        derived = rule.derive_identities()
+        if extraction is None:
+            from datetime import UTC
+
+            read = rule.extract(executed_at=datetime.now(UTC))
+        else:
+            mismatches = rule.confirm(extraction)
+            if mismatches:
+                return _failed("; ".join(mismatches))
+            read = extraction
     except ThetaDataProvenanceError as error:
         return _failed(str(error))
 
     claimed = universe.identity_set
-    if derived != claimed:
+    if read.identities != claimed:
         return _failed(
-            f"universe rule {evidence_id!r} derives {len(derived)} identities "
-            f"and the declaration claims {len(claimed)}; a document that does "
-            "not produce the claimed contracts has not established them",
-            tuple(sorted(derived)),
+            f"universe rule {evidence_id!r} extracts {len(read.identities)} "
+            f"identities from {rule.document_reference} and the declaration "
+            f"claims {len(claimed)}; a document that does not contain the "
+            "claimed contracts has not established them",
+            tuple(sorted(read.identities)),
         )
 
-    observed = universe.declared_at or rule.scope.requested_at
-    if observed is None:
-        return _failed(
-            f"universe rule {evidence_id!r} records no instant it was read at, "
-            "and the declaration gives none either, so its staleness relative "
-            "to a chain cannot be measured"
-        )
     return ResolvedExpectedUniverse(
         artifact=VerifiedExpectedUniverseArtifact(
-            identities=derived,
+            identities=read.identities,
             source_kind=ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION,
             coverage_status=UniverseCoverageStatus.FULL_REQUEST_ENUMERATED,
             source_operation_fingerprint="",
             source_record_ids=(),
             source_request_spec_fingerprint="",
+            source_pipeline_fingerprint="",
             source_scope=rule.scope,
-            # A documented universe is observed when the document was read,
-            # which the rule's own scope records. The declaration's instant is
-            # a fallback for a rule whose scope predates that field.
-            observed_at=observed,
-            evidence_fingerprint=rule.evidence_fingerprint,
+            # When the extractor ran over the document, not when a caller said
+            # it had. v2.1.10 used ``universe.declared_at``, so the staleness of
+            # a document reading was whatever the declaration claimed.
+            observed_at=read.extraction_executed_at,
+            evidence_fingerprint=read.fingerprint,
             declaration_hash=universe.declaration_hash,
             documentation_evidence_id=evidence_id,
         ),
-        derived_identities=tuple(sorted(derived)),
+        derived_identities=tuple(sorted(read.identities)),
+        extraction=read,
     )
 
 
 def _resolve_contract_list(
-    universe: ExpectedContractUniverse, *, manifest: Any, store: Any, operation: Any
+    universe: ExpectedContractUniverse,
+    *,
+    source: VerifiedUniverseSource,
+    operation: Any,
 ) -> ResolvedExpectedUniverse:
     """A dedicated vendor listing endpoint. None exists, so this refuses.
 
     The named regression. v2.1.9 accepted every option snapshot here, which is
     how a quote response came to establish a complete universe.
     """
-    read = _read_source_records(universe, manifest=manifest, store=store)
-    if isinstance(read, ResolvedExpectedUniverse):
-        return read
-    payloads, descriptors = read
-
     not_listings = sorted(
         {
             descriptor.endpoint
-            for descriptor in descriptors.values()
+            for descriptor in source.descriptors.values()
             if not capabilities_of(descriptor.endpoint).is_dedicated_contract_list
         }
     )
@@ -302,8 +459,7 @@ def _resolve_contract_list(
 
     return _artifact_from_records(  # pragma: no cover - unreachable until OD-11
         universe,
-        payloads=payloads,
-        descriptors=descriptors,
+        source=source,
         operation=operation,
         coverage=UniverseCoverageStatus.FULL_REQUEST_ENUMERATED,
         extra_evidence={"listing": "dedicated_contract_list"},
@@ -311,18 +467,16 @@ def _resolve_contract_list(
 
 
 def _resolve_paginated(
-    universe: ExpectedContractUniverse, *, manifest: Any, store: Any, operation: Any
+    universe: ExpectedContractUniverse,
+    *,
+    source: VerifiedUniverseSource,
+    operation: Any,
 ) -> ResolvedExpectedUniverse:
     """Every declared page, read out of the responses themselves."""
-    read = _read_source_records(universe, manifest=manifest, store=store)
-    if isinstance(read, ResolvedExpectedUniverse):
-        return read
-    payloads, descriptors = read
-
     without_metadata = sorted(
         {
             descriptor.endpoint
-            for descriptor in descriptors.values()
+            for descriptor in source.descriptors.values()
             if not capabilities_of(descriptor.endpoint).carries_pagination_metadata
         }
     )
@@ -336,7 +490,7 @@ def _resolve_paginated(
         )
 
     try:
-        evidence = read_pagination_metadata(payloads)
+        evidence = read_pagination_metadata(source.payloads)
     except ThetaDataProvenanceError as error:  # pragma: no cover - see above
         return _failed(str(error))
     if evidence is None:  # pragma: no cover - unreachable while none carry it
@@ -352,10 +506,14 @@ def _resolve_paginated(
             else "the listing has no terminating page, so a continuation may "
             "remain uncaptured",
         )
+    count_refusals = evidence.identity_count_refusals(  # pragma: no cover
+        len(universe.identity_set)
+    )
+    if count_refusals:  # pragma: no cover - unreachable today
+        return _failed("; ".join(count_refusals))
     return _artifact_from_records(  # pragma: no cover - unreachable today
         universe,
-        payloads=payloads,
-        descriptors=descriptors,
+        source=source,
         operation=operation,
         coverage=UniverseCoverageStatus.FULL_REQUEST_ENUMERATED,
         extra_evidence={"pagination": evidence.semantic_payload()},
@@ -363,7 +521,10 @@ def _resolve_paginated(
 
 
 def _resolve_snapshot_rows(
-    universe: ExpectedContractUniverse, *, manifest: Any, store: Any, operation: Any
+    universe: ExpectedContractUniverse,
+    *,
+    source: VerifiedUniverseSource,
+    operation: Any,
 ) -> ResolvedExpectedUniverse:
     """Rows out of ordinary market-data responses. Honest, and a subset.
 
@@ -371,15 +532,10 @@ def _resolve_snapshot_rows(
     identities really did arrive, so a diagnostic can say what the chain held.
     It cannot say what the chain was owed, and the coverage status says so.
     """
-    read = _read_source_records(universe, manifest=manifest, store=store)
-    if isinstance(read, ResolvedExpectedUniverse):
-        return read
-    payloads, descriptors = read
-
     non_enumerating = sorted(
         {
             descriptor.endpoint
-            for descriptor in descriptors.values()
+            for descriptor in source.descriptors.values()
             if not capabilities_of(descriptor.endpoint).can_supply_identities
         }
     )
@@ -390,8 +546,7 @@ def _resolve_snapshot_rows(
         )
     return _artifact_from_records(
         universe,
-        payloads=payloads,
-        descriptors=descriptors,
+        source=source,
         operation=operation,
         coverage=UniverseCoverageStatus.OBSERVED_SUBSET,
         extra_evidence={},
@@ -399,24 +554,62 @@ def _resolve_snapshot_rows(
 
 
 # =============================================================================
-# Shared machinery
+# The verified source capture
 # =============================================================================
 
 
-def _read_source_records(
-    universe: ExpectedContractUniverse, *, manifest: Any, store: Any
-) -> tuple[dict[str, str], dict[str, Any]] | ResolvedExpectedUniverse:
-    """Open every named record and check its bytes still hash as recorded."""
-    if store is None:
+def verified_universe_source(
+    universe: ExpectedContractUniverse,
+    *,
+    manifest: Any,
+    store: Any,
+    verification: Any,
+) -> VerifiedUniverseSource | ResolvedExpectedUniverse:
+    """Every named record, from a capture that passed verification.
+
+    v2.1.10 opened the records and re-hashed their payloads. That proves the
+    bytes have not changed since they were written, and it is silent on whether
+    the response was a 200, whether the write finished, whether the parser that
+    read it is one this code supports, and whether the manifest's account of the
+    capture survives comparison with the store. ``verify_capture`` asks all of
+    those; this requires it to have been asked and to have passed.
+    """
+    if store is None or manifest is None:
         return _failed(
             f"{universe.source_kind.value} was offered with no capture to read "
             "it from, so the records it names were never opened. v2.1.9 used "
             "``source_record_ids`` as a boolean and never opened one."
         )
+    if verification is None:
+        return _failed(
+            f"{universe.source_kind.value} was offered with no capture "
+            "verification. A record that exists in a store and hashes to its "
+            "own descriptor can still be an HTTP 500 body or a half-written "
+            "capture; resolve the universe through "
+            "ThetaDataResearchPipeline.resolve_expected_universe(), which runs "
+            "verify_capture() over the source before reading a byte of it."
+        )
+    if not getattr(verification, "verified", False):
+        return _failed(
+            "the source capture did not pass verification: "
+            f"{list(getattr(verification, 'failures', ()))[:4]}"
+        )
+
     named = tuple(universe.source_record_ids)
-    # Resolved against the *store*, not one manifest: a contract listing is
-    # captured before the chain it describes, so it belongs to an earlier
-    # operation and is not in the chain operation's manifest slice.
+    if not named:
+        return _failed(
+            f"{universe.source_kind.value} names no source records, so nothing "
+            "can be re-read to confirm it"
+        )
+    confirmed = set(getattr(verification, "confirmed_record_ids", ()))
+    unconfirmed = sorted(set(named) - confirmed)
+    if unconfirmed:
+        return _failed(
+            f"the universe names records {unconfirmed} which this capture "
+            "verification did not confirm. A record outside the verified "
+            "manifest was checked against nothing in particular."
+        )
+
     known = {r.record_id: r for r in store.records()}
     unknown = sorted(set(named) - set(known))
     if unknown:
@@ -430,6 +623,9 @@ def _read_source_records(
     descriptors: dict[str, Any] = {}
     for record_id in named:
         descriptor = known[record_id]
+        refusal = _record_refusal(descriptor)
+        if refusal:
+            return _failed(refusal)
         try:
             payload = store.get_payload(record_id)
         except Exception as error:
@@ -443,21 +639,224 @@ def _read_source_records(
             )
         payloads[record_id] = payload
         descriptors[record_id] = descriptor
-    return payloads, descriptors
+
+    pipelines = {d.pipeline_fingerprint for d in descriptors.values()}
+    if len(pipelines) != 1 or not next(iter(pipelines)):
+        return _failed(
+            f"the named records were captured under {sorted(pipelines)} "
+            "pipeline configurations; a universe assembled under two "
+            "configurations asked two questions"
+        )
+
+    scope = derive_source_scope(descriptors)
+    if isinstance(scope, str):
+        return _failed(scope)
+
+    declared_scope = universe.scope
+    if declared_scope is not None:
+        widening = scope.covers(declared_scope)
+        if not widening.compatible:
+            return _failed(
+                "the declaration describes a wider request than the records "
+                f"were captured under: {list(widening.reasons)}. A scope a "
+                "caller typed cannot enlarge the sweep that produced the bytes."
+            )
+
+    return VerifiedUniverseSource(
+        payloads=payloads,
+        descriptors=descriptors,
+        pipeline_fingerprint=next(iter(pipelines)),
+        verification_fingerprint=digest_of(
+            verification_receipt(verification, manifest=manifest)
+        ),
+        scope=scope,
+    )
+
+
+def verification_receipt(verification: Any, *, manifest: Any = None) -> dict[str, Any]:
+    """That this manifest was checked against that store, and the manifest.
+
+    The *source* manifest travels with the receipt because a universe is
+    resolved against records belonging to an earlier operation, so the chain's
+    own manifest does not name them. Without it, recovery would have to rebuild
+    the claim out of the store it is meant to be checked against -- and a
+    manifest derived from a store always matches that store.
+
+    The digest of this payload is what the artifact carries as
+    ``source_verification_fingerprint``, and it is the artifact store's key for
+    the receipt: the stamped digest *is* the lookup, as everywhere else here.
+    """
+    return {
+        "schema_version": "capture-verification/2.1.11",
+        "manifest_hash": getattr(verification, "manifest_hash", ""),
+        "source_manifest": (
+            manifest.semantic_payload() if manifest is not None else None
+        ),
+        "confirmed_record_ids": sorted(
+            getattr(verification, "confirmed_record_ids", ())
+        ),
+        "plan_fingerprint": getattr(verification, "plan_fingerprint", ""),
+        "expected_pipeline_fingerprint": getattr(
+            verification, "expected_pipeline_fingerprint", ""
+        ),
+        "store_description": getattr(verification, "store_description", ""),
+        "verified": bool(getattr(verification, "verified", False)),
+        "waived_failures": sorted(getattr(verification, "waived_failures", ())),
+        "waiver_reason": getattr(verification, "waiver_reason", ""),
+    }
+
+
+def _record_refusal(descriptor: Any) -> str:
+    """Why one stored record is not usable as universe evidence."""
+    from src.adapters.raw_store import SUPPORTED_PARSER_VERSIONS
+
+    status = int(getattr(descriptor, "http_status", 0))
+    if not 200 <= status < 300:
+        return (
+            f"record {descriptor.record_id!r} was captured with HTTP {status}. "
+            "An error body parses into whatever rows it happens to contain, "
+            "including none, and a universe read out of one is a universe read "
+            "out of a failure."
+        )
+    if not getattr(descriptor, "capture_complete", False):
+        return (
+            f"record {descriptor.record_id!r} is marked incomplete: the write "
+            "was interrupted before the atomic rename, so the response is "
+            "truncated by this repository rather than by the vendor"
+        )
+    parser = getattr(descriptor, "parser_version", "")
+    if parser not in SUPPORTED_PARSER_VERSIONS:
+        return (
+            f"record {descriptor.record_id!r} was read by parser {parser!r} and "
+            f"this code supports {sorted(SUPPORTED_PARSER_VERSIONS)}; a payload "
+            "interpreted under different rules is a different payload"
+        )
+    for name in ("operation_fingerprint", "request_spec_fingerprint"):
+        if not str(getattr(descriptor, name, "")).strip():
+            return (
+                f"record {descriptor.record_id!r} carries no {name}, so nothing "
+                "says which request produced it"
+            )
+    return ""
+
+
+def derive_source_scope(descriptors: dict[str, Any]) -> UniverseRequestScope | str:
+    """Reconstruct the request the source records answered, from the records.
+
+    Not from ``ExpectedContractUniverse.scope``, which is what a caller says the
+    request was. The two are compared afterwards, and the *derived* one is what
+    the artifact carries.
+
+    Returns the scope, or a string saying why one cannot be derived.
+    """
+    option_records = [
+        d
+        for d in descriptors.values()
+        if capabilities_of(d.endpoint).can_supply_identities
+    ]
+    if not option_records:
+        return (
+            "none of the named records came from an endpoint that enumerates "
+            "contracts, so no contract-set request can be reconstructed from "
+            "them"
+        )
+
+    params: dict[str, set[str]] = {}
+    for descriptor in option_records:
+        stored = dict(getattr(descriptor, "query_params", {}) or {})
+        for key in CONTRACT_SET_PARAMETERS:
+            if key in stored:
+                params.setdefault(key, set()).add(_render_parameter(stored[key]))
+    inconsistent = sorted(key for key, values in params.items() if len(values) != 1)
+    if inconsistent:
+        return (
+            f"the named records disagree about {inconsistent}, so they answered "
+            "more than one contract-set request and no single scope describes "
+            "them"
+        )
+    single = {key: next(iter(values)) for key, values in params.items()}
+
+    symbol = single.get("symbol", "")
+    if not symbol:
+        return (
+            "the named records record no symbol parameter, so which underlying "
+            "they enumerated cannot be read back"
+        )
+
+    expiration = single.get("expiration", "*")
+    expirations: tuple[date, ...] | None = None
+    if expiration not in ("*", ""):
+        try:
+            expirations = (date.fromisoformat(expiration),)
+        except ValueError:
+            return (
+                f"the records were captured with expiration={expiration!r}, "
+                "which is neither a date nor the wildcard, so which expirations "
+                "they cover cannot be established"
+            )
+
+    right = single.get("right")
+    rights = ("call", "put") if right is None else (_canonical_right(right),)
+
+    filters = tuple(
+        (key, value)
+        for key, value in sorted(single.items())
+        if key not in ("symbol", "expiration", "max_dte", "strike_range", "right")
+    )
+
+    requested = [
+        d.requested_as_of or d.request_started_at
+        for d in option_records
+        if (d.requested_as_of or d.request_started_at) is not None
+    ]
+    try:
+        return UniverseRequestScope(
+            root=symbol,
+            expirations=expirations,
+            max_dte=_as_int(single.get("max_dte")),
+            strike_range=_as_int(single.get("strike_range")),
+            rights=rights,
+            request_filters=filters,
+            requested_at=min(requested) if requested else None,
+        )
+    except ValueError as error:
+        return f"the records do not reconstruct into a request scope: {error}"
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _render_parameter(value: Any) -> str:
+    """Render a stored query value the way the request spec renders it."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+# =============================================================================
+# Shared machinery
+# =============================================================================
 
 
 def _artifact_from_records(
     universe: ExpectedContractUniverse,
     *,
-    payloads: dict[str, str],
-    descriptors: dict[str, Any],
+    source: VerifiedUniverseSource,
     operation: Any,
     coverage: UniverseCoverageStatus,
     extra_evidence: dict[str, Any],
 ) -> ResolvedExpectedUniverse:
     """Re-derive identities, compare, and build the artifact."""
     derived: set[ContractIdentity] = set()
-    for record_id, payload in payloads.items():
+    for record_id, payload in source.payloads.items():
         try:
             derived |= _identities_in(payload, record_id=record_id)
         except ThetaDataProvenanceError as error:
@@ -477,26 +876,18 @@ def _artifact_from_records(
             tuple(sorted(derived)),
         )
 
-    scope = universe.scope
-    if scope is None:
-        return _failed(
-            "the universe records no request scope, so nothing says which "
-            "question it answered -- and a listing of a narrower request "
-            "re-derives perfectly while covering a different set of contracts"
-        )
-
-    # Derived from the records, not from the caller. v2.1.9 took ``observed_at``
-    # from the declaration, so a listing captured three weeks ago could present
-    # itself as observed this morning.
-    observed_at = max(
-        descriptor.response_received_at for descriptor in descriptors.values()
-    )
-    stamps = {descriptor.operation_fingerprint for descriptor in descriptors.values()}
+    stamps = {d.operation_fingerprint for d in source.descriptors.values()}
     if len(stamps) != 1:
         return _failed(
             f"the named records come from {len(stamps)} different capture "
             "operations; a universe assembled from several sweeps is not one "
             "listing"
+        )
+    specs = {d.request_spec_fingerprint for d in source.descriptors.values()}
+    if len(specs) != 1:
+        return _failed(
+            f"the named records were captured under {len(specs)} different "
+            "request specifications, so they did not ask one question"
         )
 
     return ResolvedExpectedUniverse(
@@ -504,18 +895,15 @@ def _artifact_from_records(
             identities=derived,
             source_kind=universe.source_kind,
             coverage_status=coverage,
-            source_operation_fingerprint=stamps.pop(),
-            source_record_ids=tuple(sorted(payloads)),
-            source_request_spec_fingerprint=next(
-                iter(
-                    {
-                        descriptor.request_spec_fingerprint
-                        for descriptor in descriptors.values()
-                    }
-                )
-            ),
-            source_scope=scope,
-            observed_at=observed_at,
+            source_operation_fingerprint=next(iter(stamps)),
+            source_record_ids=tuple(sorted(source.payloads)),
+            source_request_spec_fingerprint=next(iter(specs)),
+            source_pipeline_fingerprint=source.pipeline_fingerprint,
+            # Derived from the records, not from the caller. v2.1.10 carried the
+            # declaration's scope, so a sweep taken with ``min_time=15:30:00``
+            # could present itself as unbounded.
+            source_scope=source.scope,
+            observed_at=source.observed_at,
             evidence_fingerprint=digest_of(
                 {
                     "resolver_version": UNIVERSE_RESOLVER_SCHEMA_VERSION,
@@ -523,18 +911,20 @@ def _artifact_from_records(
                     "coverage": coverage.value,
                     "records": [
                         {
-                            "record_id": descriptors[r].record_id,
-                            "endpoint": descriptors[r].endpoint,
-                            "payload_hash": descriptors[r].payload_hash,
+                            "record_id": source.descriptors[r].record_id,
+                            "endpoint": source.descriptors[r].endpoint,
+                            "payload_hash": source.descriptors[r].payload_hash,
                         }
-                        for r in sorted(payloads)
+                        for r in sorted(source.payloads)
                     ],
                     "identities": sorted(derived),
-                    "scope": scope.semantic_payload(),
+                    "scope": source.scope.semantic_payload(),
+                    "verification": source.verification_fingerprint,
                     **extra_evidence,
                 }
             ),
             declaration_hash=universe.declaration_hash,
+            source_verification_fingerprint=source.verification_fingerprint,
         ),
         derived_identities=tuple(sorted(derived)),
     )
@@ -546,8 +936,11 @@ def check_source_compatibility(
     chain_scope: UniverseRequestScope,
     chain_requested_at: Any,
     chain_pipeline_fingerprint: str = "",
-    source_pipeline_fingerprint: str = "",
     max_age: timedelta = DEFAULT_MAX_UNIVERSE_AGE,
+    policy: PipelineCompatibilityPolicy = (
+        PipelineCompatibilityPolicy.IDENTICAL_PIPELINE
+    ),
+    waiver: UniverseOnlyCompatibilityRule | None = None,
 ) -> tuple[str, ...]:
     """Every reason this universe cannot serve this chain.
 
@@ -556,6 +949,10 @@ def check_source_compatibility(
     a narrower or older sweep re-derives just as cleanly, and on a narrower
     scope a perfect re-derivation is exactly what a false ``MEASURED_COMPLETE``
     looks like.
+
+    The pipeline comparison is against ``artifact.source_pipeline_fingerprint``,
+    which is read off the source records. v2.1.10 was handed the current
+    pipeline's fingerprint for both sides and compared it with itself.
     """
     reasons: list[str] = []
 
@@ -580,15 +977,14 @@ def check_source_compatibility(
             f"{max_age} tolerance; contract sets change between sessions"
         )
 
-    if (
-        chain_pipeline_fingerprint
-        and source_pipeline_fingerprint
-        and chain_pipeline_fingerprint != source_pipeline_fingerprint
-    ):
-        reasons.append(
-            "the universe was captured under a different pipeline "
-            "configuration than the chain, so the two asked different questions"
+    reasons.extend(
+        _pipeline_reasons(
+            artifact,
+            chain_pipeline_fingerprint=chain_pipeline_fingerprint,
+            policy=policy,
+            waiver=waiver,
         )
+    )
 
     if artifact.resolver_version != UNIVERSE_RESOLVER_SCHEMA_VERSION:
         reasons.append(
@@ -598,6 +994,57 @@ def check_source_compatibility(
         )
 
     return tuple(reasons)
+
+
+def _pipeline_reasons(
+    artifact: VerifiedExpectedUniverseArtifact,
+    *,
+    chain_pipeline_fingerprint: str,
+    policy: PipelineCompatibilityPolicy,
+    waiver: UniverseOnlyCompatibilityRule | None,
+) -> list[str]:
+    """Whether the source's pipeline may stand in for the chain's."""
+    source = artifact.source_pipeline_fingerprint
+    if not artifact.source_kind.needs_records:
+        # A document or a caller's list was not captured under any pipeline, so
+        # there is nothing to compare. The universe is refused elsewhere if it
+        # is unsupported for other reasons.
+        return []
+    if not chain_pipeline_fingerprint:
+        return [
+            "this comparison was not told which pipeline is capturing the "
+            "chain, so the source configuration was checked against nothing"
+        ]
+    if not source:
+        return [
+            "the universe does not record which pipeline captured its source, "
+            "so a configuration that narrowed the contract set cannot be ruled "
+            "out"
+        ]
+    if source == chain_pipeline_fingerprint:
+        return []
+    if policy is PipelineCompatibilityPolicy.IDENTICAL_PIPELINE:
+        return [
+            f"the universe was captured under pipeline {source[:12]}... and the "
+            f"chain under {chain_pipeline_fingerprint[:12]}...; under "
+            "IDENTICAL_PIPELINE the two must match, because a configuration "
+            "difference such as min_time changes which contracts come back. A "
+            "difference that genuinely cannot is waived with a "
+            "UniverseOnlyCompatibilityRule."
+        ]
+    if waiver is None:
+        return [
+            "UNIVERSE_ONLY_DOCUMENTED was selected and no "
+            "UniverseOnlyCompatibilityRule was supplied, so nothing states why "
+            "these two configurations ask the same contract question"
+        ]
+    if not waiver.permits(source=source, target=chain_pipeline_fingerprint):
+        return [
+            f"compatibility rule {waiver.rule_id!r} covers "
+            f"{waiver.source_pipeline_fingerprint[:12]}... against "
+            f"{waiver.target_pipeline_fingerprint[:12]}..., not this pair"
+        ]
+    return []
 
 
 def _identities_in(payload: str, *, record_id: str) -> set[ContractIdentity]:

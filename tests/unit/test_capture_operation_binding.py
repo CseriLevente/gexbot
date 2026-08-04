@@ -37,6 +37,7 @@ from tests.certification_fixtures import (
     captured_chain,
     resolved_pipeline,
     trusted_evidence,
+    universe_artifact,
 )
 
 
@@ -535,36 +536,6 @@ def test_short_id_is_available_and_is_not_what_gets_compared():
 # can stand in for a contract list -- lives in
 # tests/unit/test_expected_universe_evidence.py. What is checked here is the
 # binding: which universe a replay is measured against.
-
-
-def universe_artifact(taken, *, identities=None, **changes):
-    """A verified artifact resolved from this capture's quote response."""
-    from src.adapters.thetadata.endpoints import Endpoint
-    from src.adapters.universe_resolvers import resolve_expected_universe
-    from src.domain.expected_universe import (
-        ExpectedContractUniverse,
-        ExpectedUniverseSourceKind,
-    )
-    from src.domain.universe_scope import UniverseRequestScope
-
-    quote_records = taken.manifest.records_for(Endpoint.OPTION_QUOTE_SNAPSHOT.value)
-    declaration = ExpectedContractUniverse(
-        identities=frozenset(
-            identities
-            if identities is not None
-            else (q.contract.canonical_id for q in taken.chain.quotes)
-        ),
-        source_kind=ExpectedUniverseSourceKind.OBSERVED_SNAPSHOT_ROWS,
-        source_record_ids=tuple(quote_records[:1]),
-        scope=UniverseRequestScope(root="SPXW", requested_at=AS_OF),
-        declared_at=AS_OF,
-        **changes,
-    )
-    outcome = resolve_expected_universe(
-        declaration, manifest=taken.manifest, store=taken.store
-    )
-    assert outcome.established, outcome.failure
-    return outcome.artifact
 
 
 def test_a_verified_artifact_hashes_its_identities_and_its_coverage():

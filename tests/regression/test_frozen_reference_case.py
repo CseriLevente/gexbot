@@ -335,6 +335,14 @@ EXPECTED_COMPONENT_SCORES = {
 #      The four keys exist because a Boolean cannot distinguish "one page of
 #      several" from "whatever the vendor happened to send", and -- being an
 #      argument -- was answered by whoever was asking.
+# v2.1.11: unchanged. Classification: **no change**, and that is the finding.
+#
+# v2.1.11 changed who may authorize a universe, where a source scope is read
+# from, and what recovery compares. None of that is an input to a GEX: the
+# reference snapshot is computed from a synthetic chain with no capture, no
+# universe and no resolution, so every number and every serialised key is
+# identical to v2.1.10. A release that moved this hash would have changed the
+# maths while claiming to change the evidence rules.
 EXPECTED_OUTPUT_HASH = (
     "0e536883c9927f65032877c94c1c59998c0f94fb4fb3885fa7fb14777e38e307"
 )
@@ -361,6 +369,11 @@ EXPECTED_OUTPUT_HASH = (
 EXPECTED_CONFIG_FINGERPRINT = (
     "ded3172bfee2682f7986dd9b7b65f2b582d216736da7c795c030554ac6b763b9"
 )
+# v2.1.11: unchanged. Classification: **no change**. ``MODEL_VERSION`` stays at
+# gex-engine/2.1.10 because the numerics did not move: a version bumped because a
+# release happened conveys nothing, and this fingerprint exists to say that a
+# pricing input changed.
+#
 # v2.1.10: 6accfab618292203 -> 32b4694cef709838678b5973a9ce8cfcb8ffff90906ebe2d
 # 6aef9fdb76ccc0fa. Classification: VERSION_METADATA_ONLY.
 #

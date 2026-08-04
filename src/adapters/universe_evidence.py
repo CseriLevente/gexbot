@@ -1,43 +1,54 @@
 """Evidence that a source enumerated the whole request, not merely some of it.
 
-Two kinds, both absent from v2.1.9 in the sense that mattered.
+Two kinds, and both have now been wrong twice in different ways.
 
-**Pagination.** ``CAPTURED_PAGINATION_METADATA`` was a source kind whose
+**Pagination.** ``CAPTURED_PAGINATION_METADATA`` was a v2.1.9 source kind whose
 resolver re-derived *identities* and never read a page number, a total or a
-continuation token -- because the resolver for it was the same code that handles
-a contract listing. So the kind named a check nobody had written, and one
-ordinary quote response satisfied it.
+continuation token. v2.1.10 read them out of the stored bytes, and read them
+loosely: two responses claiming to be page 3 collapsed into one entry, a
+``total_results`` disagreement was discarded rather than refused, and several
+terminal pages counted as one. No endpoint reaches this path today, which is
+exactly when the semantics are cheap to fix.
 
-**Documentation.** The universe resolver looked its evidence id up in
-``DOCUMENTATION_RULES``, which is the *settlement* registry. A rule saying "open
-interest settles on the prior trading session" is a content-verified document
-that says nothing whatsoever about which option contracts exist, and it
-established a universe of whatever identities the caller had put beside it.
+**Documentation.** v2.1.9 looked its evidence id up in the *settlement*
+registry, so a document about open-interest settlement established a universe of
+whatever identities the caller had put beside it. v2.1.10 gave universe
+documents their own registry and still let the rule carry
+``identities=frozenset(...)`` -- a caller-supplied list, alongside a hash of a
+real file. The hash proves which bytes were read. It proves nothing about where
+the identities came from, and they came from the caller.
 
-Both are fixed the same way: a separate, typed object that has to be read out of
-something, and a resolver that refuses when it cannot be.
+So a documentation rule no longer states contracts. It names a *document* and an
+*extractor version*, and the identities are whatever a registered, versioned
+extractor reads out of the verified bytes, recorded with the byte ranges it read
+them from.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from src.adapters.errors import ThetaDataProvenanceError
-from src.domain.completeness import ContractIdentity
+from src.domain.completeness import ContractIdentity, contract_identity
 from src.domain.digests import digest_of
 from src.domain.universe_scope import UniverseRequestScope
 
 __all__ = [
     "PAGINATION_METADATA_FIELDS",
     "UNIVERSE_DOCUMENTATION_RULES",
+    "UNIVERSE_EXTRACTION_SCHEMA_VERSION",
+    "UNIVERSE_EXTRACTORS",
     "PaginationCoverageEvidence",
-    "UniverseDerivation",
     "UniverseDocumentationRegistry",
     "UniverseDocumentationRule",
+    "UniverseExtractionArtifact",
+    "extractor_for",
     "read_pagination_metadata",
 ]
 
@@ -68,10 +79,16 @@ class PaginationCoverageEvidence:
     captured_pages: frozenset[int]
     source_record_ids: tuple[str, ...]
     total_results: int | None = None
+    #: Exactly one captured page must say there is nothing after it. Several
+    #: terminal pages means several sweeps, not one complete sweep.
     continuation_complete: bool = False
     #: One digest per partition, where a sweep was split by strike range or
     #: expiration rather than paginated.
     partition_fingerprints: tuple[str, ...] = ()
+    #: Whether two partitions covering the same contracts is acceptable for this
+    #: source. Off by default: overlapping partitions inflate the identity count
+    #: against ``total_results`` and hide a gap somewhere else.
+    overlapping_partitions_allowed: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "captured_pages", frozenset(self.captured_pages))
@@ -85,6 +102,25 @@ class PaginationCoverageEvidence:
                 "pagination evidence names no records, so nothing can be "
                 "re-read to confirm which pages were captured"
             )
+        if len(set(self.source_record_ids)) != len(self.source_record_ids):
+            raise ThetaDataProvenanceError(
+                "pagination evidence names the same record twice; one response "
+                "counted as two pages is one page short of what it claims"
+            )
+        if not self.overlapping_partitions_allowed and len(
+            set(self.partition_fingerprints)
+        ) != len(self.partition_fingerprints):
+            raise ThetaDataProvenanceError(
+                "two partitions of this sweep have the same fingerprint, so they "
+                "asked the same question; overlapping partitions inflate the "
+                "identity count and hide a gap elsewhere"
+            )
+        beyond = sorted(p for p in self.captured_pages if p > self.total_pages or p < 1)
+        if beyond:
+            raise ThetaDataProvenanceError(
+                f"pages {beyond} are outside 1..{self.total_pages}; a page number "
+                "the sweep does not contain is not evidence about the sweep"
+            )
 
     @property
     def missing_pages(self) -> tuple[int, ...]:
@@ -95,6 +131,29 @@ class PaginationCoverageEvidence:
         """Every declared page present, and the vendor said there are no more."""
         return not self.missing_pages and self.continuation_complete
 
+    def identity_count_refusals(self, derived: int) -> tuple[str, ...]:
+        """Why the identities derived from these pages contradict the metadata.
+
+        ``total_results`` is the vendor stating how many contracts the request
+        owed. If the pages parse into a different number, one of the two is
+        wrong and neither can be preferred -- so full coverage is refused rather
+        than resolved to whichever number is larger.
+        """
+        if self.total_results is None:
+            return (
+                "the captured pages carry no total_results, so nothing states "
+                "how many contracts the request owed; the page numbers alone "
+                "cannot distinguish a complete sweep from a truncated one",
+            )
+        if derived != self.total_results:
+            return (
+                f"the pages state total_results={self.total_results} and parse "
+                f"into {derived} unique contract identities; a listing that does "
+                "not contain the number of contracts it says it contains has "
+                "not enumerated the request",
+            )
+        return ()
+
     def semantic_payload(self) -> dict[str, Any]:
         return {
             "total_pages": self.total_pages,
@@ -103,6 +162,7 @@ class PaginationCoverageEvidence:
             "total_results": self.total_results,
             "continuation_complete": self.continuation_complete,
             "partition_fingerprints": sorted(self.partition_fingerprints),
+            "overlapping_partitions_allowed": self.overlapping_partitions_allowed,
         }
 
     @property
@@ -131,7 +191,7 @@ def read_pagination_metadata(
     pages: dict[str, int] = {}
     totals: set[int] = set()
     results: set[int] = set()
-    continuations: set[str] = set()
+    terminal: list[str] = []
 
     for record_id, payload in payloads.items():
         rows = list(csv.DictReader(io.StringIO(payload)))
@@ -154,7 +214,8 @@ def read_pagination_metadata(
         found = _as_int(header.get("total_results"))
         if found is not None:
             results.add(found)
-        continuations.add(str(header.get("next_page_token", "")).strip())
+        if not str(header.get("next_page_token", "")).strip():
+            terminal.append(record_id)
 
     if not pages:
         return None
@@ -163,13 +224,33 @@ def read_pagination_metadata(
             f"the captured pages disagree about how many there are ({sorted(totals)}); "
             "responses from two different sweeps are not one sweep"
         )
+    if len(results) > 1:
+        raise ThetaDataProvenanceError(
+            f"the captured pages disagree about total_results ({sorted(results)}); "
+            "one sweep states one total, and preferring either would be choosing "
+            "which answer to get"
+        )
+    seen: dict[int, str] = {}
+    for record_id, page in sorted(pages.items()):
+        if page in seen:
+            raise ThetaDataProvenanceError(
+                f"records {seen[page]!r} and {record_id!r} both claim to be page "
+                f"{page} of {sorted(totals)[0]}; two responses to the same page "
+                "are one page captured twice, not two pages captured"
+            )
+        seen[page] = record_id
+    if len(terminal) != 1:
+        raise ThetaDataProvenanceError(
+            f"{len(terminal)} of the captured pages carry no continuation token "
+            f"({sorted(terminal)}); exactly one page ends a sweep, and none or "
+            "several means this is not one complete sweep"
+        )
     return PaginationCoverageEvidence(
-        total_pages=totals.pop(),
+        total_pages=next(iter(totals)),
         captured_pages=frozenset(pages.values()),
         source_record_ids=tuple(sorted(pages)),
-        total_results=results.pop() if len(results) == 1 else None,
-        # The last page is the one that says there is nothing after it.
-        continuation_complete=any(token == "" for token in continuations),
+        total_results=next(iter(results)) if results else None,
+        continuation_complete=True,
     )
 
 
@@ -181,102 +262,223 @@ def _as_int(value: object) -> int | None:
 
 
 # =============================================================================
-# Universe documentation -- separate from settlement documentation
+# Universe documentation -- extracted from bytes, not stated beside them
 # =============================================================================
+
+#: Bumped when the *meaning* of an extraction changes.
+UNIVERSE_EXTRACTION_SCHEMA_VERSION = "universe-extraction/2.1.11"
+
+#: The marker an extractable universe table is delimited by. A document that
+#: does not contain one states no contracts as far as this code is concerned,
+#: whatever prose it holds.
+_RULE_BLOCK = re.compile(
+    r"<!--\s*universe-rule:\s*(?P<rule>[^\s>]+)\s*-->\r?\n"
+    r"(?P<body>.*?)"
+    r"<!--\s*end-universe-rule\s*-->",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True, slots=True)
-class UniverseDerivation:
-    """Typed semantics that deterministically produce a contract set.
+class UniverseExtractionArtifact:
+    """Contract identities read out of a verified document, and from where.
 
-    The alternative to listing identities outright. A document saying "SPXW
-    lists strikes at 5-point intervals from 90% to 110% of spot, calls and
-    puts, for every weekly expiration" is a rule; a resolver can apply it and
-    get the same answer twice.
+    The object v2.1.10 lacked. Its rule carried ``identities`` and a document
+    hash side by side, so the hash authenticated bytes nobody had read the
+    identities out of -- a citation formatted as evidence.
 
-    Deliberately minimal and deliberately unimplemented: no ThetaData document
-    stating such a rule has been read, so the only honest thing to ship is the
-    shape it would take and a resolver that refuses without it.
+    Every field here is a fact about the extraction: which document, verified
+    when, effective when, read by which extractor version, at which byte
+    offsets, executed at which instant. ``extraction_executed_at`` is what a
+    universe's ``observed_at`` is derived from, because the declaration's
+    ``declared_at`` is a caller statement and staleness measured against a
+    caller statement is not measured.
     """
 
     rule_identifier: str
-    extraction_version: str
-    #: Explicit strike ladder, where the document lists one.
-    strikes: tuple[str, ...] = ()
-    expirations: tuple[date, ...] = ()
-    rights: tuple[str, ...] = ("call", "put")
-    root: str = ""
+    extractor_version: str
+    document_content_hash: str
+    #: When registration opened the file and computed its hash.
+    document_verified_at: datetime
+    #: The session the document's rule is effective from.
+    document_effective_date: date
+    #: When the extractor ran over those bytes.
+    extraction_executed_at: datetime
+    identities: frozenset[ContractIdentity]
+    #: ``(start, end)`` character offsets in the verified document that the
+    #: identities were read from. A range nobody can point at is an assertion.
+    source_ranges: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("rule_identifier", "extraction_version"):
-            if not str(getattr(self, name)).strip():
-                raise ThetaDataProvenanceError(
-                    f"UniverseDerivation.{name} is empty; a derivation that "
-                    "cannot say which reading of which rule produced it is an "
-                    "assertion with extra steps"
-                )
-
-    def derive(self) -> frozenset[ContractIdentity]:
-        """The identity set this rule produces, or a refusal.
-
-        Refuses rather than returning an empty set: an empty universe and an
-        underspecified one are different states, and only the second is a bug.
-        """
-        from src.domain.completeness import contract_identity
-
-        if not (self.strikes and self.expirations and self.root):
-            raise ThetaDataProvenanceError(
-                f"universe derivation {self.rule_identifier!r} does not specify "
-                "a root, a strike ladder and expirations, so it produces no "
-                "contract set. A rule that cannot be applied documents "
-                "something; not which options exist."
-            )
-        return frozenset(
-            contract_identity(
-                symbol=self.root, expiry=expiry.isoformat(), strike=strike, right=right
-            )
-            for expiry in self.expirations
-            for strike in self.strikes
-            for right in self.rights
+        object.__setattr__(self, "identities", frozenset(self.identities))
+        object.__setattr__(
+            self,
+            "source_ranges",
+            tuple(sorted((int(a), int(b)) for a, b in self.source_ranges)),
         )
+        if not self.identities:
+            raise ThetaDataProvenanceError(
+                f"extraction {self.rule_identifier!r} produced no identities; an "
+                "empty universe and a document that does not state one are "
+                "different things, and only the second happened here"
+            )
+        if not self.source_ranges:
+            raise ThetaDataProvenanceError(
+                f"extraction {self.rule_identifier!r} names no source ranges, so "
+                "nothing says which part of the document the identities came "
+                "from"
+            )
+        for name in ("document_verified_at", "extraction_executed_at"):
+            moment = getattr(self, name)
+            if moment.tzinfo is None or moment.utcoffset() is None:
+                raise ThetaDataProvenanceError(
+                    f"UniverseExtractionArtifact.{name} must be timezone-aware"
+                )
 
     def semantic_payload(self) -> dict[str, Any]:
         return {
+            "schema_version": UNIVERSE_EXTRACTION_SCHEMA_VERSION,
             "rule_identifier": self.rule_identifier,
-            "extraction_version": self.extraction_version,
-            "root": self.root,
-            "strikes": list(self.strikes),
-            "expirations": [d.isoformat() for d in self.expirations],
-            "rights": list(self.rights),
+            "extractor_version": self.extractor_version,
+            "document_content_hash": self.document_content_hash,
+            "document_verified_at": self.document_verified_at.isoformat(),
+            "document_effective_date": self.document_effective_date.isoformat(),
+            "extraction_executed_at": self.extraction_executed_at.isoformat(),
+            "identities": sorted(self.identities),
+            "source_ranges": [list(pair) for pair in self.source_ranges],
         }
+
+    @property
+    def fingerprint(self) -> str:
+        return digest_of(self.semantic_payload())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.semantic_payload(),
+            "fingerprint": self.fingerprint,
+            "identity_count": len(self.identities),
+        }
+
+
+#: An extractor: verified document text plus a rule name in, identities and the
+#: character ranges they were read from out.
+Extractor = Callable[
+    [str, str], tuple[frozenset[ContractIdentity], tuple[tuple[int, int], ...]]
+]
+
+
+def _contract_table_extractor(
+    text: str, rule_identifier: str
+) -> tuple[frozenset[ContractIdentity], tuple[tuple[int, int], ...]]:
+    """Read a machine-readable contract table out of a document.
+
+    The only extractor this repository implements, and it is deliberately
+    literal: it finds the block delimited by ``<!-- universe-rule: NAME -->``,
+    parses the CSV inside it, and reports the character range it read. Nothing
+    is inferred from prose, because a rule inferred from prose is a rule
+    somebody decided.
+    """
+    for match in _RULE_BLOCK.finditer(text):
+        if match.group("rule").strip() != rule_identifier:
+            continue
+        body = match.group("body")
+        start = match.start("body")
+        rows = list(csv.DictReader(io.StringIO(body)))
+        if not rows:
+            raise ThetaDataProvenanceError(
+                f"the universe-rule block {rule_identifier!r} contains no rows, "
+                "so the document states no contracts under that rule"
+            )
+        missing = [
+            c for c in ("symbol", "expiration", "strike", "right") if c not in rows[0]
+        ]
+        if missing:
+            raise ThetaDataProvenanceError(
+                f"the universe-rule block {rule_identifier!r} is missing columns "
+                f"{missing}; its columns are {sorted(rows[0])}"
+            )
+        identities: set[ContractIdentity] = set()
+        for index, row in enumerate(rows):
+            try:
+                identities.add(
+                    contract_identity(
+                        symbol=str(row["symbol"]),
+                        expiry=str(row["expiration"]),
+                        strike=row["strike"],
+                        right=_canonical_right(str(row["right"])),
+                    )
+                )
+            except ValueError as error:
+                raise ThetaDataProvenanceError(
+                    f"row {index} of universe-rule block {rule_identifier!r} does "
+                    f"not parse into a contract identity: {error}"
+                ) from error
+        return frozenset(identities), ((start, start + len(body)),)
+    raise ThetaDataProvenanceError(
+        f"the verified document contains no <!-- universe-rule: "
+        f"{rule_identifier} --> block, so it does not state which contracts "
+        "exist under that rule. A content hash proves which bytes were read; it "
+        "does not make those bytes about contracts."
+    )
+
+
+def _canonical_right(value: str) -> str:
+    from src.domain.contracts import OptionRight
+
+    text = value.strip().lower()
+    if text in ("c", "call"):
+        return OptionRight.CALL.value
+    if text in ("p", "put"):
+        return OptionRight.PUT.value
+    return text
+
+
+#: Extractors by version. Code rather than caller state: registering a *rule*
+#: is a deliberate act by an operator, registering an *extractor* is shipping an
+#: implementation, and only the first is something a test or a caller does.
+UNIVERSE_EXTRACTORS: dict[str, Extractor] = {
+    "contract-table/2.1.11": _contract_table_extractor,
+}
+
+
+def extractor_for(version: str) -> Extractor:
+    extractor = UNIVERSE_EXTRACTORS.get(version)
+    if extractor is None:
+        raise ThetaDataProvenanceError(
+            f"no universe extractor is registered for {version!r}; known "
+            f"versions are {sorted(UNIVERSE_EXTRACTORS)}. An unversioned reading "
+            "of a document is not reproducible, so it is not evidence."
+        )
+    return extractor
 
 
 @dataclass(frozen=True, slots=True)
 class UniverseDocumentationRule:
-    """A document that states which option contracts exist.
+    """A document that states which option contracts exist, and how to read it.
 
     A *different type* from the settlement ``DocumentationRule``, and the
-    separation is the point. v2.1.9's universe resolver looked its evidence id
-    up in the settlement registry, so a content-verified document about
-    open-interest settlement established a universe of whatever identities the
-    caller had put beside it. Both rules are content-verified; they are
-    verified to say different things.
+    separation is v2.1.10's. What is new in v2.1.11 is that the rule no longer
+    carries contracts. It carries a document, an effective period, a scope and
+    an extractor version; the identities come from
+    :meth:`extract`, which opens the verified bytes and runs that extractor.
 
-    Either ``identities`` or ``derivation`` must be present. A document that
-    does neither is a document about something else.
+    ``effective_from`` and ``effective_to`` are optional so that "this rule
+    states no period" is *representable* and can be refused at resolution.
+    Making them mandatory would have callers invent a date to satisfy the
+    constructor, which is the failure mode being closed rather than avoided.
     """
 
     evidence_id: str
     document_reference: str
     document_content_hash: str
     rule_identifier: str
-    effective_from: date
     scope: UniverseRequestScope
-    extraction_version: str
+    extractor_version: str
+    effective_from: date | None = None
     effective_to: date | None = None
-    identities: frozenset[ContractIdentity] | None = None
-    derivation: UniverseDerivation | None = None
     verified_location: str = ""
+    #: When registration read and hashed the document. Set by the registry.
+    document_verified_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for name in ("evidence_id", "document_reference", "rule_identifier"):
@@ -293,54 +495,149 @@ class UniverseDocumentationRule:
                 "of the referenced content is what makes this evidence rather "
                 "than a citation"
             )
-        if self.identities is None and self.derivation is None:
+        if not str(self.extractor_version).strip():
             raise ThetaDataProvenanceError(
-                f"universe rule {self.evidence_id!r} carries neither an identity "
-                "set nor a derivation, so it establishes no contracts. A "
-                "content-verified document that says nothing about which "
-                "options exist must establish nothing -- which is how a "
-                "settlement-convention document came to define a universe in "
-                "v2.1.9."
+                f"universe rule {self.evidence_id!r} names no extractor version. "
+                "Until v2.1.11 a rule could carry an identity list beside a "
+                "document hash; the hash proved which bytes were read and the "
+                "identities came from whoever wrote the rule."
             )
-        if self.identities is not None:
-            object.__setattr__(self, "identities", frozenset(self.identities))
+        if (
+            self.effective_from is not None
+            and self.effective_to is not None
+            and self.effective_to < self.effective_from
+        ):
+            raise ThetaDataProvenanceError(
+                f"universe rule {self.evidence_id!r} expires "
+                f"{self.effective_to.isoformat()}, before it takes effect "
+                f"{self.effective_from.isoformat()}"
+            )
 
-    def covers(self, moment: date) -> bool:
-        if moment < self.effective_from:
-            return False
-        return self.effective_to is None or moment <= self.effective_to
+    # -- effective period ----------------------------------------------------
+
+    def period_refusals(self, session: date) -> tuple[str, ...]:
+        """Why this rule may not be applied to a given market session.
+
+        v2.1.10 had ``covers()`` and never called it, so a rule effective from
+        2030 established a universe for a March 2026 capture.
+        """
+        if self.effective_from is None:
+            return (
+                f"universe rule {self.evidence_id!r} states no effective date, "
+                "so nothing says which sessions it describes. A contract "
+                "universe is a fact about a period, not a standing one.",
+            )
+        if session < self.effective_from:
+            return (
+                f"universe rule {self.evidence_id!r} takes effect "
+                f"{self.effective_from.isoformat()} and this capture is for "
+                f"session {session.isoformat()}; a document about a later "
+                "market does not describe this one",
+            )
+        if self.effective_to is not None and session > self.effective_to:
+            return (
+                f"universe rule {self.evidence_id!r} expired "
+                f"{self.effective_to.isoformat()} and this capture is for "
+                f"session {session.isoformat()}",
+            )
+        return ()
+
+    def covers(self, session: date) -> bool:
+        return not self.period_refusals(session)
 
     @property
     def established(self) -> bool:
         """Whether this rule has been read out of its document."""
-        return bool(self.verified_location)
+        return bool(self.verified_location) and self.document_verified_at is not None
 
-    def derive_identities(self) -> frozenset[ContractIdentity]:
-        """The contracts this document states, listed or derived."""
-        if self.identities is not None:
-            return frozenset(self.identities)
-        assert self.derivation is not None  # __post_init__ guarantees one of them
-        return self.derivation.derive()
+    # -- extraction ----------------------------------------------------------
+
+    def extract(self, *, executed_at: datetime) -> UniverseExtractionArtifact:
+        """Open the verified document and read the contracts out of it."""
+        import pathlib
+
+        from src.adapters.evidence_resolvers import content_hash_of
+
+        if not self.established:
+            raise ThetaDataProvenanceError(
+                f"universe rule {self.evidence_id!r} has not been content "
+                "verified; a hash nobody computed is not a hash"
+            )
+        assert self.document_verified_at is not None  # implied by established
+        location = pathlib.Path(self.verified_location)
+        actual = content_hash_of(location)
+        if actual != self.document_content_hash:
+            raise ThetaDataProvenanceError(
+                f"the document behind universe rule {self.evidence_id!r} now "
+                f"hashes to {actual[:12]}... and the rule records "
+                f"{self.document_content_hash[:12]}...; the bytes changed after "
+                "registration, so the extraction would be from a different "
+                "document"
+            )
+        identities, ranges = extractor_for(self.extractor_version)(
+            location.read_text(encoding="utf-8"), self.rule_identifier
+        )
+        assert self.effective_from is not None  # callers check period first
+        return UniverseExtractionArtifact(
+            rule_identifier=self.rule_identifier,
+            extractor_version=self.extractor_version,
+            document_content_hash=self.document_content_hash,
+            document_verified_at=self.document_verified_at,
+            document_effective_date=self.effective_from,
+            extraction_executed_at=executed_at,
+            identities=identities,
+            source_ranges=ranges,
+        )
+
+    def confirm(self, artifact: UniverseExtractionArtifact) -> tuple[str, ...]:
+        """Why a stored extraction is not what this rule produces today.
+
+        The recovery path. Re-running :meth:`extract` would stamp a fresh
+        ``extraction_executed_at`` and therefore a different universe hash, so
+        recovery re-reads the bytes and compares *what was extracted* while
+        keeping the instant the extraction actually happened.
+        """
+        try:
+            fresh = self.extract(executed_at=artifact.extraction_executed_at)
+        except ThetaDataProvenanceError as error:
+            return (str(error),)
+        if fresh.identities != artifact.identities:
+            missing = sorted(artifact.identities - fresh.identities)
+            extra = sorted(fresh.identities - artifact.identities)
+            return (
+                f"re-reading the document produces a different contract set: "
+                f"{len(missing)} stored but not extracted ({missing[:3]}), "
+                f"{len(extra)} extracted but not stored ({extra[:3]})",
+            )
+        if fresh.source_ranges != artifact.source_ranges:
+            return (
+                f"the identities were extracted from {list(fresh.source_ranges)} "
+                f"and the stored artifact records {list(artifact.source_ranges)}",
+            )
+        if fresh.fingerprint != artifact.fingerprint:
+            return (
+                "the stored extraction artifact does not match a fresh reading "
+                "of the same document under the same extractor",
+            )
+        return ()
+
+    # -- identity ------------------------------------------------------------
 
     def semantic_payload(self) -> dict[str, Any]:
         return {
-            "schema_version": "universe-documentation/2.1.10",
+            "schema_version": "universe-documentation/2.1.11",
             "evidence_id": self.evidence_id,
             "document_reference": self.document_reference,
             "document_content_hash": self.document_content_hash,
             "rule_identifier": self.rule_identifier,
-            "effective_from": self.effective_from.isoformat(),
+            "effective_from": (
+                self.effective_from.isoformat() if self.effective_from else None
+            ),
             "effective_to": (
                 self.effective_to.isoformat() if self.effective_to else None
             ),
-            "extraction_version": self.extraction_version,
+            "extractor_version": self.extractor_version,
             "scope": self.scope.semantic_payload(),
-            "identities": (
-                sorted(self.identities) if self.identities is not None else None
-            ),
-            "derivation": (
-                self.derivation.semantic_payload() if self.derivation else None
-            ),
         }
 
     @property
@@ -352,6 +649,11 @@ class UniverseDocumentationRule:
             **self.semantic_payload(),
             "evidence_fingerprint": self.evidence_fingerprint,
             "verified_location": self.verified_location,
+            "document_verified_at": (
+                self.document_verified_at.isoformat()
+                if self.document_verified_at
+                else None
+            ),
             "established": self.established,
         }
 
@@ -366,19 +668,31 @@ class UniverseDocumentationRegistry:
     def __init__(self) -> None:
         self._rules: dict[str, UniverseDocumentationRule] = {}
 
-    def register(self, rule: UniverseDocumentationRule) -> UniverseDocumentationRule:
-        """Verify the document, then record the rule."""
+    def register(
+        self,
+        rule: UniverseDocumentationRule,
+        *,
+        verified_at: datetime | None = None,
+    ) -> UniverseDocumentationRule:
+        """Verify the document, then record the rule and when it was read."""
         from dataclasses import replace
+        from datetime import UTC
 
         from src.adapters.evidence_resolvers import verify_document
 
+        # Named extractor first: a rule whose extractor does not exist could be
+        # registered, look established, and fail only when something depended on
+        # it.
+        extractor_for(rule.extractor_version)
         location, _ = verify_document(
             rule.document_reference, rule.document_content_hash
         )
-        verified = (
-            rule
-            if rule.verified_location == location
-            else replace(rule, verified_location=location)
+        verified = replace(
+            rule,
+            verified_location=location,
+            document_verified_at=(
+                verified_at if verified_at is not None else datetime.now(UTC)
+            ),
         )
         existing = self._rules.get(rule.evidence_id)
         if existing is not None and existing.semantic_payload() != (

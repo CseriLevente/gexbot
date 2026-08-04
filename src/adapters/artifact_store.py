@@ -47,7 +47,15 @@ class ArtifactKind(str):
 
     SETTLEMENT_RULE = "settlement_rule"
     EXPECTED_UNIVERSE = "expected_universe"
+    #: The reading of a universe document: which bytes, which extractor, which
+    #: byte ranges, which identities. Declared since v2.1.9 and unused until
+    #: v2.1.11, when documentation identities stopped being a field on a rule.
     DOCUMENTATION_EVIDENCE = "documentation_evidence"
+    #: That a source manifest was checked against its store, under a named plan
+    #: and pipeline, and which records that confirmed.
+    CAPTURE_VERIFICATION = "capture_verification"
+    #: What a universe resolution established, and from what.
+    UNIVERSE_RESOLUTION = "universe_resolution"
     SCHEDULE_DERIVATION = "schedule_derivation"
 
 
@@ -58,6 +66,8 @@ ARTIFACT_KINDS = frozenset(
         ArtifactKind.SETTLEMENT_RULE,
         ArtifactKind.EXPECTED_UNIVERSE,
         ArtifactKind.DOCUMENTATION_EVIDENCE,
+        ArtifactKind.CAPTURE_VERIFICATION,
+        ArtifactKind.UNIVERSE_RESOLUTION,
         ArtifactKind.SCHEDULE_DERIVATION,
     }
 )

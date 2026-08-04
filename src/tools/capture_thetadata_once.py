@@ -41,6 +41,7 @@ import secrets
 import sys
 import tempfile
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -57,6 +58,7 @@ __all__ = [
     "new_run_id",
     "plan_capture",
     "run_capture",
+    "run_path",
 ]
 
 #: Bumped when the *shape of the operator report* changes.
@@ -567,6 +569,16 @@ def run_capture(
         _close(pipeline)
 
 
+def run_path(report: Mapping[str, Any], key: str) -> pathlib.Path:
+    """Resolve one of a run summary's paths against the directory it describes.
+
+    Everything a run writes is named relative to ``output_root``, so the whole
+    directory can be moved to an archive host and still describe itself. This
+    is the one place that joins the two halves back together.
+    """
+    return pathlib.Path(str(report["output_root"])) / str(report[key])
+
+
 def _emergency_summary(run: _Run, error: BaseException) -> dict[str, Any]:
     """The strongest report that can still be written when finalization fails.
 
@@ -600,10 +612,14 @@ def _emergency_summary(run: _Run, error: BaseException) -> dict[str, Any]:
         else [],
         "attempt_count": len(run.attempts.records),
         "attempt_index_path": (
-            str(run.attempts.index_path) if run.attempts.root is not None else ""
+            # Relative to the run directory, so it still resolves after the
+            # directory is archived somewhere else.
+            run.attempts.index_path.relative_to(run.destination).as_posix()
+            if run.attempts.root is not None
+            else ""
         ),
         "output_root": str(run.destination),
-        "summary_path": str(run.destination / "capture-summary-emergency.json"),
+        "summary_path": "capture-summary-emergency.json",
         "trusted_gex_computed": False,
         "orders_placed": 0,
     }
@@ -773,12 +789,17 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         "error_code": run.error_code,
         "error_message": run.error_message,
         "failed_endpoint": run.failed_endpoint,
-        "raw_store_path": str(run.destination / "raw"),
-        "artifact_store_path": str(run.destination / "artifacts"),
-        "attempt_store_path": str(run.destination / "attempts"),
-        "intent_path": str(run.destination / "run-intent.json"),
-        "manifest_path": str(run.destination / "manifest.json"),
-        "summary_path": str(run.destination / "capture-summary.json"),
+        # ``output_root`` is where this run wrote, absolutely, as a record of
+        # where it happened. Everything inside it is named relative to it, so
+        # the whole directory can be archived elsewhere and every path in this
+        # summary still resolves against wherever it now lives.
+        "output_root": str(run.destination),
+        "raw_store_path": "raw",
+        "artifact_store_path": "artifacts",
+        "attempt_store_path": "attempts",
+        "intent_path": "run-intent.json",
+        "manifest_path": "manifest.json",
+        "summary_path": "capture-summary.json",
         "integrity_ok": integrity.ok,
         "integrity_counts": integrity.counts(),
         "capture_verified": verification.verified,
@@ -815,12 +836,15 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
                 run.capture_origin.value if run.capture_origin is not None else ""
             ),
             "started_at": run.started_at.isoformat(),
+            # Relative to ``output_root``, like the summary. Resolve with
+            # :func:`run_path`.
+            "output_root": str(run.destination),
             "output_paths": {
-                "raw": str(run.destination / "raw"),
-                "artifacts": str(run.destination / "artifacts"),
-                "attempts": str(run.destination / "attempts"),
-                "manifest": str(run.destination / "manifest.json"),
-                "summary": str(run.destination / "capture-summary.json"),
+                "raw": "raw",
+                "artifacts": "artifacts",
+                "attempts": "attempts",
+                "manifest": "manifest.json",
+                "summary": "capture-summary.json",
             },
             "effective_transport": run.extra.get("effective_transport", {}),
         },
@@ -958,7 +982,7 @@ def main(argv: list[str] | None = None) -> int:
     state = RawCaptureRunState(report["run_state"])
     if state is RawCaptureRunState.COMPLETED_VERIFIED:
         return int(ExitCode.OK)
-    summary = pathlib.Path(report["summary_path"])
+    summary = run_path(report, "summary_path")
     if state.is_failure:
         return _fail(
             f"{report['error_code']}: {report['error_message']}",

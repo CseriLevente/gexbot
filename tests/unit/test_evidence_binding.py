@@ -31,7 +31,12 @@ from src.adapters.certification import (
     verify_capture,
 )
 from src.adapters.errors import ThetaDataCertificationError
-from src.adapters.raw_store import PARSER_VERSION, InMemoryRawStore
+from src.adapters.raw_store import (
+    BODY_REPRESENTATION,
+    PARSER_VERSION,
+    RAW_RESPONSE_SCHEMA_VERSION,
+    InMemoryRawStore,
+)
 from src.config.pipeline import PipelineConsistencyError
 from tests.certification_fixtures import (
     AS_OF,
@@ -318,7 +323,7 @@ def test_the_manifest_carries_per_record_descriptors():
 
 def test_the_manifest_states_its_schema_version():
     _, manifest = build_capture()
-    assert manifest.schema_version == "raw-capture-manifest/2.1.10"
+    assert manifest.schema_version == "raw-capture-manifest/2.1.14"
     assert manifest.parser_version == PARSER_VERSION
 
 
@@ -516,6 +521,11 @@ def base_metadata(**overrides):
         "http_status": 200,
         "request_id": "req-1",
         "request_sequence": 1,
+        # What the stored bytes are. Required since v2.1.14: a record without it
+        # predates the byte-preserving store, so its digest may cover a UTF-8
+        # re-encoding of decoded text rather than the response.
+        "raw_response_schema_version": RAW_RESPONSE_SCHEMA_VERSION,
+        "body_representation": BODY_REPRESENTATION,
     }
     payload.update(overrides)
     return payload
@@ -540,6 +550,9 @@ def test_well_formed_metadata_validates():
         ("vendor_schema_version", 3),
         ("request_started_at", "2026-03-17T15:00:00"),
         ("response_received_at", "2026-03-17T14:00:00+00:00"),
+        # v2.1.14: what the bytes are, and under which rules.
+        ("raw_response_schema_version", "raw-response/2.1.12"),
+        ("body_representation", "decoded-text-reencoded-as-utf8"),
     ],
 )
 def test_malformed_metadata_is_rejected(field, value):

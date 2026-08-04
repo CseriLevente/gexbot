@@ -35,6 +35,7 @@ from src.tools.capture_thetadata_once import (
     new_run_id,
     plan_capture,
     run_capture,
+    run_path,
 )
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
@@ -132,6 +133,35 @@ def test_the_configured_read_timeout_reaches_the_real_transport(monkeypatch):
     assert recording.client_kwargs["timeout"].kwargs["write"] == 41.0
 
 
+def test_the_dry_run_settings_are_what_the_request_actually_applies(monkeypatch):
+    """The named regression: a scalar ``timeout=`` replaces every dimension.
+
+    ``HttpxTransport.get`` passed ``timeout=read_seconds`` per request. httpx
+    reads a scalar as *all four* budgets, so the connect timeout the dry run
+    printed -- and that the client was constructed with -- was discarded on
+    every actual request. The reported settings must be the applied ones.
+    """
+    from src.config.thetadata import effective_transport_settings
+
+    client, _ = built_transport(
+        monkeypatch, connect_timeout_seconds=7.5, timeout_seconds=41.0
+    )
+    reported = effective_transport_settings(
+        loaded_config(connect_timeout_seconds=7.5, timeout_seconds=41.0).thetadata
+    )
+
+    applied = client.transport.inner.effective_timeout
+    assert applied.kwargs["connect"] == reported["connect_timeout_seconds"] == 7.5
+    assert applied.kwargs["pool"] == 7.5
+    assert applied.kwargs["read"] == reported["read_timeout_seconds"] == 41.0
+    assert applied.kwargs["write"] == 41.0
+
+    # And a per-request budget still names every dimension rather than one.
+    per_request = client.transport.inner._timeout_for(9.0)
+    assert per_request.kwargs["connect"] == 7.5, "connect must survive a read budget"
+    assert per_request.kwargs["read"] == 9.0
+
+
 def test_the_configured_response_cap_reaches_the_real_transport(monkeypatch):
     client, _ = built_transport(monkeypatch, max_response_bytes=4096)
     inner = client.transport.inner
@@ -145,6 +175,39 @@ def test_configured_basic_auth_reaches_httpx(monkeypatch):
     auth = recording.client_kwargs["auth"]
     assert isinstance(auth, _RecordingHttpx.BasicAuth)
     assert auth.username == "an-operator"
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("http://127.0.0.1:25510/v3/list/roots", "LOCAL_TERMINAL_CAPTURE"),
+        ("http://localhost:25510/v3/list/roots", "LOCAL_TERMINAL_CAPTURE"),
+        ("http://LocalHost:25510/v3/list/roots", "LOCAL_TERMINAL_CAPTURE"),
+        ("http://[::1]:25510/v3/list/roots", "LOCAL_TERMINAL_CAPTURE"),
+        ("http://127.99.1.4:25510/v3/list/roots", "LOCAL_TERMINAL_CAPTURE"),
+        ("https://api.thetadata.net/v3/list/roots", "LIVE_HTTP_CAPTURE"),
+        # Substring matching said local to all four of these.
+        ("https://notlocalhost.com/v3/list/roots", "LIVE_HTTP_CAPTURE"),
+        ("https://localhost.evil.example/v3/list/roots", "LIVE_HTTP_CAPTURE"),
+        ("https://api.thetadata.net/v3/list/roots?next=localhost", "LIVE_HTTP_CAPTURE"),
+        ("https://api.thetadata.net/127.0.0.1/roots", "LIVE_HTTP_CAPTURE"),
+        # And a host that merely starts with the loopback digits is not in it.
+        ("https://127.0.0.1.example.com/v3/list/roots", "LIVE_HTTP_CAPTURE"),
+    ],
+)
+def test_the_origin_comes_from_the_parsed_host(url, origin):
+    """The named regression: provenance decided by substring search.
+
+    v2.1.13 asked whether ``"localhost"`` or ``"127.0.0.1"`` appeared *anywhere*
+    in the URL -- path and query included. A vendor redirect carrying
+    ``?next=localhost`` would have stamped a paid live capture as a local
+    terminal fixture, and ``notlocalhost.com`` likewise. Whether a capture is
+    evidence about the vendor is not something the vendor's own text should be
+    able to answer.
+    """
+    from src.adapters.transport import local_or_live_origin
+
+    assert local_or_live_origin(url) == origin
 
 
 def test_the_cli_does_not_instantiate_an_unconfigured_transport():
@@ -338,7 +401,7 @@ def test_an_existing_nonempty_destination_is_refused(tmp_path):
 
 def test_a_second_run_cannot_reuse_the_first_directory(tmp_path):
     first = live_run(tmp_path)
-    assert pathlib.Path(first["intent_path"]).exists()
+    assert run_path(first, "intent_path").exists()
     with pytest.raises(CaptureRunError, match=r"(?i)earlier run"):
         live_run(tmp_path)
 
@@ -398,7 +461,7 @@ def test_a_live_run_captures_verifies_and_reports(tmp_path):
 
 def test_a_run_intent_is_written_before_the_first_request(tmp_path):
     report = live_run(tmp_path)
-    intent = json.loads(pathlib.Path(report["intent_path"]).read_text(encoding="utf-8"))
+    intent = json.loads(run_path(report, "intent_path").read_text(encoding="utf-8"))
     assert intent["schema_version"] == RUN_INTENT_SCHEMA_VERSION
     assert intent["run_state"] == RawCaptureRunState.PLANNED.value
     assert intent["run_id"] == report["run_id"]
@@ -407,22 +470,19 @@ def test_a_run_intent_is_written_before_the_first_request(tmp_path):
     assert intent["capture_plan_fingerprint"] == report["capture_plan_fingerprint"]
     assert intent["requested_endpoints"]
     assert intent["started_at"]
+    assert intent["output_root"] == report["output_root"]
     assert intent["output_paths"]["raw"] == report["raw_store_path"]
 
 
 def test_a_live_run_writes_the_manifest_and_the_summary(tmp_path):
     report = live_run(tmp_path)
 
-    manifest = json.loads(
-        pathlib.Path(report["manifest_path"]).read_text(encoding="utf-8")
-    )
-    summary = json.loads(
-        pathlib.Path(report["summary_path"]).read_text(encoding="utf-8")
-    )
+    manifest = json.loads(run_path(report, "manifest_path").read_text(encoding="utf-8"))
+    summary = json.loads(run_path(report, "summary_path").read_text(encoding="utf-8"))
     assert manifest["manifest_hash"] == report["manifest_hash"]
     assert manifest["partial"] is False
     assert summary["record_ids"] == report["record_ids"]
-    assert list(pathlib.Path(report["raw_store_path"]).rglob("*"))
+    assert list(run_path(report, "raw_store_path").rglob("*"))
 
 
 def test_top_level_reports_are_written_atomically():
@@ -511,8 +571,8 @@ def test_a_partial_failure_still_writes_a_manifest_and_a_summary(tmp_path):
     assert "/v3/option/snapshot/quote" in report["missing_endpoints"]
     assert "/v3/index/snapshot/price" in report["completed_endpoints"]
 
-    manifest_path = pathlib.Path(report["manifest_path"])
-    summary_path = pathlib.Path(report["summary_path"])
+    manifest_path = run_path(report, "manifest_path")
+    summary_path = run_path(report, "summary_path")
     assert manifest_path.exists()
     assert summary_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -542,7 +602,10 @@ def test_a_partial_failure_preserves_the_failed_attempt_bodies(tmp_path):
     assert all(a["retryable"] for a in failed)
     # The header subset survives, and the body is on disk and readable.
     assert failed[0]["response_headers"]["retry-after"] == "1"
-    body = pathlib.Path(failed[0]["response_body_location"]).read_text(encoding="utf-8")
+    location = failed[0]["response_body_location"]
+    assert not pathlib.Path(location).is_absolute()
+    root = pathlib.Path(report["output_root"]) / attempts["attempt_store_root"]
+    body = (root / location).read_text(encoding="utf-8")
     assert "upstream pricing service unavailable" in body
     # Attempt numbers, so an operator can see the retry budget being spent.
     assert sorted(a["attempt_number"] for a in failed) == list(
@@ -554,14 +617,12 @@ def test_failed_attempts_are_not_chain_data(tmp_path):
     """A preserved 500 body is evidence about a failure and nothing else."""
     report, _ = failing_run(tmp_path)
 
-    attempts_root = pathlib.Path(report["attempt_store_path"])
-    raw_root = pathlib.Path(report["raw_store_path"])
+    attempts_root = run_path(report, "attempt_store_path")
+    raw_root = run_path(report, "raw_store_path")
     assert attempts_root.exists()
     assert attempts_root not in raw_root.parents
     # No manifest record points at an attempt body.
-    manifest = json.loads(
-        pathlib.Path(report["manifest_path"]).read_text(encoding="utf-8")
-    )
+    manifest = json.loads(run_path(report, "manifest_path").read_text(encoding="utf-8"))
     for record in manifest["records"]:
         assert record["http_status"] == 200
 
@@ -643,9 +704,7 @@ def test_the_capture_is_permanently_raw_only(tmp_path):
     and the rule is chosen when a session opens (OD-26).
     """
     report = live_run(tmp_path)
-    manifest = json.loads(
-        pathlib.Path(report["manifest_path"]).read_text(encoding="utf-8")
-    )
+    manifest = json.loads(run_path(report, "manifest_path").read_text(encoding="utf-8"))
     for record in manifest["records"]:
         assert record["open_interest_date_rule_fingerprint"] == ""
         assert record["expected_universe_fingerprint"] == ""

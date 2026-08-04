@@ -66,7 +66,25 @@ PARSER_VERSION = "thetadata-v3-parser/2.1.10"
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.10"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.14"
+
+#: What a stored raw payload *is*. Bumped when that changes, which it did in
+#: v2.1.13 -- the store holds the response's entity bytes rather than a UTF-8
+#: re-encoding of a lossily decoded string -- and again in v2.1.14, when the
+#: statement stopped being an unused constant and started being written onto
+#: every record, checked by the scanner, and covered by the manifest hash.
+RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.14"
+
+#: Which bytes those are: the HTTP entity body **after transfer- and
+#: content-decoding**, so a gzip response is stored decompressed. That is the
+#: layer a parser reads and the layer a re-derivation has to reproduce.
+BODY_REPRESENTATION = "http-entity-body-after-content-decoding"
+
+#: Raw-response schemas this code can interpret. A record written under another
+#: one is refused rather than reinterpreted: v2.1.12 and earlier stored a UTF-8
+#: re-encoding of decoded text, and reading those bytes as "the response" under
+#: v2.1.14 rules would be exactly the silent reinterpretation this refuses.
+SUPPORTED_RAW_RESPONSE_SCHEMAS = frozenset({RAW_RESPONSE_SCHEMA_VERSION})
 
 
 #: Aliased onto the adapter hierarchy so that a caller catching
@@ -287,6 +305,32 @@ class RawResponseRecord:
     #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
     #: rather than comparing stored digests to each other and calling it checked.
     spot_synchronization_policy_fingerprint: str = ""
+    #: What the stored bytes *are*, and under which rules. Written since v2.1.14;
+    #: before that the constant existed and nothing recorded it, so a record gave
+    #: no way to tell whether its digest covered entity bytes or a re-encoding of
+    #: decoded text.
+    raw_response_schema_version: str = RAW_RESPONSE_SCHEMA_VERSION
+    body_representation: str = BODY_REPRESENTATION
+    #: How the *parser* read those bytes. Descriptive only: the bytes and their
+    #: digest stay authoritative, and this says what one reading of them was.
+    content_type: str = ""
+    declared_charset: str = ""
+    selected_charset: str = ""
+    decode_status: str = ""
+    decoded_text_hash: str = ""
+
+    @property
+    def raw_response_semantics(self) -> dict[str, Any]:
+        """The v2.1.14 block, as one thing, so it travels as one thing."""
+        return {
+            "raw_response_schema_version": self.raw_response_schema_version,
+            "body_representation": self.body_representation,
+            "content_type": self.content_type,
+            "declared_charset": self.declared_charset,
+            "selected_charset": self.selected_charset,
+            "decode_status": self.decode_status,
+            "decoded_text_hash": self.decoded_text_hash,
+        }
 
     @property
     def capture_identity(self) -> CaptureIdentity:
@@ -334,6 +378,7 @@ class RawResponseRecord:
             "request_sequence": self.request_sequence,
             "capture_complete": self.capture_complete,
             "capture_origin": self.capture_origin.value,
+            **self.raw_response_semantics,
             **self.capture_identity.as_dict(),
         }
 
@@ -348,10 +393,38 @@ def _moment_or_none(value: Any) -> datetime | None:
         return None
 
 
-#: What a stored raw payload *is*. Bumped when that changes, which it did in
-#: v2.1.13: the store now holds the response's entity bytes rather than a UTF-8
-#: re-encoding of a lossily decoded string.
-RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.13"
+def is_portable_location(location: str) -> bool:
+    """Whether a recorded location survives the directory being moved.
+
+    A scheme (``memory://``, ``null://``) names a store rather than a path and
+    travels fine. Anything else must be relative: an absolute path is a fact
+    about one machine's filesystem, and evidence that only verifies on the
+    machine that produced it is not evidence anyone else can check.
+    """
+    if "://" in location:
+        return True
+    return not (
+        location.startswith(("/", "\\"))
+        or pathlib.PurePosixPath(location).is_absolute()
+        or pathlib.PureWindowsPath(location).is_absolute()
+    )
+
+
+def _decode_fields(decode: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The parser's reading, as record fields.
+
+    Descriptive only. The bytes and ``payload_hash`` stay authoritative; this
+    says how one reader interpreted them, so a later disagreement about a
+    charset is a comparison rather than an argument.
+    """
+    held = dict(decode or {})
+    return {
+        "content_type": str(held.get("content_type", "")),
+        "declared_charset": str(held.get("declared_charset", "")),
+        "selected_charset": str(held.get("selected_charset", "")),
+        "decode_status": str(held.get("decode_status", "")),
+        "decoded_text_hash": str(held.get("decoded_text_hash", "")),
+    }
 
 
 def payload_hash(payload: str | bytes) -> str:
@@ -535,11 +608,42 @@ def validate_metadata(payload: Any) -> tuple[IntegrityStatus | None, str]:
             "a different parser is not one this scanner can interpret"
         )
 
+    # What the stored bytes are. Absent means a record written before v2.1.14,
+    # when the payload was a UTF-8 re-encoding of decoded text -- refused rather
+    # than reinterpreted, because the digest on such a record does not cover the
+    # response and this scanner would say it did.
+    raw_schema = payload.get("raw_response_schema_version")
+    if raw_schema is None:
+        return IntegrityStatus.INVALID_METADATA, (
+            "the record states no raw_response_schema_version, so it predates "
+            f"{RAW_RESPONSE_SCHEMA_VERSION} and its payload_hash may cover a "
+            "re-encoding of decoded text rather than the response bytes. Migrate "
+            "it deliberately or read it with the version that wrote it."
+        )
+    if raw_schema not in SUPPORTED_RAW_RESPONSE_SCHEMAS:
+        return IntegrityStatus.INVALID_METADATA, (
+            f"raw_response_schema_version {raw_schema!r} is not supported by "
+            f"this code ({sorted(SUPPORTED_RAW_RESPONSE_SCHEMAS)})"
+        )
+    representation = payload.get("body_representation")
+    if representation != BODY_REPRESENTATION:
+        return IntegrityStatus.INVALID_METADATA, (
+            f"body_representation {representation!r} is not "
+            f"{BODY_REPRESENTATION!r}; the digest would be over a different "
+            "thing from the one this code compares"
+        )
+
     location = payload["payload_location"]
     if not isinstance(location, str) or not location.strip():
         return IntegrityStatus.INVALID_METADATA, (
             "payload_location must name where the bytes are; an entry that does "
             "not is an index of nothing"
+        )
+    if not is_portable_location(location):
+        return IntegrityStatus.INVALID_METADATA, (
+            f"payload_location {location!r} is absolute, so it describes the "
+            "machine that captured rather than the capture; a relocated run "
+            "directory would point at a path that is not there"
         )
 
     params = payload.get("query_params", {})
@@ -734,6 +838,7 @@ class RawResponseStore(Protocol):
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
+        decode: Mapping[str, Any] | None = None,
     ) -> RawResponseRecord: ...
 
     def get_payload(self, record_id: str) -> str: ...
@@ -774,6 +879,7 @@ class InMemoryRawStore:
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
+        decode: Mapping[str, Any] | None = None,
     ) -> RawResponseRecord:
         if record_id in self._records:
             raise RawStoreError(
@@ -828,6 +934,7 @@ class InMemoryRawStore:
             spot_synchronization_policy_fingerprint=(
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
+            **_decode_fields(decode),
         )
         self._records[record_id] = record
         self._payloads[record_id] = _as_body(payload)
@@ -884,7 +991,13 @@ class FileRawStore:
         # append-only store permanently added to it.
         self._probe_root = self._root.parent / f"{self._root.name}.health"
 
-    def _payload_path(self, record_id: str) -> pathlib.Path:
+    def payload_path(self, record_id: str) -> pathlib.Path:
+        """Where this record's bytes are, for this store, right now.
+
+        Derived from the record id and the store's *current* root, never from
+        the recorded location -- so relocating the directory relocates the
+        evidence with it.
+        """
         # Path-traversal guard: reject rather than sanitise, so a caller cannot
         # believe it wrote one file while another was written.
         safe = "".join(ch for ch in record_id if ch.isalnum() or ch in "-_.")
@@ -910,8 +1023,9 @@ class FileRawStore:
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
+        decode: Mapping[str, Any] | None = None,
     ) -> RawResponseRecord:
-        path = self._payload_path(record_id)
+        path = self.payload_path(record_id)
         if path.exists():
             raise RawStoreError(
                 f"raw response {record_id!r} already exists at {path}; the store "
@@ -925,7 +1039,11 @@ class FileRawStore:
             response_received_at=response_received_at,
             http_status=http_status,
             payload_hash=payload_hash(payload),
-            payload_location=str(path),
+            # Relative to the store root. An absolute path is a fact about the
+            # machine that captured, not about the evidence: copy the run
+            # directory to an archive host and every absolute location becomes a
+            # claim about a directory that is not there.
+            payload_location=path.relative_to(self._root.resolve()).as_posix(),
             vendor_schema_version=vendor_schema_version,
             byte_length=len(_as_body(payload)),
             request_id=request_id,
@@ -965,6 +1083,7 @@ class FileRawStore:
             spot_synchronization_policy_fingerprint=(
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
+            **_decode_fields(decode),
         )
         # Atomic write: temp file -> flush -> fsync -> rename. A crash midway
         # leaves either nothing or a complete file, never a truncated payload
@@ -1053,7 +1172,11 @@ class FileRawStore:
         target = self._probe_root / f"probe-{uuid.uuid4().hex[:16]}.tmp"
         self._atomic_write(target, payload)
         try:
-            return target.read_text(encoding="utf-8")
+            # Read back as bytes and decode here, so a probe answers "did these
+            # bytes survive?" rather than "did text mode give them back to me?".
+            # Text mode would translate CRLF and hide exactly the round-trip
+            # failure this exists to catch.
+            return target.read_bytes().decode("utf-8")
         finally:
             target.unlink(missing_ok=True)
 
@@ -1106,7 +1229,7 @@ class FileRawStore:
                 # no delete -- so they are skipped here instead, or a probe
                 # would make every later scan look like it had grown.
                 if is_probe_record(record_id):
-                    indexed_paths.add(self._payload_path(record_id))
+                    indexed_paths.add(self.payload_path(record_id))
                     continue
 
                 if record_id in seen_ids:
@@ -1120,7 +1243,7 @@ class FileRawStore:
                     continue
                 seen_ids.add(record_id)
 
-                path = self._payload_path(record_id)
+                path = self.payload_path(record_id)
                 indexed_paths.add(path)
                 if not path.exists():
                     findings.append(
@@ -1132,8 +1255,15 @@ class FileRawStore:
                     )
                     continue
 
-                payload = path.read_text(encoding="utf-8")
-                actual_hash = payload_hash(payload)
+                # **Bytes, never text.** ``read_text`` opens in text mode, which
+                # translates CRLF to LF -- so a vendor sending ``\r\n`` line
+                # endings had every record report HASH_MISMATCH, and a body that
+                # is not valid UTF-8 raised ``UnicodeDecodeError`` and took the
+                # whole scan down. Decoding is the parser's job; this layer
+                # answers "are these the bytes we wrote?" and nothing else.
+                payload = path.read_bytes()
+                actual_hash = hashlib.sha256(payload).hexdigest()
+                actual_length = len(payload)
                 expected_length = data.get("byte_length")
                 if actual_hash != expected_hash:
                     findings.append(
@@ -1143,16 +1273,16 @@ class FileRawStore:
                             detail=f"expected {expected_hash}, found {actual_hash}",
                         )
                     )
-                elif expected_length is not None and len(
-                    payload.encode("utf-8")
-                ) != int(expected_length):
+                elif expected_length is not None and actual_length != int(
+                    expected_length
+                ):
                     findings.append(
                         IntegrityFinding(
                             status=IntegrityStatus.SIZE_MISMATCH,
                             artifact=record_id,
                             detail=(
                                 f"expected {expected_length} bytes, found "
-                                f"{len(payload.encode('utf-8'))}"
+                                f"{actual_length}"
                             ),
                         )
                     )
@@ -1200,7 +1330,7 @@ class FileRawStore:
 
     def get_body(self, record_id: str) -> bytes:
         """Exactly the bytes that were written, byte for byte."""
-        path = self._payload_path(record_id)
+        path = self.payload_path(record_id)
         if not path.exists():
             raise KeyError(record_id)
         return path.read_bytes()
@@ -1289,6 +1419,7 @@ class NullRawStore:
         request_sequence: int = 0,
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
+        decode: Mapping[str, Any] | None = None,
     ) -> RawResponseRecord:
         return RawResponseRecord(
             record_id=record_id,
@@ -1338,6 +1469,7 @@ class NullRawStore:
             spot_synchronization_policy_fingerprint=(
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
+            **_decode_fields(decode),
         )
 
     def get_payload(self, record_id: str) -> str:
@@ -1642,6 +1774,7 @@ class CaptureSession:
         http_status: int,
         request_id: str = "",
         capture_origin: CaptureOrigin | None = None,
+        decode: Mapping[str, Any] | None = None,
     ) -> RawResponseRecord:
         sequence = self.next_sequence()
         record = self.store.put(
@@ -1665,6 +1798,7 @@ class CaptureSession:
                 if capture_origin is None
                 else replace(self.identity, capture_origin=capture_origin)
             ),
+            decode=decode,
         )
         self.captured.append(record)
         return record
@@ -1733,6 +1867,32 @@ class ManifestRecord:
     #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
     #: rather than comparing stored digests to each other and calling it checked.
     spot_synchronization_policy_fingerprint: str = ""
+    #: What the stored bytes *are*, and under which rules. Written since v2.1.14;
+    #: before that the constant existed and nothing recorded it, so a record gave
+    #: no way to tell whether its digest covered entity bytes or a re-encoding of
+    #: decoded text.
+    raw_response_schema_version: str = RAW_RESPONSE_SCHEMA_VERSION
+    body_representation: str = BODY_REPRESENTATION
+    #: How the *parser* read those bytes. Descriptive only: the bytes and their
+    #: digest stay authoritative, and this says what one reading of them was.
+    content_type: str = ""
+    declared_charset: str = ""
+    selected_charset: str = ""
+    decode_status: str = ""
+    decoded_text_hash: str = ""
+
+    @property
+    def raw_response_semantics(self) -> dict[str, Any]:
+        """The v2.1.14 block, as one thing, so it travels as one thing."""
+        return {
+            "raw_response_schema_version": self.raw_response_schema_version,
+            "body_representation": self.body_representation,
+            "content_type": self.content_type,
+            "declared_charset": self.declared_charset,
+            "selected_charset": self.selected_charset,
+            "decode_status": self.decode_status,
+            "decoded_text_hash": self.decoded_text_hash,
+        }
 
     @property
     def capture_identity(self) -> CaptureIdentity:
@@ -1822,6 +1982,7 @@ class ManifestRecord:
             "capture_origin": self.capture_origin.value,
             "byte_length": self.byte_length,
             "capture_complete": self.capture_complete,
+            **self.raw_response_semantics,
             **self.capture_identity.as_dict(),
         }
 

@@ -54,9 +54,11 @@ from src.adapters.open_interest import (
     OpenInterestValueObservation,
 )
 from src.adapters.raw_store import (
+    BODY_REPRESENTATION,
     MANIFEST_SCHEMA_VERSION,
     PARSER_VERSION,
     SUPPORTED_PARSER_VERSIONS,
+    SUPPORTED_RAW_RESPONSE_SCHEMAS,
     RawCaptureManifest,
     canonical_parameter_hash,
     probe_raw_store,
@@ -566,6 +568,23 @@ def verify_capture(
             f"PARSER_VERSION_UNSUPPORTED:{manifest.parser_version!r}: "
             f"accepted versions are {sorted(SUPPORTED_PARSER_VERSIONS)}"
         )
+    # What the stored bytes *are*. A descriptor written before v2.1.14 says
+    # nothing, and its digest may cover a UTF-8 re-encoding of decoded text
+    # rather than the response -- so it is refused rather than compared under
+    # rules it was not written under.
+    for entry in manifest.records:
+        if entry.raw_response_schema_version not in SUPPORTED_RAW_RESPONSE_SCHEMAS:
+            failures.append(
+                f"RAW_RESPONSE_SCHEMA_UNSUPPORTED:{entry.record_id}:"
+                f"{entry.raw_response_schema_version!r}: accepted schemas are "
+                f"{sorted(SUPPORTED_RAW_RESPONSE_SCHEMAS)}"
+            )
+        elif entry.body_representation != BODY_REPRESENTATION:
+            failures.append(
+                f"BODY_REPRESENTATION_UNSUPPORTED:{entry.record_id}:"
+                f"{entry.body_representation!r}: this code compares "
+                f"{BODY_REPRESENTATION!r}"
+            )
     if not expected_pipeline_fingerprint:
         failures.append(
             "EXPECTED_PIPELINE_FINGERPRINT_MISSING: verification was asked to "

@@ -1538,6 +1538,7 @@ class ThetaDataClient:
                 response_received_at=received,
                 http_status=response.status_code,
                 request_id=response.request_id,
+                decode=decoded.as_dict(),
             )
 
         # Status first, unconditionally, before the body is looked at at all.

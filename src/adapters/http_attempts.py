@@ -75,9 +75,11 @@ class HttpAttemptRecord:
     """One request attempt, whatever came back.
 
     ``response_body_location`` is where the body was written, when there was
-    one. A transport failure produces a record with no status and no body and a
-    ``transport_error_code``, which is a different thing from a 500 and reads as
-    one.
+    one -- **relative to the attempt-store root**, so a run directory that is
+    copied to an archive host still points at its own bodies. Resolve it with
+    :meth:`HttpAttemptLog.body_path`. A transport failure produces a record with
+    no status and no body and a ``transport_error_code``, which is a different
+    thing from a 500 and reads as one.
     """
 
     logical_request_id: str
@@ -238,6 +240,21 @@ class HttpAttemptLog:
                 continue
         return tuple(entries)
 
+    def body_path(self, location: str) -> pathlib.Path:
+        """Where a recorded location actually is, for this log, right now.
+
+        Locations are stored relative to the root, so this is the only place
+        that knows the absolute path -- and it derives it from where the log is
+        *now* rather than from where it was when the body was written.
+        """
+        candidate = pathlib.Path(location)
+        if candidate.is_absolute() or self.root is None:
+            # An absolute location comes from an index written before v2.1.14.
+            # Honoured as written: reinterpreting it relative to this root would
+            # silently point at a different file.
+            return candidate
+        return self.root / candidate
+
     def verify_bodies(self) -> tuple[str, ...]:
         """Which stored attempt bodies no longer hash to their own filenames."""
         failures: list[str] = []
@@ -245,7 +262,7 @@ class HttpAttemptLog:
             location = record.response_body_location
             if not location or not record.response_body_hash:
                 continue
-            path = pathlib.Path(location)
+            path = self.body_path(location)
             if not path.is_file():
                 failures.append(f"{location} is missing")
                 continue
@@ -263,9 +280,10 @@ class HttpAttemptLog:
         """
         assert self.root is not None
         target = self.root / digest[:2] / f"{digest}.bin"
+        location = target.relative_to(self.root).as_posix()
         if target.exists():
             if hashlib.sha256(target.read_bytes()).hexdigest() == digest:
-                return str(target)
+                return location
             raise ThetaDataRawStoreError(
                 f"{target} no longer hashes to its own name; an attempt body "
                 "that changed after it was written is not the response it names"
@@ -283,7 +301,7 @@ class HttpAttemptLog:
         except BaseException:
             pathlib.Path(temporary).unlink(missing_ok=True)
             raise
-        return str(target)
+        return location
 
     # -- reporting -----------------------------------------------------------
 
@@ -306,6 +324,11 @@ class HttpAttemptLog:
             "bodies_preserved": sum(
                 1 for record in self.records if record.response_body_location
             ),
-            "index_path": str(self.index_path) if self.root is not None else "",
+            # Named relative to the attempt-store root, like every location in
+            # this report. The root is a directory the operator already has --
+            # they are reading a file inside it -- and an absolute path here
+            # would be a claim about a machine rather than about the run.
+            "attempt_store_root": self.root.name if self.root is not None else "",
+            "index_path": self.index_path.name if self.root is not None else "",
             "attempts": [record.as_dict() for record in self.records],
         }

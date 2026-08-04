@@ -658,7 +658,8 @@ def test_file_raw_store_writes_a_readable_index(tmp_path):
         response_received_at=AS_OF + timedelta(milliseconds=250),
         http_status=200,
     )
-    assert pathlib.Path(record.payload_location).exists()
+    assert record.payload_location == "session1-quote.raw"
+    assert (tmp_path / "raw" / record.payload_location).exists()
     assert store.get_payload("session1-quote") == fixture("quotes.csv")
     reloaded = store.records()
     assert len(reloaded) == 1

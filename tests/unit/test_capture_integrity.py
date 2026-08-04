@@ -30,6 +30,7 @@ from src.tools.capture_thetadata_once import (
     RawCaptureRunState,
     plan_capture,
     run_capture,
+    run_path,
 )
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
@@ -116,7 +117,7 @@ def test_exactly_one_raw_store_is_constructed_for_a_live_run(tmp_path, monkeypat
 
 def test_the_reported_store_is_the_store_that_received_the_records(tmp_path):
     report = live_run(tmp_path)
-    root = pathlib.Path(report["effective_raw_store_path"])
+    root = run_path(report, "effective_raw_store_path")
     written = {path.stem for path in root.glob("*.raw")}
     assert written == set(report["record_ids"]), sorted(written)
 
@@ -175,11 +176,9 @@ def test_two_concurrent_runs_cannot_both_acquire_one_destination(tmp_path):
 
     # One run's evidence, not two mixed together.
     report = next(value for kind, value in outcomes if kind == "ok")
-    summary = json.loads(
-        pathlib.Path(report["summary_path"]).read_text(encoding="utf-8")
-    )
+    summary = json.loads(run_path(report, "summary_path").read_text(encoding="utf-8"))
     assert summary["run_id"] == report["run_id"]
-    stored = {p.stem for p in pathlib.Path(report["raw_store_path"]).glob("*.raw")}
+    stored = {p.stem for p in run_path(report, "raw_store_path").glob("*.raw")}
     assert stored == set(report["record_ids"])
 
 
@@ -193,9 +192,7 @@ def test_the_refused_run_writes_nothing_into_the_acquired_directory(tmp_path):
         live_run(tmp_path, destination=destination)
 
     assert sorted(p.name for p in destination.iterdir()) == before
-    summary = json.loads(
-        pathlib.Path(first["summary_path"]).read_text(encoding="utf-8")
-    )
+    summary = json.loads(run_path(first, "summary_path").read_text(encoding="utf-8"))
     assert summary["run_id"] == first["run_id"]
 
 
@@ -251,6 +248,56 @@ def test_a_utf8_bom_round_trips_byte_identically(tmp_path):
     assert store.get_body("r1") == body
 
 
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("lf", b"timestamp,symbol\n2026-03-17,SPX\n"),
+        # The one that failed. Text mode translates CRLF to LF on read, so the
+        # scan hashed different bytes from the ones it had written.
+        ("crlf", b"timestamp,symbol\r\n2026-03-17,SPX\r\n"),
+        ("cr", b"timestamp,symbol\r2026-03-17,SPX\r"),
+        ("bom", b"\xef\xbb\xbftimestamp,symbol\n2026-03-17,SPX\n"),
+        ("empty", b""),
+        # The one that took the whole scan down: not decodable, so text mode
+        # raised UnicodeDecodeError and every later record went unchecked.
+        ("latin1", "prix,symbole\n4 900,50 €,SPX\n".encode("latin-1", "replace")),
+        # Not named "nul": that is a reserved Windows device name, and the
+        # store root is a directory named after the case.
+        ("nul_bytes", b"a,b\n\x00\x00,SPX\n"),
+        ("binary", bytes(range(256)) * 4),
+    ],
+)
+def test_integrity_is_a_statement_about_bytes(tmp_path, name, body):
+    """The named regression: whatever the vendor sends, verify the bytes.
+
+    ``verify_integrity`` read payloads through ``read_text`` until v2.1.14. A
+    vendor that sends CRLF had every record report HASH_MISMATCH, and a body
+    that is not valid UTF-8 raised. Both are failures of the *reader*, reported
+    as findings against the evidence. Decoding belongs to the parser; this
+    layer answers "are these the bytes we wrote?" and nothing else.
+    """
+    from src.adapters.raw_store import FileRawStore, payload_hash
+    from tests.certification_fixtures import AS_OF
+
+    store = FileRawStore(tmp_path / name)
+    record = store.put(
+        record_id="r1",
+        endpoint="/v3/option/snapshot/quote",
+        query_params={"symbol": "SPXW"},
+        payload=body,
+        request_started_at=AS_OF,
+        response_received_at=AS_OF,
+        http_status=200,
+    )
+    assert store.get_body("r1") == body
+    assert record.payload_hash == payload_hash(body)
+    assert record.byte_length == len(body)
+
+    report = store.verify_integrity()
+    assert report.ok, report.counts()
+    assert [f.status.value for f in report.findings] == ["VALID"]
+
+
 def test_a_response_carries_its_bytes_and_a_separate_reading():
     from src.adapters.transport import DecodeStatus, HttpResponse
 
@@ -270,10 +317,8 @@ def test_a_captured_record_hashes_the_bytes_on_disk(tmp_path):
     from src.adapters.raw_store import payload_hash
 
     report = live_run(tmp_path)
-    manifest = json.loads(
-        pathlib.Path(report["manifest_path"]).read_text(encoding="utf-8")
-    )
-    root = pathlib.Path(report["raw_store_path"])
+    manifest = json.loads(run_path(report, "manifest_path").read_text(encoding="utf-8"))
+    root = run_path(report, "raw_store_path")
     for record in manifest["records"]:
         stored = (root / f"{record['record_id']}.raw").read_bytes()
         assert payload_hash(stored) == record["payload_hash"]
@@ -300,7 +345,8 @@ def test_attempt_bodies_are_hashed_over_their_bytes(tmp_path):
     )
     record = log.records[0]
     assert record.response_byte_length == len(body)
-    assert pathlib.Path(record.response_body_location).read_bytes() == body
+    assert not pathlib.Path(record.response_body_location).is_absolute()
+    assert log.body_path(record.response_body_location).read_bytes() == body
     assert log.verify_bodies() == ()
 
 
@@ -383,7 +429,7 @@ def test_a_refused_connection_run_reports_no_response(tmp_path):
     assert report["run_state"] == RawCaptureRunState.FAILED_NO_RESPONSE.value
     assert report["http_attempts"]["attempt_count"] >= 1
     assert report["record_ids"] == []
-    assert pathlib.Path(report["manifest_path"]).exists()
+    assert run_path(report, "manifest_path").exists()
 
 
 # =============================================================================
@@ -516,7 +562,7 @@ def test_attempt_metadata_is_readable_without_the_process_that_wrote_it(tmp_path
     from src.adapters.http_attempts import HttpAttemptLog
 
     report = live_run(tmp_path)
-    recovered = HttpAttemptLog.recovered_from(report["attempt_store_path"])
+    recovered = HttpAttemptLog.recovered_from(run_path(report, "attempt_store_path"))
     assert len(recovered) == report["http_attempts"]["attempt_count"]
     assert {entry["endpoint"] for entry in recovered} == set(
         report["http_attempts"]["attempts_per_endpoint"]
@@ -556,8 +602,78 @@ def test_a_finalization_failure_still_closes_the_transport(tmp_path, monkeypatch
     assert report["run_id"]
     assert report["attempt_count"] >= 1
     assert report["output_root"] == str(tmp_path / "capture")
-    assert pathlib.Path(report["summary_path"]).exists()
+    assert run_path(report, "summary_path").exists()
     assert report["trusted_gex_computed"] is False
+
+
+def test_a_crlf_vendor_completes_a_verified_run(tmp_path):
+    """The named regression, end to end and at the operator's level.
+
+    A vendor sending Windows line endings is not a defect and not exotic. Until
+    v2.1.14 it produced a run that fetched everything, stored everything, and
+    then reported every single record as HASH_MISMATCH -- an operator would have
+    concluded the capture was corrupt and paid for another one.
+    """
+    from src.adapters.transport import FakeTransport
+    from tests.certification_fixtures import payloads
+
+    transport = FakeTransport()
+    for endpoint, body in payloads().items():
+        crlf = body.replace("\n", "\r\n")
+        assert b"\r\n" in crlf.encode()
+        transport.register_bytes(endpoint.value, crlf.encode())
+
+    report = live_run(tmp_path, transport=transport)
+
+    assert report["run_state"] == "COMPLETED_VERIFIED"
+    assert report["integrity_ok"] is True
+    assert report["capture_verified"] is True
+    assert report["verification_failures"] == []
+    # The stored bytes are the vendor's, carriage returns included.
+    for path in run_path(report, "raw_store_path").glob("*.raw"):
+        assert b"\r\n" in path.read_bytes()
+
+
+def test_a_run_directory_verifies_after_it_has_been_moved(tmp_path):
+    """The named regression: evidence must not depend on where it was made.
+
+    Every location a run recorded was absolute through v2.1.13, so a capture
+    archived to a NAS, restored on a different host, or simply renamed carried
+    an index full of paths to a directory that was not there. The point of a
+    raw capture is that somebody else can check it; a directory that only
+    verifies on the machine that produced it does not do that.
+    """
+    import shutil
+
+    from src.adapters.http_attempts import HttpAttemptLog
+    from src.adapters.raw_store import FileRawStore
+
+    report = live_run(tmp_path, destination=tmp_path / "original")
+    assert report["run_state"] == "COMPLETED_VERIFIED"
+
+    archive = tmp_path / "archive" / "renamed-capture"
+    shutil.copytree(tmp_path / "original", archive)
+    shutil.rmtree(tmp_path / "original")
+    assert not (tmp_path / "original").exists()
+
+    # Nothing inside points back at where it was written.
+    index = (archive / "raw" / "index.jsonl").read_text(encoding="utf-8")
+    for line in index.splitlines():
+        location = json.loads(line)["payload_location"]
+        assert not pathlib.Path(location).is_absolute(), location
+        assert (archive / "raw" / location).is_file()
+
+    integrity = FileRawStore(archive / "raw").verify_integrity()
+    assert integrity.ok, integrity.counts()
+    assert HttpAttemptLog(archive / "attempts").verify_bodies() == ()
+
+    # And the summary still describes a directory, once told where it now is.
+    moved = dict(
+        json.loads((archive / "capture-summary.json").read_text(encoding="utf-8")),
+        output_root=str(archive),
+    )
+    assert run_path(moved, "manifest_path").is_file()
+    assert run_path(moved, "intent_path").is_file()
 
 
 # =============================================================================

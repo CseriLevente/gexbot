@@ -282,21 +282,21 @@ def test_a_payload_with_no_index_entry_is_an_orphan(tmp_path):
 def test_an_index_entry_with_no_payload_is_reported(tmp_path):
     """Crash between appending the index and renaming the payload."""
     store, record = store_with_one_record(tmp_path)
-    store._payload_path(record.record_id).unlink()
+    store.payload_path(record.record_id).unlink()
     report = store.verify_integrity()
     assert any(f.status is IntegrityStatus.MISSING_PAYLOAD for f in report.findings)
 
 
 def test_a_tampered_payload_is_detected_by_hash(tmp_path):
     store, record = store_with_one_record(tmp_path)
-    store._payload_path(record.record_id).write_text("tampered", encoding="utf-8")
+    store.payload_path(record.record_id).write_text("tampered", encoding="utf-8")
     report = store.verify_integrity()
     assert any(f.status is IntegrityStatus.HASH_MISMATCH for f in report.findings)
 
 
 def test_a_size_mismatch_is_detected(tmp_path):
     store, record = store_with_one_record(tmp_path)
-    store._payload_path(record.record_id).write_text("hello!!", encoding="utf-8")
+    store.payload_path(record.record_id).write_text("hello!!", encoding="utf-8")
     statuses = {f.status for f in store.verify_integrity().findings}
     assert statuses & {IntegrityStatus.HASH_MISMATCH, IntegrityStatus.SIZE_MISMATCH}
 

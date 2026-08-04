@@ -139,6 +139,34 @@ def _redact(url: str) -> str:
     return f"{base}?{'&'.join(parts)}"
 
 
+def local_or_live_origin(url: str) -> str:
+    """``LOCAL_TERMINAL_CAPTURE`` for a loopback host, ``LIVE_HTTP_CAPTURE`` else.
+
+    Only the host is inspected. A path or a query parameter is remote-supplied
+    text, and letting it decide where a capture came from would let the answer be
+    written by the thing being described.
+
+    An unparseable URL is ``LIVE_HTTP_CAPTURE``: the two are both live, and
+    guessing "local" would understate what a request did.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(url).hostname or "").strip().lower()
+    except ValueError:
+        return "LIVE_HTTP_CAPTURE"
+    if not host:
+        return "LIVE_HTTP_CAPTURE"
+    if host == "localhost":
+        return "LOCAL_TERMINAL_CAPTURE"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "LIVE_HTTP_CAPTURE"
+    return "LOCAL_TERMINAL_CAPTURE" if address.is_loopback else "LIVE_HTTP_CAPTURE"
+
+
 #: What ``HttpResponse.body`` holds, stated so nobody has to guess later.
 #:
 #: **The HTTP entity body after transfer- and content-decoding**: what ``httpx``
@@ -985,11 +1013,15 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
 
     @staticmethod
     def origin_for(url: str) -> str:
-        return (
-            "LOCAL_TERMINAL_CAPTURE"
-            if "127.0.0.1" in url or "localhost" in url
-            else "LIVE_HTTP_CAPTURE"
-        )
+        """Local Theta Terminal or remote vendor, decided by the parsed host.
+
+        v2.1.13 looked for ``"127.0.0.1"`` or ``"localhost"`` anywhere in the
+        URL. ``https://notlocalhost.com/v3/...`` was therefore a local terminal,
+        and so was any vendor URL with ``?next=localhost`` in the query -- which
+        is a claim about who produced the bytes, made by a string nobody
+        controls. ``127.0.0.10`` matched too, and it is a different host.
+        """
+        return local_or_live_origin(url)
 
     def __init__(
         self,
@@ -1008,25 +1040,47 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
             ) from exc
         self._httpx = httpx
         self._max_response_bytes = max_response_bytes
+        self._connect_timeout_seconds = connect_timeout_seconds
+        self._read_timeout_seconds = read_timeout_seconds
+        # The one authoritative timeout object. Kept so a per-request read
+        # timeout can be expressed *without* discarding the connect timeout --
+        # which is what v2.1.13 did: ``get()`` passed ``timeout=<float>``, and a
+        # scalar replaces every dimension, so the configured five-second connect
+        # timeout became thirty at the wire while the dry run reported five.
+        self._timeout = self._timeout_for(read_timeout_seconds)
         # Credentials go to httpx's auth handling, never into the URL: a URL ends
         # up in logs, tracebacks and the raw-response index.
         self._client = httpx.Client(
-            timeout=httpx.Timeout(
-                connect=connect_timeout_seconds,
-                read=read_timeout_seconds,
-                write=read_timeout_seconds,
-                pool=connect_timeout_seconds,
-            ),
+            timeout=self._timeout,
             headers=dict(headers or {}),
             auth=httpx.BasicAuth(*basic_auth) if basic_auth else None,
         )
+
+    def _timeout_for(self, read_timeout_seconds: float) -> Any:
+        """A full timeout object. Every dimension named, none inherited."""
+        return self._httpx.Timeout(
+            connect=self._connect_timeout_seconds,
+            read=read_timeout_seconds,
+            write=read_timeout_seconds,
+            pool=self._connect_timeout_seconds,
+        )
+
+    @property
+    def effective_timeout(self) -> Any:
+        """What this transport will actually apply. Read by the tests."""
+        return self._timeout
 
     def get(
         self, url: str, params: Mapping[str, Any], timeout_seconds: float
     ) -> HttpResponse:
         try:
             with self._client.stream(
-                "GET", url, params=dict(params), timeout=timeout_seconds
+                "GET",
+                url,
+                params=dict(params),
+                # A full ``Timeout``, never a scalar. The per-call value is the
+                # *read* budget; the connect and pool budgets stay configured.
+                timeout=self._timeout_for(timeout_seconds),
             ) as response:
                 # One authoritative implementation of the cap, shared with
                 # the tests. Aborts mid-stream, closes the connection, and

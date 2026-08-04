@@ -243,6 +243,9 @@ jobs:
       - name: The raw-capture command is dry-run by default and never computes
         run: python -m pytest tests/unit/test_raw_capture_command.py -v
 
+      - name: Documentation universe evidence survives a process restart
+        run: python -m pytest tests/unit/test_documentation_evidence_recovery.py -v
+
       - name: US Eastern comes from the IANA database
         run: python -m pytest tests/unit/test_sessions.py tests/unit/test_timestamp_boundary.py -v
 

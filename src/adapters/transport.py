@@ -92,6 +92,33 @@ class RetryBudgetExhaustedError(RuntimeError):
 _SENSITIVE_PARAM_NAMES = ("password", "token", "key", "secret", "auth")
 
 
+def _endpoint_of(url: str) -> str:
+    """The path an attempt was made against, which is what the plan names."""
+    without_query = url.partition("?")[0]
+    for marker in ("://",):
+        if marker in without_query:
+            without_query = "/" + without_query.split(marker, 1)[1].partition("/")[2]
+    return without_query
+
+
+def _parameters_hash(params: Mapping[str, Any]) -> str:
+    """Which request an attempt was, without recording what was in it.
+
+    The parameters can carry a rate value and a symbol, neither secret; they can
+    also carry whatever a future endpoint adds. A digest names the request
+    without deciding in advance that everything in it is safe to write down.
+    """
+    import hashlib
+    import json
+
+    canonical = json.dumps(
+        {str(k): str(v) for k, v in sorted(dict(params).items())},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _redact(url: str) -> str:
     """Strip credential-looking query parameters before anything is logged.
 
@@ -476,13 +503,68 @@ class RetryingTransport:
         sleep: Callable[[float], None] = time.sleep,
         random_unit: Callable[[], float] = lambda: 0.5,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        attempt_observer: Any = None,
     ) -> None:
         self._inner = inner
         self._policy = policy or RetryPolicy()
         self._sleep = sleep
         self._random_unit = random_unit
         self._max_response_bytes = max_response_bytes
+        #: Told about every attempt, successful or not. Until v2.1.12 a retryable
+        #: 429 or 503 body was logged and dropped inside this loop, so the
+        #: responses that would explain a partial capture were exactly the ones
+        #: the capture layer never saw -- while the operator documentation said
+        #: every response was preserved.
+        self._attempt_observer = attempt_observer
         self.sleeps: list[float] = []
+
+    def origin_for(self, url: str) -> Any:
+        """Delegate. A wrapper adds no provenance and hides none either."""
+        inner = getattr(self._inner, "origin_for", None)
+        if callable(inner):
+            return inner(url)
+        return getattr(self._inner, "capture_origin", None)
+
+    def close(self) -> None:
+        """Close the wrapped transport, if it has anything to close."""
+        closer = getattr(self._inner, "close", None)
+        if callable(closer):
+            closer()
+
+    def _observe(
+        self,
+        *,
+        url: str,
+        params: Mapping[str, Any],
+        request_id: str,
+        attempt: int,
+        started_at: datetime,
+        status_code: int | None = None,
+        headers: Any = None,
+        body: str | None = None,
+        transport_error_code: str | None = None,
+        retryable: bool = False,
+    ) -> None:
+        if self._attempt_observer is None:
+            return
+        from src.adapters.http_attempts import HttpAttemptRecord, safe_headers
+
+        self._attempt_observer.observe(
+            HttpAttemptRecord(
+                logical_request_id=request_id,
+                attempt_number=attempt,
+                endpoint=_endpoint_of(url),
+                safe_url=_redact(url),
+                request_parameters_hash=_parameters_hash(params),
+                started_at=started_at,
+                received_at=datetime.now(UTC),
+                status_code=status_code,
+                response_headers=safe_headers(headers),
+                transport_error_code=transport_error_code,
+                retryable=retryable,
+            ),
+            body,
+        )
 
     @property
     def inner(self) -> HttpTransport:
@@ -511,6 +593,7 @@ class RetryingTransport:
 
         for attempt in range(1, self._policy.max_retries + 2):
             started = time.monotonic()
+            started_at = datetime.now(UTC)
             try:
                 response = self._inner.get(url, params, timeout_seconds)
             except TransportError as exc:
@@ -524,6 +607,17 @@ class RetryingTransport:
                         "error": type(exc).__name__,
                     },
                 )
+                # No status and no body: a connection that never answered is a
+                # different fact from a 500, and the record says which.
+                self._observe(
+                    url=url,
+                    params=params,
+                    request_id=request_id,
+                    attempt=attempt,
+                    started_at=started_at,
+                    transport_error_code=type(exc).__name__,
+                    retryable=True,
+                )
             else:
                 elapsed = time.monotonic() - started
                 # Belt and braces: streaming transports abort mid-read, but a
@@ -534,6 +628,17 @@ class RetryingTransport:
                         f"response of {response.byte_length} bytes exceeds the "
                         f"{self._max_response_bytes}-byte cap for {_redact(url)}"
                     )
+                self._observe(
+                    url=url,
+                    params=params,
+                    request_id=request_id,
+                    attempt=attempt,
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    body=response.text,
+                    retryable=response.status_code in RETRYABLE_STATUS_CODES,
+                )
                 if response.ok:
                     logger.info(
                         "vendor request ok",

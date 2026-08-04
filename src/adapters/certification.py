@@ -101,7 +101,7 @@ __all__ = [
 #: Bumped when the *meaning* of a certification report changes, so a stored
 #: report says which rules produced it. v2.1.4 split the states and added typed
 #: capture and validation evidence, which changes how every field reads.
-CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.11"
+CERTIFICATION_SCHEMA_VERSION = "adapter-certification/2.1.12"
 
 #: Stamped onto every readiness report so the object cannot be quoted out of
 #: context as clearance for anything else.
@@ -1373,28 +1373,179 @@ class AnalyticalReadinessReport:
         }
 
 
-def assess_analytical_readiness(
+#: Bumped when what an analytical-readiness verdict rests on changes.
+ANALYTICAL_READINESS_SCHEMA_VERSION = "analytical-readiness/2.1.12"
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedAnalyticalEvidenceContext:
+    """Six conditions, each already established by something that did the work.
+
+    v2.1.11 took six loose ``Any`` arguments. Every one of them was satisfiable
+    by a ``SimpleNamespace``: a receipt whose ``matches()`` returned ``True``, a
+    compatibility report whose ``blocking_dimensions`` was an empty tuple, a
+    completeness object with ``coverage_status="FULL_REQUEST_ENUMERATED"``. Six
+    fabricated objects produced ``READY_FOR_ANALYTICAL_DATASET``.
+
+    This type is the answer, and the important part is not its fields -- it is
+    that :func:`build_analytical_evidence` is the only thing that produces one,
+    and it re-derives the chain, re-verifies the capture, and recovers the
+    capture-bound artifacts itself. A caller who hand-builds one has to do the
+    work the builder does, which is the work.
+    """
+
+    #: Recomputed here, not read off anything: the two canonical receipts agreed.
+    normalization_matches: bool
+    #: Recovered from the capture and re-verified, not passed in.
+    settlement_established: bool
+    #: Every load-bearing pricing dimension resolved.
+    pricing_dimensions_unresolved: tuple[str, ...]
+    universe: UniverseReadiness
+    excluded_records: tuple[str, ...]
+    capture_pipeline_fingerprint: str
+    reading_pipeline_fingerprint: str
+    #: What the builder could not establish at all. Any entry here is a blocker.
+    derivation_failures: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ANALYTICAL_READINESS_SCHEMA_VERSION,
+            "normalization_matches": self.normalization_matches,
+            "settlement_established": self.settlement_established,
+            "pricing_dimensions_unresolved": list(self.pricing_dimensions_unresolved),
+            "universe": self.universe.value,
+            "excluded_records": list(self.excluded_records),
+            "capture_pipeline_fingerprint": self.capture_pipeline_fingerprint,
+            "reading_pipeline_fingerprint": self.reading_pipeline_fingerprint,
+            "derivation_failures": list(self.derivation_failures),
+        }
+
+
+def build_analytical_evidence(
     *,
-    completeness: Any = None,
-    normalized_receipt: Any = None,
-    rederived_receipt: Any = None,
-    settlement_artifact: Any = None,
+    pipeline: Any,
+    chain: Any,
+    manifest: Any,
+    store: Any,
+    artifact_store: Any = None,
     pricing_compatibility: Any = None,
-    excluded_records: Any = (),
-    capture_pipeline_fingerprint: str = "",
-    reading_pipeline_fingerprint: str = "",
+) -> VerifiedAnalyticalEvidenceContext:
+    """Establish all six conditions from a capture, or record why not.
+
+    Every branch that cannot establish something records a *derivation failure*
+    rather than a default, so an input this could not check is a blocker and
+    never a pass.
+    """
+    failures: list[str] = []
+
+    capture = verify_capture(
+        manifest,
+        store,
+        plan=pipeline.capture_plan,
+        expected_pipeline_fingerprint=pipeline.fingerprint(),
+    )
+    if not capture.verified:
+        failures.append(
+            f"the capture does not verify against its store: {list(capture.failures)[:3]}"
+        )
+
+    recovered = pipeline.recover_capture_artifacts(
+        manifest=manifest, store=store, artifact_store=artifact_store
+    )
+    failures.extend(recovered.failures)
+
+    normalization_matches = False
+    try:
+        operation = pipeline.resolve_operation(
+            manifest=manifest,
+            store=store,
+            expected_universe=recovered.expected_universe,
+        )
+        recipe = pipeline.normalization_recipe(
+            as_of=operation.effective_valuation_timestamp,
+            open_interest_as_of=(
+                recovered.settlement_artifact.resolved_settlement_date
+                if recovered.settlement_artifact is not None
+                else None
+            ),
+            expected_universe_fingerprint=(
+                recovered.expected_universe.artifact_hash
+                if recovered.expected_universe is not None
+                else None
+            ),
+        )
+        rebuilt, _ = pipeline.rebuild_from_capture(
+            manifest=manifest,
+            store=store,
+            recipe=recipe,
+            operation=operation,
+            expected_universe=recovered.expected_universe,
+        )
+        original = pipeline.normalized_chain_receipt(
+            chain,
+            manifest=manifest,
+            recipe=recipe,
+            operation=operation,
+            expected_universe=recovered.expected_universe,
+        )
+        rederived = pipeline.normalized_chain_receipt(
+            rebuilt,
+            manifest=manifest,
+            recipe=recipe,
+            operation=operation,
+            expected_universe=recovered.expected_universe,
+        )
+        normalization_matches = original.matches(rederived)
+    except Exception as error:  # a chain that cannot be re-derived is a blocker
+        failures.append(f"the chain could not be re-derived from its records: {error}")
+
+    unresolved: tuple[str, ...] = ()
+    if pricing_compatibility is None:
+        failures.append(
+            "no post-capture pricing compatibility report was produced, so "
+            "whether our gamma and the vendor's mean the same thing is unexamined"
+        )
+    else:
+        unresolved = tuple(
+            d.dimension.value for d in pricing_compatibility.blocking_dimensions
+        )
+
+    confirmed = set(capture.confirmed_record_ids)
+    claimed = {entry.record_id for entry in getattr(manifest, "records", ())}
+    return VerifiedAnalyticalEvidenceContext(
+        normalization_matches=normalization_matches,
+        settlement_established=recovered.settlement_artifact is not None,
+        pricing_dimensions_unresolved=unresolved,
+        universe=universe_readiness_of(getattr(chain, "completeness", None)),
+        excluded_records=tuple(sorted(claimed - confirmed)),
+        capture_pipeline_fingerprint=manifest.pipeline_fingerprint,
+        reading_pipeline_fingerprint=pipeline.fingerprint(),
+        derivation_failures=tuple(failures),
+    )
+
+
+def assess_analytical_readiness(
+    context: VerifiedAnalyticalEvidenceContext,
 ) -> AnalyticalReadinessReport:
     """All six conditions, or ``NOT_ANALYTICALLY_READY`` naming the missing ones.
 
-    Everything absent is a blocker rather than a pass. That is the correction:
-    a function that returns a dataset-ready state must have looked at everything
-    the state names, and one that was told about one condition has looked at one
-    condition.
+    Takes only a context :func:`build_analytical_evidence` produced. v2.1.11
+    took six independent ``Any`` arguments, and six fabricated objects with the
+    right attribute names returned ``READY_FOR_ANALYTICAL_DATASET``.
     """
-    blockers: list[str] = []
+    if not isinstance(context, VerifiedAnalyticalEvidenceContext):
+        raise ThetaDataCertificationError(
+            "assess_analytical_readiness takes a VerifiedAnalyticalEvidenceContext, "
+            f"got {type(context).__name__}. Build one with "
+            "build_analytical_evidence(pipeline=..., chain=..., manifest=..., "
+            "store=...), which re-derives the chain and re-verifies the capture "
+            "itself -- v2.1.11 accepted six loose objects, and six fabricated "
+            "ones were ready."
+        )
+    blockers: list[str] = list(context.derivation_failures)
     satisfied: list[str] = []
 
-    universe = universe_readiness_of(completeness)
+    universe = context.universe
     if universe is UniverseReadiness.UNIVERSE_READY:
         satisfied.append("chain completeness is FULL_REQUEST_ENUMERATED")
     else:
@@ -1404,20 +1555,16 @@ def assess_analytical_readiness(
             "(OPEN_DECISIONS OD-11)"
         )
 
-    if normalized_receipt is None or rederived_receipt is None:
-        blockers.append(
-            "the chain has not been re-derived from its raw records, so the "
-            "numbers are not bound to bytes anyone can reopen"
-        )
-    elif not normalized_receipt.matches(rederived_receipt):
+    if not context.normalization_matches:
         blockers.append(
             "the chain re-derived from its raw records does not equal the chain "
-            "the numbers were computed from"
+            "the numbers were computed from, so they are not bound to bytes "
+            "anyone can reopen"
         )
     else:
         satisfied.append("trusted normalization: the chain re-derives from its records")
 
-    if settlement_artifact is None:
+    if not context.settlement_established:
         blockers.append(
             "no open-interest settlement rule was established, and open interest "
             "is the linear weight on every GEX term (OPEN_DECISIONS OD-26)"
@@ -1427,20 +1574,15 @@ def assess_analytical_readiness(
             "an open-interest settlement date was derived by a capture-bound rule"
         )
 
-    if pricing_compatibility is None:
-        blockers.append(
-            "no pricing compatibility report was supplied, so whether our gamma "
-            "and the vendor's mean the same thing is unexamined"
-        )
-    elif pricing_compatibility.blocking_dimensions:
+    if context.pricing_dimensions_unresolved:
         blockers.append(
             "pricing compatibility is unresolved on "
-            f"{[d.dimension.value for d in pricing_compatibility.blocking_dimensions]}"
+            f"{list(context.pricing_dimensions_unresolved)}"
         )
     else:
         satisfied.append("pricing compatibility is resolved on every dimension")
 
-    dropped = tuple(excluded_records or ())
+    dropped = tuple(context.excluded_records or ())
     if dropped:
         blockers.append(
             f"{len(dropped)} source records were excluded and not accounted for: "
@@ -1449,17 +1591,18 @@ def assess_analytical_readiness(
     else:
         satisfied.append("no source records were silently excluded")
 
-    if not capture_pipeline_fingerprint or not reading_pipeline_fingerprint:
+    capture_fp = context.capture_pipeline_fingerprint
+    reading_fp = context.reading_pipeline_fingerprint
+    if not capture_fp or not reading_fp:
         blockers.append(
             "the capture and reading pipeline fingerprints were not both "
-            "supplied, so nothing states that one configuration produced and "
+            "established, so nothing states that one configuration produced and "
             "read this dataset"
         )
-    elif capture_pipeline_fingerprint != reading_pipeline_fingerprint:
+    elif capture_fp != reading_fp:
         blockers.append(
-            f"the records were captured under pipeline "
-            f"{capture_pipeline_fingerprint[:12]}... and are being read under "
-            f"{reading_pipeline_fingerprint[:12]}..."
+            f"the records were captured under pipeline {capture_fp[:12]}... and "
+            f"are being read under {reading_fp[:12]}..."
         )
     else:
         satisfied.append("the capture and reading pipelines are the same")

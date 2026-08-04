@@ -922,3 +922,113 @@ what it wrote, computes no GEX and places no orders.
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
 `ADAPTER_CERTIFIED`. What changed is that the reasons are now checks rather than
 sentences, and there is a command to run when the account exists.
+
+---
+
+## v2.1.12: the session that actually happens
+
+v2.1.11 gave the first paid capture a command. v2.1.12 is what a review found
+when it asked what that command does on a session that really runs — and what it
+does when the vendor answers 503.
+
+### The transport is the configured one
+
+The command called `HttpxTransport()` with no arguments and handed it to the
+pipeline, bypassing `build_thetadata_client` — which is where the connect
+timeout, the read timeout, the response cap and the authentication are applied.
+The profile said 30 seconds and 64 MiB; the wire would have had `httpx`
+defaults.
+
+It now builds nothing. Both reports carry the effective settings — base URL with
+any embedded userinfo replaced, authentication mode, whether credentials
+resolved and from which environment variables, timeouts, cap, retries, backoff —
+and **no credential value**.
+
+### The origin says which live it was
+
+`HttpxTransport.origin_for` has always distinguished a local Theta Terminal from
+a direct vendor call, and nothing called it: `capture_origin_of` read the class
+attribute, which is `LIVE_HTTP_CAPTURE`. The shipped profile points at
+`http://127.0.0.1:25503`, so every record of the first real session would have
+claimed a direct vendor round trip.
+
+Both are live and they fail differently, and any later claim about vendor
+behaviour rests on knowing which produced the bytes.
+
+### Every attempt is accounted for
+
+`RetryingTransport` consumes a retryable 429 or 503 body, logs a warning, sleeps
+and tries again — so the responses that would explain a partial capture were the
+ones thrown away, while the operator documentation said every response was
+preserved. That sentence was wrong, and the fix is the sentence becoming true.
+
+An attempt observer inside the retry loop records one `HttpAttemptRecord` per
+attempt: endpoint, attempt number, redacted URL, parameter digest, timings,
+status, an allow-listed header subset, and either a body hash and location or a
+transport error code where nothing came back. Bodies are written
+content-addressed under `attempts/`, and **they are not chain data** — the raw
+store holds the responses a snapshot was built from.
+
+### A run has a state, and a failure has a report
+
+| State | Means |
+|---|---|
+| `PLANNED` | the intent document is written; nothing sent |
+| `IN_PROGRESS` | at least one request issued |
+| `COMPLETED_VERIFIED` | every planned endpoint answered and the manifest verified |
+| `COMPLETED_UNVERIFIED` | every endpoint answered; verification or integrity did not pass |
+| `FAILED_PARTIAL` | some endpoints answered, then something failed. The bytes are kept |
+| `FAILED_BEFORE_REQUEST` | nothing was sent |
+
+`run-intent.json` is written before the first request. A manifest and a summary
+are written on every exit path. A partial manifest identifies itself as partial
+and cannot pass `verify_capture` — it is missing endpoints the plan requires,
+which is the check that should refuse it. Nothing is deleted automatically.
+
+All three documents are serialised, written to a temporary file, fsynced and
+renamed.
+
+### Where a capture may go
+
+Resolved with symlinks followed. Refused if inside the repository, a symlink, an
+existing file, or a directory holding anything — including an earlier
+`run-intent.json`. There is no resume in v2.1.12: each run gets its own
+directory, so two captures can never share a manifest. Run ids carry a
+cryptographic nonce, because record ids derive from the session id and two runs
+in the same second used to collide.
+
+The dry run writes nothing at all: the store capability is probed in a temporary
+directory deleted before the report returns.
+
+### Documentation evidence survives the process
+
+The v2.1.11 documentation path could not be used. `capture_session` re-runs a
+resolution before opening the chain operation, and the re-run consulted
+`UNIVERSE_DOCUMENTATION_RULES` — so a resolution made with a caller's own
+registry was refused by the capture that had just accepted it, and the global
+registry is empty in production. Recovery had the same shape.
+
+A `UniverseDocumentationEvidenceArtifact` now carries the rule in portable form
+(no host path), the digest of the exact verified bytes, the artifact key those
+bytes live under, the extractor version and the extraction. The bytes are stored
+content-addressed. Re-running and recovering both consult no global state, and a
+changed document or a changed rule fails.
+
+### Differences are derived; readiness is derived
+
+`UniverseOnlyCompatibilityRule` took `differing_parameters` from the caller — who
+was the one asking for the waiver. `derive_parameter_diff` computes the diff from
+two configurations, any contract-set-affecting difference is refused whatever the
+rule says, and the rule carries only the digest of the difference it approves.
+
+`assess_analytical_readiness` took six loose `Any` arguments, and six
+`SimpleNamespace` objects with the right attribute names were ready. It takes
+only a `VerifiedAnalyticalEvidenceContext`, and `build_analytical_evidence`
+re-derives the chain, re-verifies the capture and recovers the capture-bound
+artifacts itself.
+
+### What this changes about the shipped state
+
+Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
+`ADAPTER_CERTIFIED`. What changed is that the session which produces the first
+evidence is now safe to run, and honest about what it produced.

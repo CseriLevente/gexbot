@@ -51,11 +51,21 @@ class ArtifactKind(str):
     #: byte ranges, which identities. Declared since v2.1.9 and unused until
     #: v2.1.11, when documentation identities stopped being a field on a rule.
     DOCUMENTATION_EVIDENCE = "documentation_evidence"
+    #: The exact verified bytes of a universe document. Content-addressed, so a
+    #: recovery in another process re-runs the extractor over the same document
+    #: rather than over whatever is at the path the rule was registered from.
+    DOCUMENT_BYTES = "document_bytes"
+    #: A documentation universe in portable form: the rule with no host path,
+    #: the digest of those bytes, and the extraction they produced.
+    UNIVERSE_DOCUMENTATION_EVIDENCE = "universe_documentation_evidence"
     #: That a source manifest was checked against its store, under a named plan
     #: and pipeline, and which records that confirmed.
     CAPTURE_VERIFICATION = "capture_verification"
     #: What a universe resolution established, and from what.
     UNIVERSE_RESOLUTION = "universe_resolution"
+    #: The unhashed configuration behind a pipeline fingerprint, so two
+    #: captures can be compared key by key rather than digest to digest.
+    PIPELINE_CONFIGURATION = "pipeline_configuration"
     SCHEDULE_DERIVATION = "schedule_derivation"
 
 
@@ -66,8 +76,11 @@ ARTIFACT_KINDS = frozenset(
         ArtifactKind.SETTLEMENT_RULE,
         ArtifactKind.EXPECTED_UNIVERSE,
         ArtifactKind.DOCUMENTATION_EVIDENCE,
+        ArtifactKind.DOCUMENT_BYTES,
+        ArtifactKind.UNIVERSE_DOCUMENTATION_EVIDENCE,
         ArtifactKind.CAPTURE_VERIFICATION,
         ArtifactKind.UNIVERSE_RESOLUTION,
+        ArtifactKind.PIPELINE_CONFIGURATION,
         ArtifactKind.SCHEDULE_DERIVATION,
     }
 )

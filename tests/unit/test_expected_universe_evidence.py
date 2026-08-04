@@ -473,28 +473,13 @@ def test_source_and_target_pipeline_fingerprints_are_compared():
     assert any("IDENTICAL_PIPELINE" in reason for reason in reasons)
 
 
-def test_a_min_time_difference_cannot_be_waived():
-    """A waiver may cover a timeout. It may not cover the contract set."""
-    from src.adapters.errors import ThetaDataProvenanceError
-    from src.adapters.universe_resolvers import UniverseOnlyCompatibilityRule
-
-    with pytest.raises(ThetaDataProvenanceError, match=r"(?i)which contracts"):
-        UniverseOnlyCompatibilityRule(
-            rule_id="ur-1",
-            source_pipeline_fingerprint="a" * 64,
-            target_pipeline_fingerprint="b" * 64,
-            differing_parameters=("timeout_seconds", "min_time"),
-            rationale="a longer timeout does not change the contract set",
-        )
-
-
-def test_a_documented_waiver_permits_a_named_pair():
+def waived(taken, *, source_configuration, target_configuration, approved):
+    """Run the compatibility check under a documented waiver."""
     from src.adapters.universe_resolvers import (
         PipelineCompatibilityPolicy,
         UniverseOnlyCompatibilityRule,
     )
 
-    taken = captured_chain()
     captured_at = record_instant(taken)
     artifact = dataclasses.replace(
         resolved(taken),
@@ -505,17 +490,104 @@ def test_a_documented_waiver_permits_a_named_pair():
         rule_id="ur-1",
         source_pipeline_fingerprint="b" * 64,
         target_pipeline_fingerprint="a" * 64,
-        differing_parameters=("timeout_seconds",),
+        approved_diff_hash=approved,
         rationale="a longer timeout does not change which contracts come back",
     )
+    return check_source_compatibility(
+        artifact,
+        chain_scope=scope(),
+        chain_requested_at=captured_at,
+        chain_pipeline_fingerprint="a" * 64,
+        policy=PipelineCompatibilityPolicy.UNIVERSE_ONLY_DOCUMENTED,
+        waiver=waiver,
+        source_configuration=source_configuration,
+        target_configuration=target_configuration,
+    )
+
+
+def test_a_min_time_difference_cannot_be_waived():
+    """The named v2.1.12 regression.
+
+    v2.1.11 took ``differing_parameters`` from the caller and checked only the
+    names it was given, so a waiver claiming the two pipelines differ in
+    ``timeout_seconds`` was accepted while the real difference was ``min_time``
+    -- which decides which contracts come back.
+    """
+    import inspect
+
+    from src.adapters.universe_resolvers import (
+        UniverseOnlyCompatibilityRule,
+        derive_parameter_diff,
+        diff_fingerprint,
+    )
+
+    # The caller cannot state the difference at all any more.
+    parameters = set(inspect.signature(UniverseOnlyCompatibilityRule).parameters)
+    assert "differing_parameters" not in parameters
+    assert "approved_diff_hash" in parameters
+
+    source = {"config": {"timeout_seconds": 60.0, "min_time": "15:30:00"}}
+    target = {"config": {"timeout_seconds": 30.0, "min_time": None}}
+    diff = derive_parameter_diff(source, target)
+    assert {entry.key for entry in diff} == {
+        "config.timeout_seconds",
+        "config.min_time",
+    }
+
+    taken = captured_chain()
+    # The waiver approves the *whole* derived difference and is still refused,
+    # because part of that difference decides the contract set.
+    reasons = waived(
+        taken,
+        source_configuration=source,
+        target_configuration=target,
+        approved=diff_fingerprint(diff),
+    )
+    assert any("which contracts a request returns" in reason for reason in reasons)
+    assert any("min_time" in reason for reason in reasons)
+
+
+def test_a_waiver_for_a_different_difference_is_refused():
+    from src.adapters.universe_resolvers import derive_parameter_diff, diff_fingerprint
+
+    taken = captured_chain()
+    source = {"config": {"timeout_seconds": 60.0}}
+    target = {"config": {"timeout_seconds": 30.0}}
+    elsewhere = derive_parameter_diff({"config": {"a": 1}}, {"config": {"a": 2}})
+    reasons = waived(
+        taken,
+        source_configuration=source,
+        target_configuration=target,
+        approved=diff_fingerprint(elsewhere),
+    )
+    assert any("approves difference" in reason for reason in reasons)
+
+
+def test_a_waiver_without_the_two_configurations_is_refused():
+    taken = captured_chain()
+    reasons = waived(
+        taken,
+        source_configuration=None,
+        target_configuration=None,
+        approved="d" * 64,
+    )
+    assert any("never computed" in reason for reason in reasons)
+
+
+def test_a_documented_waiver_permits_a_derived_difference():
+    from src.adapters.universe_resolvers import derive_parameter_diff, diff_fingerprint
+
+    taken = captured_chain()
+    source = {"config": {"timeout_seconds": 60.0}}
+    target = {"config": {"timeout_seconds": 30.0}}
+    diff = derive_parameter_diff(source, target)
+    assert not any(entry.affects_contract_set for entry in diff)
     assert (
-        check_source_compatibility(
-            artifact,
-            chain_scope=scope(),
-            chain_requested_at=captured_at,
-            chain_pipeline_fingerprint="a" * 64,
-            policy=PipelineCompatibilityPolicy.UNIVERSE_ONLY_DOCUMENTED,
-            waiver=waiver,
+        waived(
+            taken,
+            source_configuration=source,
+            target_configuration=target,
+            approved=diff_fingerprint(diff),
         )
         == ()
     )
@@ -1425,19 +1497,58 @@ def test_the_completeness_only_function_no_longer_returns_a_dataset_verdict():
     assert "READY_FOR_ANALYTICAL_DATASET" not in values
 
 
+def test_fabricated_analytical_inputs_cannot_return_ready():
+    """The named v2.1.12 regression.
+
+    v2.1.11 took six loose ``Any`` arguments, and every one was satisfiable by a
+    ``SimpleNamespace``: a receipt whose ``matches()`` always returned true, a
+    report with an empty ``blocking_dimensions``, a completeness object with the
+    right ``coverage_status`` string. Six fabricated objects were ready.
+    """
+    import types
+
+    from src.adapters.certification import assess_analytical_readiness
+    from src.adapters.errors import ThetaDataCertificationError
+
+    forged = types.SimpleNamespace(
+        normalization_matches=True,
+        settlement_established=True,
+        pricing_dimensions_unresolved=(),
+        universe="UNIVERSE_READY",
+        excluded_records=(),
+        capture_pipeline_fingerprint="a" * 64,
+        reading_pipeline_fingerprint="a" * 64,
+        derivation_failures=(),
+        matches=lambda *_: True,
+        blocking_dimensions=(),
+    )
+    with pytest.raises(ThetaDataCertificationError, match=r"(?i)VerifiedAnalytical"):
+        assess_analytical_readiness(forged)
+
+
 def test_analytical_readiness_requires_every_condition_it_names():
     """A complete universe is one of six, and alone it decides nothing."""
     from src.adapters.certification import (
         ANALYTICAL_DATASET_REQUIREMENTS,
         AnalyticalReadiness,
+        UniverseReadiness,
+        VerifiedAnalyticalEvidenceContext,
         assess_analytical_readiness,
     )
 
-    report = assess_analytical_readiness(completeness=measured())
+    report = assess_analytical_readiness(
+        VerifiedAnalyticalEvidenceContext(
+            normalization_matches=False,
+            settlement_established=False,
+            pricing_dimensions_unresolved=("DAY_COUNT",),
+            universe=UniverseReadiness.UNIVERSE_READY,
+            excluded_records=(),
+            capture_pipeline_fingerprint="",
+            reading_pipeline_fingerprint="",
+        )
+    )
     assert report.state is AnalyticalReadiness.NOT_ANALYTICALLY_READY
     assert "chain completeness is FULL_REQUEST_ENUMERATED" in report.satisfied
-    # A complete universe and no exclusions; the four remaining conditions were
-    # not established, and each is named rather than assumed.
     assert len(ANALYTICAL_DATASET_REQUIREMENTS) == 6
     joined = " ".join(report.blockers)
     for fragment in (
@@ -1450,18 +1561,22 @@ def test_analytical_readiness_requires_every_condition_it_names():
 
 
 def test_the_shipped_capture_is_not_analytically_ready():
-    """The honest state, and the reason: no verified full universe exists."""
+    """The honest state, derived from the capture rather than described."""
     from src.adapters.certification import (
         AnalyticalReadiness,
         assess_analytical_readiness,
+        build_analytical_evidence,
     )
 
     owned, _ = capture_with_universe()
-    report = assess_analytical_readiness(
-        completeness=owned.chain.completeness,
-        settlement_artifact=owned.settlement_artifact,
-        capture_pipeline_fingerprint=owned.pipeline.fingerprint(),
-        reading_pipeline_fingerprint=owned.pipeline.fingerprint(),
+    context = build_analytical_evidence(
+        pipeline=owned.pipeline,
+        chain=owned.chain,
+        manifest=owned.manifest,
+        store=owned.store,
+        artifact_store=owned.artifacts,
+        pricing_compatibility=owned.pipeline.pricing_compatibility,
     )
+    report = assess_analytical_readiness(context)
     assert report.state is AnalyticalReadiness.NOT_ANALYTICALLY_READY
     assert any("FULL_REQUEST_ENUMERATED" in blocker for blocker in report.blockers)

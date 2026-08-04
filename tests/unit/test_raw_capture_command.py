@@ -1,13 +1,20 @@
 """One executable path to the first paid session, and its safety rails.
 
-Until v2.1.11 there was no command. The documentation described
-``capture_and_compute`` and ``compute_gex``, which had been removed two releases
-earlier, so an operator following the instructions got an ``AttributeError`` --
-and the actual sequence (open a session, mark it, fetch, build a manifest,
-verify, scan) lived only inside the test fixtures.
+v2.1.11 added the command. v2.1.12 is about what it does when the session is
+real and something goes wrong, and about three things it was quietly getting
+wrong when nothing did:
 
-Every test here runs against the deterministic fake transport. **No test makes a
-network request**, and the dry-run tests do not even construct a transport.
+* it called ``HttpxTransport()`` with no arguments, so the connect timeout, the
+  read timeout, the response cap and the authentication in the YAML never
+  reached the wire;
+* it stamped ``LIVE_HTTP_CAPTURE`` on a capture taken through a local Theta
+  Terminal, because ``capture_origin_of`` read the class attribute and never
+  called ``origin_for``. The shipped profile points at ``127.0.0.1``;
+* an exception on the third endpoint left two endpoints' payloads on disk with
+  no manifest, no summary and no state.
+
+Every test here runs against the deterministic fake transport or against no
+transport at all. **No test makes a network request.**
 """
 
 from __future__ import annotations
@@ -19,9 +26,13 @@ import pytest
 
 from src.tools.capture_thetadata_once import (
     RAW_CAPTURE_RUN_SCHEMA_VERSION,
+    RUN_INTENT_SCHEMA_VERSION,
     CaptureRunError,
+    ExitCode,
+    RawCaptureRunState,
     build_parser,
     main,
+    new_run_id,
     plan_capture,
     run_capture,
 )
@@ -33,6 +44,7 @@ def test_the_dry_run_is_the_default(tmp_path):
     """A forgotten flag produces a report, not a bill."""
     args = build_parser().parse_args(["--output", str(tmp_path)])
     assert args.execute_live is False
+    assert args.debug is False
     assert args.config == CAPTURE_CONFIG
 
 
@@ -41,13 +53,208 @@ def test_the_output_path_is_required():
         build_parser().parse_args([])
 
 
-def test_a_dry_run_makes_no_network_call(tmp_path):
-    """The named regression, and the reason the default is a dry run.
+# =============================================================================
+# Â§1 -- the live transport is the configured one
+# =============================================================================
 
-    The dry run does not decline to use its transport; it is built with one that
-    *cannot* send, so "no request was made" is a property of the object rather
-    than of the control flow.
+
+def loaded_config(**overrides):
+    from src.config.schema import load_config
+
+    loaded = load_config(CAPTURE_CONFIG)
+    if not overrides:
+        return loaded
+    import dataclasses
+
+    from src.config.thetadata import AuthenticationMode
+
+    if "authentication_mode" in overrides:
+        overrides["authentication_mode"] = AuthenticationMode(
+            overrides["authentication_mode"]
+        )
+    return dataclasses.replace(
+        loaded, thetadata=dataclasses.replace(loaded.thetadata, **overrides)
+    )
+
+
+class _RecordingHttpx:
+    """Stands in for ``httpx`` inside ``HttpxTransport``.
+
+    The transport imports ``httpx`` lazily and hands the constructor arguments
+    to ``httpx.Client``. Watching that call is how a test can prove the
+    configured timeout reached the client without a socket existing anywhere.
     """
+
+    class Timeout:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class BasicAuth:
+        def __init__(self, username, password):
+            self.username = username
+            self.password = password
+
+    class HTTPError(Exception):
+        pass
+
+    def __init__(self):
+        self.client_kwargs = None
+
+    def Client(self, **kwargs):  # mirrors the httpx API
+        self.client_kwargs = kwargs
+        return self
+
+
+def built_transport(monkeypatch, **overrides):
+    """Build the real transport through the real factory, with a fake httpx."""
+    import src.adapters.transport as transport_module
+    from src.config.thetadata import build_thetadata_client
+
+    recording = _RecordingHttpx()
+    monkeypatch.setitem(__import__("sys").modules, "httpx", recording)
+    monkeypatch.setattr(
+        transport_module.HttpxTransport, "capture_origin", "LIVE_HTTP_CAPTURE"
+    )
+    client = build_thetadata_client(loaded_config(**overrides).thetadata)
+    return client, recording
+
+
+def test_the_configured_connect_timeout_reaches_the_real_transport(monkeypatch):
+    """The named regression. v2.1.11 constructed ``HttpxTransport()``."""
+    _, recording = built_transport(monkeypatch, connect_timeout_seconds=7.5)
+    assert recording.client_kwargs["timeout"].kwargs["connect"] == 7.5
+    assert recording.client_kwargs["timeout"].kwargs["pool"] == 7.5
+
+
+def test_the_configured_read_timeout_reaches_the_real_transport(monkeypatch):
+    _, recording = built_transport(monkeypatch, timeout_seconds=41.0)
+    assert recording.client_kwargs["timeout"].kwargs["read"] == 41.0
+    assert recording.client_kwargs["timeout"].kwargs["write"] == 41.0
+
+
+def test_the_configured_response_cap_reaches_the_real_transport(monkeypatch):
+    client, _ = built_transport(monkeypatch, max_response_bytes=4096)
+    inner = client.transport.inner
+    assert inner._max_response_bytes == 4096
+
+
+def test_configured_basic_auth_reaches_httpx(monkeypatch):
+    monkeypatch.setenv("THETADATA_USERNAME", "an-operator")
+    monkeypatch.setenv("THETADATA_PASSWORD", "not-in-any-report")
+    _, recording = built_transport(monkeypatch, authentication_mode="basic")
+    auth = recording.client_kwargs["auth"]
+    assert isinstance(auth, _RecordingHttpx.BasicAuth)
+    assert auth.username == "an-operator"
+
+
+def test_the_cli_does_not_instantiate_an_unconfigured_transport():
+    """The named regression, as a rule rather than one deleted line.
+
+    ``HttpxTransport()`` with no arguments is library defaults; the profile
+    states otherwise. The command must reach the wire through
+    ``build_thetadata_client``, which is where every other configured client
+    comes from.
+    """
+    import ast
+
+    source = pathlib.Path("src/tools/capture_thetadata_once.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    constructed = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "HttpxTransport"
+    ]
+    assert not constructed, "the CLI builds its own transport"
+
+
+def test_the_effective_transport_settings_are_reported_without_secrets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("THETADATA_USERNAME", "an-operator")
+    monkeypatch.setenv("THETADATA_PASSWORD", "not-in-any-report")
+    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    settings = report["effective_transport"]
+    for key in (
+        "base_url",
+        "authentication_mode",
+        "connect_timeout_seconds",
+        "read_timeout_seconds",
+        "max_response_bytes",
+        "max_retries",
+        "backoff_base_seconds",
+    ):
+        assert key in settings, key
+    rendered = json.dumps(report, default=str)
+    assert "not-in-any-report" not in rendered
+    assert "an-operator" not in rendered
+
+
+def test_a_base_url_with_embedded_credentials_is_redacted():
+    from src.config.thetadata import _safe_base_url
+
+    assert _safe_base_url("https://user:secret@vendor.example/v3") == (
+        "https://***@vendor.example/v3"
+    )
+    assert "secret" not in _safe_base_url("https://user:secret@vendor.example/v3")
+
+
+# =============================================================================
+# Â§2 -- the origin is derived from the destination
+# =============================================================================
+
+
+def test_the_shipped_profile_is_a_local_terminal_capture():
+    """The named regression.
+
+    ``config/thetadata_capture.yaml`` points at ``http://127.0.0.1:25503``. Both
+    a local terminal and a direct vendor call are live, and they fail
+    differently; a later claim about vendor behaviour rests on which one it was.
+    """
+    from src.adapters.raw_store import CaptureOrigin
+    from src.adapters.thetadata.client import capture_origin_of
+    from src.adapters.transport import HttpxTransport, RetryingTransport
+
+    base_url = loaded_config().thetadata.base_url
+    assert "127.0.0.1" in base_url
+
+    # Asked of the class, so no socket and no ``httpx`` is involved.
+    assert HttpxTransport.origin_for(base_url) == "LOCAL_TERMINAL_CAPTURE"
+
+    class _Local:
+        capture_origin = "LIVE_HTTP_CAPTURE"
+        origin_for = staticmethod(HttpxTransport.origin_for)
+
+    wrapped = RetryingTransport(_Local())
+    assert capture_origin_of(wrapped, base_url) is CaptureOrigin.LOCAL_TERMINAL_CAPTURE
+    # And a remote vendor URL through the same transport is not.
+    assert (
+        capture_origin_of(wrapped, "https://vendor.example/v3")
+        is CaptureOrigin.LIVE_HTTP_CAPTURE
+    )
+
+
+def test_the_dry_run_reports_the_origin_a_live_run_would_stamp(tmp_path):
+    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    assert report["expected_capture_origin"] == "LOCAL_TERMINAL_CAPTURE"
+
+
+def test_a_fixture_capture_is_still_an_offline_fixture(tmp_path):
+    report = live_run(tmp_path)
+    assert report["capture_origin"] == "OFFLINE_FIXTURE"
+
+
+# =============================================================================
+# Â§7 -- the dry run touches nothing
+# =============================================================================
+
+
+def test_a_dry_run_makes_no_network_call(tmp_path):
+    """The dry run does not decline to use its transport; it is built with one
+    that *cannot* send, so "no request was made" is a property of the object."""
     from src.tools.capture_thetadata_once import _NoTransport
 
     report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
@@ -59,39 +266,42 @@ def test_a_dry_run_makes_no_network_call(tmp_path):
         _NoTransport().get("http://127.0.0.1:25503/v3/option/snapshot/quote")
 
 
-def test_the_dry_run_prints_what_a_live_run_would_use(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
-    for key in (
-        "resolved_configuration",
-        "pipeline_fingerprint",
-        "capture_plan_fingerprint",
-        "required_endpoints",
-        "subscription_tier",
-        "raw_store_destination",
-        "capture_readiness",
-        "calculation_blockers",
-        "analytical_blockers",
-    ):
-        assert key in report, key
-    assert len(report["pipeline_fingerprint"]) == 64
-    assert len(report["capture_plan_fingerprint"]) == 64
-    assert report["required_endpoints"]
-    assert report["capture_readiness"] == "READY_FOR_RAW_CAPTURE_ONLY"
-    # The blockers that are *not* capture blockers are listed as themselves.
-    assert report["calculation_blockers"]
-    assert len(report["analytical_blockers"]) == 6
+def test_a_dry_run_creates_no_files_or_directories(tmp_path):
+    """The named regression.
+
+    v2.1.11 built a ``FileRawStore`` at the destination to check its
+    durability, leaving ``raw/`` and ``raw.health/`` behind -- so a dry run
+    created the directory that the following real run then refused as non-empty.
+    """
+    destination = tmp_path / "capture"
+    report = plan_capture(CAPTURE_CONFIG, output=str(destination))
+    assert report["wrote_files"] is False
+    assert not destination.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
 def test_a_live_run_requires_the_explicit_flag(tmp_path, capsys):
-    """The named regression: ``main`` without ``--execute-live`` sends nothing."""
     assert main(["--config", CAPTURE_CONFIG, "--output", str(tmp_path / "c")]) == 0
     printed = capsys.readouterr().out
     assert "DRY RUN" in printed
-    assert "nothing was sent" in printed
+    assert "nothing was sent and nothing was written" in printed
+    assert not (tmp_path / "c").exists()
+
+
+def test_a_dry_run_on_a_bad_destination_returns_nonzero(tmp_path, capsys):
+    """Printing a refusal and exiting 0 is a refusal nobody's script sees."""
+    inside = pathlib.Path(__file__).resolve().parents[2] / "artifacts" / "operator"
+    code = main(["--config", CAPTURE_CONFIG, "--output", str(inside)])
+    assert code == int(ExitCode.REFUSED)
+    assert "REFUSED" in capsys.readouterr().err
+
+
+# =============================================================================
+# Â§6 -- where a capture may go
+# =============================================================================
 
 
 def test_a_destination_inside_the_repository_is_refused():
-    """A paid capture in the checkout reaches `git status` and release archives."""
     inside = pathlib.Path(__file__).resolve().parents[2] / "artifacts" / "operator"
     with pytest.raises(CaptureRunError, match=r"(?i)inside the repository"):
         run_capture(CAPTURE_CONFIG, output=str(inside), transport=None)
@@ -102,14 +312,67 @@ def test_a_relative_destination_is_refused():
         run_capture(CAPTURE_CONFIG, output="capture-here", transport=None)
 
 
-def live_run(tmp_path, **overrides):
+def test_a_symlink_resolving_into_the_repository_is_refused(tmp_path):
+    """The named regression. v2.1.11 compared the literal path.
+
+    A link in a temporary directory pointing at the checkout passed the check,
+    and the paid capture landed in the working tree.
+    """
+    target = pathlib.Path(__file__).resolve().parents[2] / "artifacts"
+    link = tmp_path / "innocent-looking"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - needs privilege
+        pytest.skip("this platform does not allow creating symlinks here")
+    with pytest.raises(CaptureRunError, match=r"(?i)inside the repository|symlink"):
+        run_capture(CAPTURE_CONFIG, output=str(link), transport=None)
+
+
+def test_an_existing_nonempty_destination_is_refused(tmp_path):
+    destination = tmp_path / "used"
+    destination.mkdir()
+    (destination / "raw").mkdir()
+    with pytest.raises(CaptureRunError, match=r"(?i)already holds"):
+        run_capture(CAPTURE_CONFIG, output=str(destination), transport=None)
+
+
+def test_a_second_run_cannot_reuse_the_first_directory(tmp_path):
+    first = live_run(tmp_path)
+    assert pathlib.Path(first["intent_path"]).exists()
+    with pytest.raises(CaptureRunError, match=r"(?i)earlier run"):
+        live_run(tmp_path)
+
+
+def test_a_destination_that_is_a_file_is_refused(tmp_path):
+    target = tmp_path / "not-a-directory"
+    target.write_text("", encoding="utf-8")
+    with pytest.raises(CaptureRunError, match=r"(?i)not a directory"):
+        run_capture(CAPTURE_CONFIG, output=str(target), transport=None)
+
+
+def test_two_runs_in_the_same_second_get_different_ids():
+    """The named regression. Record ids are derived from the session id."""
+    from datetime import UTC, datetime
+
+    moment = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+    ids = {new_run_id(moment) for _ in range(64)}
+    assert len(ids) == 64
+    assert all(entry.startswith("capture-20260804T120000Z-") for entry in ids)
+
+
+# =============================================================================
+# Â§3/Â§5/Â§8 -- the lifecycle, and what a failure leaves behind
+# =============================================================================
+
+
+def live_run(tmp_path, *, transport=None, **overrides):
     """A full run against the deterministic fake transport."""
     from tests.certification_fixtures import AS_OF, vendor_transport
 
     return run_capture(
         CAPTURE_CONFIG,
         output=str(tmp_path / "capture"),
-        transport=vendor_transport(),
+        transport=transport if transport is not None else vendor_transport(),
         as_of=overrides.pop("as_of", AS_OF),
         **overrides,
     )
@@ -120,15 +383,31 @@ def test_a_live_run_captures_verifies_and_reports(tmp_path):
 
     assert report["schema_version"] == RAW_CAPTURE_RUN_SCHEMA_VERSION
     assert report["mode"] == "LIVE"
-    assert report["session_id"].startswith("capture-")
+    assert report["run_state"] == RawCaptureRunState.COMPLETED_VERIFIED.value
+    assert report["partial"] is False
+    assert report["run_id"].startswith("capture-")
     assert report["operation_id"]
     assert len(report["operation_fingerprint"]) == 64
     assert len(report["manifest_hash"]) == 64
     assert report["record_ids"]
     assert set(report["endpoint_status"].values()) == {200}
-    assert report["parser_version"]
     assert report["integrity_ok"] is True
     assert report["capture_verified"] is True, report["verification_failures"]
+    assert report["missing_endpoints"] == []
+
+
+def test_a_run_intent_is_written_before_the_first_request(tmp_path):
+    report = live_run(tmp_path)
+    intent = json.loads(pathlib.Path(report["intent_path"]).read_text(encoding="utf-8"))
+    assert intent["schema_version"] == RUN_INTENT_SCHEMA_VERSION
+    assert intent["run_state"] == RawCaptureRunState.PLANNED.value
+    assert intent["run_id"] == report["run_id"]
+    assert intent["operation_id"] == report["operation_id"]
+    assert intent["pipeline_fingerprint"] == report["pipeline_fingerprint"]
+    assert intent["capture_plan_fingerprint"] == report["capture_plan_fingerprint"]
+    assert intent["requested_endpoints"]
+    assert intent["started_at"]
+    assert intent["output_paths"]["raw"] == report["raw_store_path"]
 
 
 def test_a_live_run_writes_the_manifest_and_the_summary(tmp_path):
@@ -141,24 +420,207 @@ def test_a_live_run_writes_the_manifest_and_the_summary(tmp_path):
         pathlib.Path(report["summary_path"]).read_text(encoding="utf-8")
     )
     assert manifest["manifest_hash"] == report["manifest_hash"]
+    assert manifest["partial"] is False
     assert summary["record_ids"] == report["record_ids"]
-    # And the raw payloads are on disk, not only described.
     assert list(pathlib.Path(report["raw_store_path"]).rglob("*"))
 
 
-def test_the_capture_command_never_computes_a_trusted_gex(tmp_path):
+def test_top_level_reports_are_written_atomically():
+    """A killed process must not leave a syntactically valid half-document."""
+    import ast
+
+    tree = ast.parse(
+        pathlib.Path("src/tools/capture_thetadata_once.py").read_text(encoding="utf-8")
+    )
+    writer = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_write_json"
+    )
+    calls = {
+        node.func.attr
+        for node in ast.walk(writer)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "replace" in calls, "the report is renamed into place"
+    assert "mkstemp" in calls, "the body is written to a temporary file first"
+    assert "fsync" in calls, "the bytes are on the platter before the rename"
+    # And nothing writes a report by opening the destination directly.
+    assert "write_text" not in calls
+
+
+class _FailingTransport:
+    """The index answers; the quote endpoint returns 500 every time."""
+
+    capture_origin = "OFFLINE_FIXTURE"
+
+    def __init__(self, failing: str, payloads):
+        self._failing = failing
+        self._payloads = payloads
+        self.calls: list[str] = []
+
+    def origin_for(self, url: str) -> str:
+        return self.capture_origin
+
+    def get(self, url, params, timeout_seconds):
+        from src.adapters.transport import HttpResponse
+
+        path = ("/" + url.split("://", 1)[1].partition("/")[2]).partition("?")[0]
+        self.calls.append(path)
+        if path == self._failing:
+            return HttpResponse(
+                status_code=500,
+                text="vendor is unwell: upstream pricing service unavailable",
+                headers={"content-type": "text/plain", "retry-after": "1"},
+                url=url,
+            )
+        return HttpResponse(
+            status_code=200, text=self._payloads[path], headers={}, url=url
+        )
+
+
+def failing_run(tmp_path):
+    from src.adapters.thetadata.endpoints import Endpoint
+    from tests.certification_fixtures import AS_OF, payloads
+
+    bodies = {endpoint.value: text for endpoint, text in payloads().items()}
+    transport = _FailingTransport(Endpoint.OPTION_QUOTE_SNAPSHOT.value, bodies)
+    return (
+        run_capture(
+            CAPTURE_CONFIG,
+            output=str(tmp_path / "capture"),
+            transport=transport,
+            as_of=AS_OF,
+        ),
+        transport,
+    )
+
+
+def test_a_partial_failure_still_writes_a_manifest_and_a_summary(tmp_path):
+    """The named regression, end to end.
+
+    v2.1.11 let the exception out of ``run_capture``. The index snapshot was on
+    disk, nothing described it, and no state said whether the run had started.
+    """
+    report, _ = failing_run(tmp_path)
+
+    assert report["run_state"] == RawCaptureRunState.FAILED_PARTIAL.value
+    assert report["partial"] is True
+    assert report["error_code"] in ("RETRY_EXHAUSTED", "VENDOR_HTTP_ERROR")
+    assert report["error_message"]
+    assert "/v3/option/snapshot/quote" in report["missing_endpoints"]
+    assert "/v3/index/snapshot/price" in report["completed_endpoints"]
+
+    manifest_path = pathlib.Path(report["manifest_path"])
+    summary_path = pathlib.Path(report["summary_path"])
+    assert manifest_path.exists()
+    assert summary_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["partial"] is True
+
+    # The index bytes really are there, and the partial manifest does not verify.
+    assert report["record_ids"]
+    assert report["capture_verified"] is False
+    assert report["trusted_gex_computed"] is False
+
+
+def test_a_partial_failure_preserves_the_failed_attempt_bodies(tmp_path):
     """The named regression.
 
-    Eight load-bearing vendor conventions are unknown; a number from these bytes
-    would have no stated meaning. Comparing them is what the capture is *for*.
+    A retryable 500 is consumed inside ``RetryingTransport``. Until v2.1.12 the
+    body naming *why* the vendor refused was the one response nobody kept, while
+    the documentation said every response was preserved.
     """
+    report, _ = failing_run(tmp_path)
+
+    attempts = report["http_attempts"]
+    assert attempts["failed_attempt_count"] >= 2
+    assert attempts["bodies_preserved"] >= 2
+
+    failed = [a for a in attempts["attempts"] if not a["succeeded"]]
+    assert all(a["status_code"] == 500 for a in failed)
+    assert all(a["retryable"] for a in failed)
+    # The header subset survives, and the body is on disk and readable.
+    assert failed[0]["response_headers"]["retry-after"] == "1"
+    body = pathlib.Path(failed[0]["response_body_location"]).read_text(encoding="utf-8")
+    assert "upstream pricing service unavailable" in body
+    # Attempt numbers, so an operator can see the retry budget being spent.
+    assert sorted(a["attempt_number"] for a in failed) == list(
+        range(1, len(failed) + 1)
+    )
+
+
+def test_failed_attempts_are_not_chain_data(tmp_path):
+    """A preserved 500 body is evidence about a failure and nothing else."""
+    report, _ = failing_run(tmp_path)
+
+    attempts_root = pathlib.Path(report["attempt_store_path"])
+    raw_root = pathlib.Path(report["raw_store_path"])
+    assert attempts_root.exists()
+    assert attempts_root not in raw_root.parents
+    # No manifest record points at an attempt body.
+    manifest = json.loads(
+        pathlib.Path(report["manifest_path"]).read_text(encoding="utf-8")
+    )
+    for record in manifest["records"]:
+        assert record["http_status"] == 200
+
+
+def test_a_failed_run_returns_a_documented_nonzero_exit_code(tmp_path, capsys):
+    from src.adapters.thetadata.endpoints import Endpoint
+    from tests.certification_fixtures import payloads
+
+    bodies = {endpoint.value: text for endpoint, text in payloads().items()}
+    transport = _FailingTransport(Endpoint.OPTION_QUOTE_SNAPSHOT.value, bodies)
+
+    import src.tools.capture_thetadata_once as tool
+
+    original = tool.run_capture
+    destination = tmp_path / "capture"
+
+    def with_fake(config_path, **kwargs):
+        return original(config_path, **{**kwargs, "transport": transport})
+
+    tool.run_capture = with_fake
+    try:
+        code = main(
+            [
+                "--config",
+                CAPTURE_CONFIG,
+                "--output",
+                str(destination),
+                "--execute-live",
+            ]
+        )
+    finally:
+        tool.run_capture = original
+
+    assert code == int(ExitCode.RETRY_EXHAUSTED)
+    err = capsys.readouterr().err
+    assert "RETRY_EXHAUSTED" in err
+    assert "failure summary written to" in err
+    assert (destination / "capture-summary.json").exists()
+
+
+def test_every_exit_code_is_distinct_and_documented():
+    values = [code.value for code in ExitCode]
+    assert len(values) == len(set(values))
+    assert ExitCode.OK.value == 0
+    assert all(code.value > 0 for code in ExitCode if code is not ExitCode.OK)
+
+
+# =============================================================================
+# The standing guarantees
+# =============================================================================
+
+
+def test_the_capture_command_never_computes_a_trusted_gex(tmp_path):
+    """Eight load-bearing vendor conventions are unknown; a number from these
+    bytes would have no stated meaning."""
     report = live_run(tmp_path)
     assert report["trusted_gex_computed"] is False
     assert report["orders_placed"] == 0
 
-    # AST rather than text, so a report key named ``would_compute_trusted_gex``
-    # is not mistaken for a call to one. What matters is that no calculation is
-    # invoked, not that the words are absent.
     import ast
 
     tree = ast.parse(
@@ -177,10 +639,8 @@ def test_the_capture_command_never_computes_a_trusted_gex(tmp_path):
 def test_the_capture_is_permanently_raw_only(tmp_path):
     """It establishes no settlement rule, so no later call can make it trusted.
 
-    Not an omission. Which session open interest settled in decides the weight
-    on every GEX term, and this run is not in a position to decide it -- the
-    rule is chosen when a session opens and there is no argument through which
-    it can be supplied afterwards (OD-26).
+    Which session open interest settled in decides the weight on every GEX term,
+    and the rule is chosen when a session opens (OD-26).
     """
     report = live_run(tmp_path)
     manifest = json.loads(

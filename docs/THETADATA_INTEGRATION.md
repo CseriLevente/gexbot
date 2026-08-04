@@ -343,23 +343,112 @@ python -m src.tools.capture_thetadata_once \
   --execute-live
 ```
 
-The dry run prints the resolved configuration, the pipeline fingerprint, the
+The dry run prints the resolved configuration, the **effective transport
+settings**, the expected capture origin, the pipeline fingerprint, the
 capture-plan fingerprint, the required endpoints, the subscription tier, the
-raw-store destination, the capture readiness, and the calculation and analytical
+destinations, the capture readiness, and the calculation and analytical
 blockers. It builds the pipeline with a transport whose every method raises, so
 "no request was made" is a property of the object rather than of the control
-flow.
+flow — and **it writes nothing**: the store capability is probed in a temporary
+directory that is deleted before it returns, so the requested destination does
+not exist afterwards unless it existed before.
 
-The live run opens one capture operation, fetches the index snapshot, the option
-quotes, the open interest and the first-order greeks, preserves every response,
-writes `manifest.json` and `capture-summary.json`, scans the store for integrity
-and verifies the manifest against it. Then it prints the session id, the
-operation id, the manifest hash, the record ids, the per-endpoint status, the
-parser version and where everything went.
+An invalid destination makes the dry run exit non-zero. Printing a refusal and
+exiting 0 is a refusal nobody's script sees.
 
-It refuses an output directory inside this repository. v2.1.5 shipped 573
-fixture payloads in a release archive because a capture was written into the
-namespace the checkout manages.
+The live run writes `run-intent.json` *before the first request*, opens one
+capture operation, fetches the index snapshot, the option quotes, the open
+interest and the first-order greeks, preserves every response **and every
+retried attempt**, writes `manifest.json` and `capture-summary.json`, scans the
+store for integrity and verifies the manifest against it.
+
+### The effective transport
+
+The live command builds its transport through `build_thetadata_client`, the same
+factory every other configured client comes from, so the connect timeout, the
+read timeout, the response cap and the authentication in the profile are what
+reaches the wire. Until v2.1.12 the command called `HttpxTransport()` with no
+arguments — library defaults, while the YAML said otherwise.
+
+Both reports carry the effective settings: base URL with any embedded userinfo
+replaced, authentication mode, whether credentials resolved and from which
+environment variables, connect timeout, read timeout, maximum response bytes,
+retry count and backoff. **No credential value is ever written.**
+
+### Local terminal versus remote vendor
+
+`config/thetadata_capture.yaml` points at `http://127.0.0.1:25503`, a local Theta
+Terminal, and the capture is stamped `LOCAL_TERMINAL_CAPTURE`. A direct vendor
+URL is stamped `LIVE_HTTP_CAPTURE`. Both are live and they fail differently, and
+any later claim about vendor behaviour rests on knowing which produced the bytes.
+Until v2.1.12 the origin was read off a class attribute and every capture,
+including a local one, was stamped `LIVE_HTTP_CAPTURE`.
+
+### Where a capture may go
+
+The destination is resolved with symlinks followed and refused if it is inside
+this repository, a symlink, an existing file, or a directory that already holds
+anything — including one that holds a `run-intent.json`, which belongs to an
+earlier run. **v2.1.12 has no resume**: give each run its own directory.
+
+v2.1.5 shipped 573 fixture payloads in a release archive because a capture was
+written into the namespace the checkout manages; v2.1.11 compared the literal
+path, so a symlink pointing at the checkout got through.
+
+Run ids are `capture-<timestamp>-<nonce>`. Record ids derive from the session
+id, and two runs started in the same second used to collide.
+
+### What a failure leaves behind
+
+Every exit path writes a manifest and a summary. A vendor 500 on the third
+endpoint leaves the first two endpoints' bytes on disk with a **partial**
+manifest that identifies itself as partial and cannot pass `verify_capture` —
+it is missing endpoints the plan requires, which is the check that should refuse
+it. Nothing is deleted automatically.
+
+| File | When |
+|---|---|
+| `run-intent.json` | before the first request |
+| `raw/` | as each response arrives |
+| `attempts/` | every HTTP attempt's body, content-addressed |
+| `artifacts/` | capture-bound artifacts |
+| `manifest.json` | at the end, success or failure |
+| `capture-summary.json` | at the end, success or failure |
+
+All three top-level documents are written to a temporary file, fsynced and
+renamed, so an interrupted process cannot leave a plausible-looking half-JSON.
+
+### Retried attempts are preserved
+
+`RetryingTransport` consumes a retryable 429 or 503 body, logs a warning and
+tries again. Until v2.1.12 those bodies were dropped — so the responses that
+would explain a partial capture were the ones nobody kept, while this page said
+every response was preserved. An attempt observer inside the retry loop now
+records one entry per attempt (endpoint, attempt number, safe URL, parameter
+hash, timings, status, a safe header subset, body hash and location, or a
+transport error code where there was no response) and writes the bodies
+content-addressed under `attempts/`.
+
+**Attempt bodies are not chain data.** The raw store holds the responses a
+snapshot was built from; a preserved 500 is evidence about a failure.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | every endpoint answered and the capture verified |
+| 1 | every endpoint answered and verification or integrity did not pass |
+| 2 | refused before sending: destination, readiness, unusable profile |
+| 3 | configuration error |
+| 4 | the `http` extra is not installed |
+| 5 | the configured credential environment variables are unset or empty |
+| 6 | the vendor could not be reached |
+| 7 | reached, and the retry budget was spent |
+| 8 | a response did not have the shape this parser reads |
+| 9 | the raw store or the artifact store could not do its job |
+| 10 | an unexpected internal error; `--debug` prints the traceback |
+
+No secret is printed on any path, and a failure names the summary it wrote.
 
 **It computes no GEX.** Eight load-bearing vendor conventions are unknown, so a
 number from these bytes would have no stated meaning -- and comparing those

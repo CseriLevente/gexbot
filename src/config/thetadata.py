@@ -1048,6 +1048,7 @@ def build_thetadata_client(
     *,
     transport: Any = None,
     clock: Any = None,
+    attempt_observer: Any = None,
 ) -> ThetaDataClient:
     """The one sanctioned way to construct a configured client.
 
@@ -1086,6 +1087,10 @@ def build_thetadata_client(
             backoff_base_seconds=config.backoff_base_seconds,
         ),
         max_response_bytes=config.max_response_bytes,
+        # Every attempt, not only the one that succeeded. A retryable 429 or 503
+        # body is consumed inside the retry loop, so without this the responses
+        # that explain a partial capture are exactly the ones nobody keeps.
+        attempt_observer=attempt_observer,
     )
 
     store = (
@@ -1119,6 +1124,47 @@ def build_thetadata_client(
         raw_store=store,
         clock=clock,
     )
+
+
+def effective_transport_settings(config: ThetaDataConfig) -> dict[str, Any]:
+    """What the configured transport will actually use, with no secrets in it.
+
+    Derived from the same ``httpx_transport_kwargs`` the real transport is
+    constructed from, so a report of the effective settings cannot drift from
+    the settings. Credentials are reported as *whether* they resolved and from
+    which environment variable, never as values: an operator needs to know that
+    authentication is configured, and a report is a file.
+    """
+    kwargs = httpx_transport_kwargs(config)
+    username, _ = config.resolved_credentials()
+    return {
+        "base_url": _safe_base_url(config.base_url),
+        "authentication_mode": config.authentication_mode.value,
+        "credentials_resolved": bool(kwargs["basic_auth"]),
+        "username_env": config.username_env or "THETADATA_USERNAME",
+        "password_env": config.password_env or "THETADATA_PASSWORD",
+        "username_present": bool(username),
+        "connect_timeout_seconds": kwargs["connect_timeout_seconds"],
+        "read_timeout_seconds": kwargs["read_timeout_seconds"],
+        "max_response_bytes": kwargs["max_response_bytes"],
+        "max_retries": config.max_retries,
+        "backoff_base_seconds": config.backoff_base_seconds,
+    }
+
+
+def _safe_base_url(url: str) -> str:
+    """A base URL with any embedded userinfo removed.
+
+    ``https://user:secret@host/`` is a legal URL and a credential leak the
+    moment it reaches a report.
+    """
+    text = str(url or "")
+    scheme, separator, remainder = text.partition("://")
+    if not separator or "@" not in remainder.partition("/")[0]:
+        return text
+    authority, _, path = remainder.partition("/")
+    host = authority.rpartition("@")[2]
+    return f"{scheme}://***@{host}" + (f"/{path}" if path else "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1156,12 +1202,18 @@ class ThetaDataRuntime:
         symbol: str = "SPXW",
         transport: Any = None,
         clock: Any = None,
+        attempt_observer: Any = None,
     ) -> ThetaDataRuntime:
         """The one sanctioned entry point. Nothing else assembles a session."""
         from src.adapters.thetadata.client import ChainRequest
 
         return cls(
-            client=build_thetadata_client(config, transport=transport, clock=clock),
+            client=build_thetadata_client(
+                config,
+                transport=transport,
+                clock=clock,
+                attempt_observer=attempt_observer,
+            ),
             default_chain_request=ChainRequest(
                 symbol=symbol,
                 max_dte=config.max_dte,
@@ -1279,7 +1331,9 @@ class ThetaDataRuntime:
                 session_id=new_capture_session_id(as_of=as_of),
                 # Read off the transport actually in use, so an offline fixture
                 # cannot present itself as a live capture.
-                capture_origin=capture_origin_of(self.client.transport),
+                capture_origin=capture_origin_of(
+                    self.client.transport, self.client.settings.base_url
+                ),
             )
 
         chain = self.client.fetch_chain(

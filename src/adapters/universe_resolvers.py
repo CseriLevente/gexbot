@@ -52,7 +52,9 @@ from typing import Any
 from src.adapters.errors import ThetaDataProvenanceError
 from src.adapters.thetadata.endpoints import capabilities_of
 from src.adapters.universe_evidence import (
+    UniverseDocumentationEvidenceArtifact,
     UniverseExtractionArtifact,
+    build_documentation_evidence,
     read_pagination_metadata,
 )
 from src.domain.completeness import ContractIdentity, contract_identity
@@ -72,12 +74,15 @@ __all__ = [
     "CONTRACT_SET_PARAMETERS",
     "DEFAULT_MAX_UNIVERSE_AGE",
     "IDENTITY_COLUMNS",
+    "ParameterDifference",
     "PipelineCompatibilityPolicy",
     "ResolvedExpectedUniverse",
     "UniverseOnlyCompatibilityRule",
     "VerifiedUniverseSource",
     "check_source_compatibility",
+    "derive_parameter_diff",
     "derive_source_scope",
+    "diff_fingerprint",
     "resolve_expected_universe",
     "verification_receipt",
 ]
@@ -122,27 +127,102 @@ class PipelineCompatibilityPolicy(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ParameterDifference:
+    """One configuration key on which two pipelines disagree."""
+
+    key: str
+    source_value: str
+    target_value: str
+
+    @property
+    def affects_contract_set(self) -> bool:
+        """Whether this key decides *which contracts* a request returns."""
+        leaf = self.key.rsplit(".", 1)[-1]
+        return leaf in CONTRACT_SET_PARAMETERS or leaf in ("root",)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "source_value": self.source_value,
+            "target_value": self.target_value,
+            "affects_contract_set": self.affects_contract_set,
+        }
+
+
+def _flatten(payload: Any, prefix: str = "") -> dict[str, str]:
+    """A configuration as ``dotted.key -> rendered value`` pairs.
+
+    Rendered as text on both sides for the same reason the request spec is:
+    ``4.2`` and ``"4.2"`` are the same setting, and a diff that reported an
+    int/float distinction would bury the differences that matter.
+    """
+    import json
+
+    if isinstance(payload, dict):
+        flat: dict[str, str] = {}
+        for key, value in payload.items():
+            flat.update(_flatten(value, f"{prefix}.{key}" if prefix else str(key)))
+        return flat
+    if isinstance(payload, list | tuple):
+        return {
+            prefix: json.dumps(
+                list(payload), sort_keys=True, separators=(",", ":"), default=str
+            )
+        }
+    return {prefix: "" if payload is None else str(payload)}
+
+
+def derive_parameter_diff(
+    source_configuration: dict[str, Any], target_configuration: dict[str, Any]
+) -> tuple[ParameterDifference, ...]:
+    """Every key on which two pipeline configurations actually differ.
+
+    Computed, not stated. v2.1.11 took ``differing_parameters`` from the caller
+    and checked only the names it was given, so a waiver claiming "these two
+    differ only in ``timeout_seconds``" was accepted on the strength of the
+    claim -- including when the real difference was ``min_time``, which decides
+    which contracts come back.
+    """
+    left = _flatten(source_configuration)
+    right = _flatten(target_configuration)
+    return tuple(
+        ParameterDifference(
+            key=key, source_value=left.get(key, ""), target_value=right.get(key, "")
+        )
+        for key in sorted(set(left) | set(right))
+        if left.get(key) != right.get(key)
+    )
+
+
+def diff_fingerprint(diff: tuple[ParameterDifference, ...]) -> str:
+    """The digest an operator approves. Over the derived diff, never a claim."""
+    return digest_of([entry.as_dict() for entry in diff])
+
+
+@dataclass(frozen=True, slots=True)
 class UniverseOnlyCompatibilityRule:
-    """A written statement that two pipelines ask the same *contract* question.
+    """An operator approving a **derived** difference between two pipelines.
 
     Enumerating a universe under one configuration and capturing a chain under
-    another is legitimate -- a listing sweep may use a longer timeout or a
-    different rate parameter without changing which contracts come back. Saying
-    so has to be deliberate and specific, which is what this is: it names both
-    fingerprints and every parameter that differs, and refuses at construction
-    if any of them is one that decides the contract set.
+    another is legitimate -- a listing sweep may use a longer timeout without
+    changing which contracts come back. Saying so has to be deliberate, and in
+    v2.1.11 it was also *unchecked*: the rule took ``differing_parameters`` from
+    the caller, and the caller was the one asking for the waiver. Two pipelines
+    whose real difference was ``min_time`` were waived by a rule naming
+    ``timeout_seconds``.
+
+    So the difference is computed from the two configurations and this carries
+    only its digest. A caller may approve what the comparison found; a caller
+    cannot state what it found.
     """
 
     rule_id: str
     source_pipeline_fingerprint: str
     target_pipeline_fingerprint: str
-    differing_parameters: tuple[str, ...]
+    approved_diff_hash: str
     rationale: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "differing_parameters", tuple(sorted(self.differing_parameters))
-        )
         for name in ("rule_id", "rationale"):
             if not str(getattr(self, name)).strip():
                 raise ThetaDataProvenanceError(
@@ -152,23 +232,15 @@ class UniverseOnlyCompatibilityRule:
         for fingerprint in (
             self.source_pipeline_fingerprint,
             self.target_pipeline_fingerprint,
+            self.approved_diff_hash,
         ):
             if len(fingerprint) != 64:
                 raise ThetaDataProvenanceError(
                     "a universe-only compatibility rule must name both full "
-                    "pipeline fingerprints; a waiver that does not say which "
+                    "pipeline fingerprints and the full digest of the derived "
+                    "difference it approves; a waiver that does not say which "
                     "two configurations it covers covers all of them"
                 )
-        forbidden = sorted(
-            set(self.differing_parameters) & set(CONTRACT_SET_PARAMETERS)
-        )
-        if forbidden:
-            raise ThetaDataProvenanceError(
-                f"{forbidden} decide which contracts a request returns, so a "
-                "difference in them is not universe-only. A universe captured "
-                "under min_time=15:30:00 enumerates the contracts that traded "
-                "after 15:30, and it re-derives perfectly."
-            )
 
     def permits(self, *, source: str, target: str) -> bool:
         return (
@@ -211,6 +283,14 @@ class ResolvedExpectedUniverse:
     #: so the capture can persist it: recovery must be able to re-check the
     #: reading without the registry that was populated in another process.
     extraction: UniverseExtractionArtifact | None = None
+    #: The portable form of the whole documentation resolution -- the rule with
+    #: no host path, the digest of the verified bytes, and the extraction. What
+    #: v2.1.11 lacked, which is why a resolution made with a caller's registry
+    #: could not be re-run by ``capture_session``.
+    documentation_evidence: UniverseDocumentationEvidenceArtifact | None = None
+    #: The exact bytes the extractor read. Carried in memory for the capture's
+    #: revalidation and persisted content-addressed for recovery.
+    document_text: str | None = None
 
     @property
     def established(self) -> bool:
@@ -237,6 +317,11 @@ class ResolvedExpectedUniverse:
             "derived_identity_count": len(self.derived_identities),
             "artifact": self.artifact.as_dict() if self.artifact else None,
             "extraction": self.extraction.as_dict() if self.extraction else None,
+            "documentation_evidence": (
+                self.documentation_evidence.as_dict()
+                if self.documentation_evidence
+                else None
+            ),
         }
 
 
@@ -254,6 +339,8 @@ def resolve_expected_universe(
     registry: Any = None,
     session_date: date | None = None,
     extraction: UniverseExtractionArtifact | None = None,
+    documentation_evidence: UniverseDocumentationEvidenceArtifact | None = None,
+    document_text: str | None = None,
 ) -> ResolvedExpectedUniverse:
     """Establish what a declaration actually covers, or say why nothing follows.
 
@@ -281,6 +368,8 @@ def resolve_expected_universe(
             registry=registry,
             session_date=session_date,
             extraction=extraction,
+            documentation_evidence=documentation_evidence,
+            document_text=document_text,
         )
 
     source = verified_universe_source(
@@ -337,6 +426,8 @@ def _resolve_documented(
     registry: Any,
     session_date: date | None,
     extraction: UniverseExtractionArtifact | None,
+    documentation_evidence: UniverseDocumentationEvidenceArtifact | None = None,
+    document_text: str | None = None,
 ) -> ResolvedExpectedUniverse:
     """A universe a versioned extractor read out of a verified document.
 
@@ -344,23 +435,37 @@ def _resolve_documented(
     registry (which was the v2.1.10 fix), took ``rule.identities`` -- a
     caller-supplied list sitting beside a genuine document hash -- never checked
     the rule's effective period, and dated the result from the declaration.
+
+    v2.1.12 adds the *re-run* path. When ``documentation_evidence`` is supplied
+    the rule is rebuilt from it and the bytes come from ``document_text``, so no
+    registry is consulted at all -- which is what lets ``capture_session``
+    re-derive a resolution a caller made with its own registry, and lets
+    recovery work in a process where the global registry is empty.
     """
     from src.adapters.universe_evidence import UNIVERSE_DOCUMENTATION_RULES
 
-    rules = registry if registry is not None else UNIVERSE_DOCUMENTATION_RULES
     evidence_id = (universe.documentation_evidence_id or "").strip()
-    if not hasattr(rules, "get"):
-        return _failed(f"{type(rules).__name__} is not a universe rule registry")
-
-    rule = rules.get(evidence_id)
-    if rule is None:
-        return _failed(
-            f"{evidence_id!r} is not a registered *universe* documentation rule. "
-            "A settlement-convention document is content-verified and says "
-            "nothing about which contracts exist; looking one up here is how "
-            "v2.1.9 let it define a universe. "
-            f"Registered universe ids: {list(rules.registered_ids())}"
-        )
+    if documentation_evidence is not None:
+        if documentation_evidence.evidence_id != evidence_id:
+            return _failed(
+                f"the supplied documentation evidence is for "
+                f"{documentation_evidence.evidence_id!r} and this universe names "
+                f"{evidence_id!r}"
+            )
+        rule: Any = documentation_evidence.rule
+    else:
+        rules = registry if registry is not None else UNIVERSE_DOCUMENTATION_RULES
+        if not hasattr(rules, "get"):
+            return _failed(f"{type(rules).__name__} is not a universe rule registry")
+        rule = rules.get(evidence_id)
+        if rule is None:
+            return _failed(
+                f"{evidence_id!r} is not a registered *universe* documentation "
+                "rule. A settlement-convention document is content-verified and "
+                "says nothing about which contracts exist; looking one up here is "
+                "how v2.1.9 let it define a universe. "
+                f"Registered universe ids: {list(rules.registered_ids())}"
+            )
     if not rule.established:
         return _failed(
             f"universe rule {evidence_id!r} has not been content verified; a "
@@ -383,12 +488,13 @@ def _resolve_documented(
         )
 
     try:
+        text = document_text if document_text is not None else rule.document_text()
         if extraction is None:
             from datetime import UTC
 
-            read = rule.extract(executed_at=datetime.now(UTC))
+            read = rule.extract(executed_at=datetime.now(UTC), document_text=text)
         else:
-            mismatches = rule.confirm(extraction)
+            mismatches = rule.confirm(extraction, document_text=text)
             if mismatches:
                 return _failed("; ".join(mismatches))
             read = extraction
@@ -405,6 +511,11 @@ def _resolve_documented(
             tuple(sorted(read.identities)),
         )
 
+    evidence = (
+        documentation_evidence
+        if documentation_evidence is not None
+        else build_documentation_evidence(rule, read, document_text=text)
+    )
     return ResolvedExpectedUniverse(
         artifact=VerifiedExpectedUniverseArtifact(
             identities=read.identities,
@@ -422,9 +533,12 @@ def _resolve_documented(
             evidence_fingerprint=read.fingerprint,
             declaration_hash=universe.declaration_hash,
             documentation_evidence_id=evidence_id,
+            documentation_evidence_hash=evidence.artifact_hash,
         ),
         derived_identities=tuple(sorted(read.identities)),
         extraction=read,
+        documentation_evidence=evidence,
+        document_text=text,
     )
 
 
@@ -941,6 +1055,8 @@ def check_source_compatibility(
         PipelineCompatibilityPolicy.IDENTICAL_PIPELINE
     ),
     waiver: UniverseOnlyCompatibilityRule | None = None,
+    source_configuration: dict[str, Any] | None = None,
+    target_configuration: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
     """Every reason this universe cannot serve this chain.
 
@@ -983,6 +1099,8 @@ def check_source_compatibility(
             chain_pipeline_fingerprint=chain_pipeline_fingerprint,
             policy=policy,
             waiver=waiver,
+            source_configuration=source_configuration,
+            target_configuration=target_configuration,
         )
     )
 
@@ -1002,6 +1120,8 @@ def _pipeline_reasons(
     chain_pipeline_fingerprint: str,
     policy: PipelineCompatibilityPolicy,
     waiver: UniverseOnlyCompatibilityRule | None,
+    source_configuration: dict[str, Any] | None = None,
+    target_configuration: dict[str, Any] | None = None,
 ) -> list[str]:
     """Whether the source's pipeline may stand in for the chain's."""
     source = artifact.source_pipeline_fingerprint
@@ -1043,6 +1163,29 @@ def _pipeline_reasons(
             f"compatibility rule {waiver.rule_id!r} covers "
             f"{waiver.source_pipeline_fingerprint[:12]}... against "
             f"{waiver.target_pipeline_fingerprint[:12]}..., not this pair"
+        ]
+    if source_configuration is None or target_configuration is None:
+        return [
+            "a universe-only waiver was supplied and the two pipeline "
+            "configurations were not, so what they actually differ in was never "
+            "computed. v2.1.11 took the difference from the caller asking for "
+            "the waiver."
+        ]
+    diff = derive_parameter_diff(source_configuration, target_configuration)
+    blocking = [entry for entry in diff if entry.affects_contract_set]
+    if blocking:
+        return [
+            "the two configurations differ in "
+            f"{[entry.key for entry in blocking]}, which decide which contracts "
+            "a request returns, so the difference is not universe-only whatever "
+            f"rule {waiver.rule_id!r} says"
+        ]
+    derived = diff_fingerprint(diff)
+    if derived != waiver.approved_diff_hash:
+        return [
+            f"compatibility rule {waiver.rule_id!r} approves difference "
+            f"{waiver.approved_diff_hash[:12]}... and these two configurations "
+            f"differ by {derived[:12]}... in {[entry.key for entry in diff]}"
         ]
     return []
 

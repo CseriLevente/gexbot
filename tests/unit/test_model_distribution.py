@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.11"
+    assert package["project"]["version"] == "2.1.12"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine and parser stay at 2.1.10: v2.1.11 changed what a universe has
@@ -313,12 +313,17 @@ def test_all_three_versions_are_documented():
     # consults, so every schema this release touched is in it.
     assert "settlement-evidence/2.1.10" in text
     for version in (
+        # v2.1.11 schemas whose meaning did not change again.
         "expected-universe/2.1.11",
-        "universe-resolver/2.1.11",
-        "adapter-certification/2.1.11",
-        "universe-documentation/2.1.11",
         "universe-extraction/2.1.11",
         "capture-verification/2.1.11",
-        "raw-capture-run/2.1.11",
+        # v2.1.12.
+        "universe-resolver/2.1.12",
+        "adapter-certification/2.1.12",
+        "universe-documentation/2.1.12",
+        "raw-capture-run/2.1.12",
+        "raw-capture-intent/2.1.12",
+        "http-attempt/2.1.12",
+        "analytical-readiness/2.1.12",
     ):
         assert version in text, version

@@ -1,5 +1,78 @@
 # Changelog
 
+## 2.1.12 - the first real session, and two evidence-recovery gaps
+
+One objective: make the first raw-only ThetaData session operationally safe,
+fully configured, failure-preserving and honestly attributed. Plus the two
+evidence gaps the v2.1.11 review found.
+
+The operator command shipped in v2.1.11. Reviewing it against a session that
+actually happens found three things it was quietly getting wrong when nothing
+went wrong, and one thing it did badly when something did.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.11 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | The CLI called `HttpxTransport()` with no arguments | The connect timeout, read timeout, response cap and authentication in the profile never reached the wire; the first paid session would have run on library defaults | The command builds nothing. `build_thetadata_client` constructs the configured transport, and both reports carry the effective settings with no credential value in them |
+| 2 | `capture_origin_of` read a class attribute | `HttpxTransport.origin_for` distinguished a local Theta Terminal from a vendor call and nothing called it, so the shipped profile — which points at `127.0.0.1` — would have stamped every record `LIVE_HTTP_CAPTURE` | The origin is derived from the effective base URL and bound to the records, the manifest, the summary and the intent |
+| 3 | Retryable non-2xx bodies were consumed inside the retry loop | The 429 naming a quota and the 503 naming a maintenance window were exactly the responses that would explain a partial capture, and they were the ones nobody kept — while the docs said every response was preserved | An attempt observer inside `RetryingTransport`; `HttpAttemptRecord` per attempt, bodies content-addressed under `attempts/`, counts in the summary |
+| 4 | An exception left raw files with no manifest | Two endpoints' bytes on disk, nothing describing them, and no state saying whether the run had started | `RawCaptureRunState`, a `run-intent.json` written before the first request, and a manifest + summary on every exit path. A partial manifest says it is partial and cannot pass `verify_capture` |
+| 5 | The destination check compared the literal path | A symlink in `/tmp` pointing at the checkout passed, and the paid capture landed in the working tree | `resolve(strict=False)` first; symlinks, existing files, non-empty directories and directories holding an earlier `run-intent.json` are each refused |
+| 6 | Session ids were second-resolution timestamps | Two runs in the same second produced the same id, and record ids derive from it | `capture-<timestamp>-<nonce>` |
+| 7 | The dry run built a `FileRawStore` at the destination | It left `raw/` and `raw.health/` behind, so the following real run refused the directory it had just created | The store capability is probed in a temporary directory that is deleted before the report returns; the destination does not exist afterwards |
+| 8 | Reports were written with `write_text` | An interrupted process could leave a plausible-looking half-JSON | Serialise, write to a temporary file, `fsync`, `os.replace` |
+| 9 | The CLI caught only `CaptureRunError` | Everything else was a traceback | Eleven documented exit codes, no secret on any path, a pointer to the written summary, and `--debug` for a traceback |
+| 10 | A documentation resolution needed a process-global registry | `capture_session` re-runs the resolution *without* the caller's registry, and production keeps the global one empty — so no documentation universe could open a capture at all, and none could be recovered | `UniverseDocumentationEvidenceArtifact` plus the exact verified bytes, both content-addressed. Re-running and recovery consult no global state |
+| 11 | `UniverseOnlyCompatibilityRule` took `differing_parameters` from the caller | The caller stating the difference was the caller asking for the waiver; two pipelines differing in `min_time` were waived by a rule naming `timeout_seconds` | `derive_parameter_diff` computes it from two configurations; the rule carries only `approved_diff_hash`, and any contract-set-affecting difference is refused whatever the rule says |
+| 12 | `assess_analytical_readiness` took six loose `Any` arguments | Six `SimpleNamespace` objects with the right attribute names returned `READY_FOR_ANALYTICAL_DATASET` | It takes only a `VerifiedAnalyticalEvidenceContext`, and `build_analytical_evidence` re-derives the chain and re-verifies the capture itself |
+
+### The operator path
+
+```bash
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture-2026-08-05
+```
+
+Dry run by default; `--execute-live` to contact the vendor. Produces
+`run-intent.json`, `raw/`, `attempts/`, `artifacts/`, `manifest.json` and
+`capture-summary.json`. Exit 0 only when every planned endpoint answered and the
+manifest verified against the store.
+
+### Frozen values
+
+| Value | Before | After | Classification |
+|---|---|---|---|
+| `EXPECTED_CONFIG_FINGERPRINT` | `ded3172bfee2682f` | unchanged | **no change** |
+| `EXPECTED_MODEL_FINGERPRINT` | `32b4694cef709838` | unchanged | **no change** |
+| `EXPECTED_OUTPUT_HASH` | `0e536883...` | unchanged | **no change** |
+
+The operator layer changed; the maths did not. `MODEL_VERSION` and
+`PARSER_VERSION` stay at `2.1.10` for the same reason.
+
+### Behavioural changes worth knowing
+
+* `UniverseOnlyCompatibilityRule(differing_parameters=...)` is **gone**; use
+  `approved_diff_hash=diff_fingerprint(derive_parameter_diff(source, target))`.
+* `assess_analytical_readiness(**six_kwargs)` is **gone**; build a context with
+  `build_analytical_evidence(pipeline=..., chain=..., manifest=..., store=...)`.
+* `capture_origin_of(transport)` takes an optional second argument, the URL. A
+  call without it still works and cannot distinguish a local terminal.
+* `build_thetadata_client`, `ThetaDataRuntime.from_config` and
+  `ThetaDataResearchPipeline.from_config/from_loaded_config` accept
+  `attempt_observer=`.
+* `RawCaptureManifest` gained `rebuilt_from` and `semantic_payload`.
+* `VerifiedExpectedUniverseArtifact` gained `documentation_evidence_hash`.
+
+---
+
 ## 2.1.11 - universe-evidence authenticity, and one way to capture
 
 Two objectives. Make universe evidence follow from verified source facts rather

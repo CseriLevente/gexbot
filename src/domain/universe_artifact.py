@@ -110,6 +110,13 @@ class VerifiedExpectedUniverseArtifact:
     #: its own descriptor is not the same as having come from a capture that
     #: passed verification.
     source_verification_fingerprint: str = ""
+    #: The artifact-store key of the portable documentation evidence, for a
+    #: documentation-backed universe. Empty otherwise. Without it, recovering
+    #: such a universe needed the rule to be in a process-global registry -- so
+    #: a capture resolved with a caller's own registry could not be recovered at
+    #: all, and one resolved with the (empty) production registry could not
+    #: exist.
+    documentation_evidence_hash: str = ""
     _hash: str = field(default="", compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -208,6 +215,7 @@ class VerifiedExpectedUniverseArtifact:
             "observed_at": self.observed_at.isoformat(),
             "evidence_fingerprint": self.evidence_fingerprint,
             "documentation_evidence_id": self.documentation_evidence_id,
+            "documentation_evidence_hash": self.documentation_evidence_hash,
             "source_verification_fingerprint": self.source_verification_fingerprint,
         }
 

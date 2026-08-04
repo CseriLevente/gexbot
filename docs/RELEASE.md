@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.11.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.12.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.11.zip
+sha256sum gex-bot-v2.1.12.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.11.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.12.zip -Algorithm SHA256
 ```
 
 ### The digest must describe the file that was uploaded
@@ -146,7 +146,7 @@ would get a mismatch and have no way to tell an innocent re-wrap from a
 substituted artefact. Verify the digest against the uploaded file, after upload:
 
 ```powershell
-Get-FileHash .\gex-bot-v2.1.11.zip -Algorithm SHA256   # the file being sent
+Get-FileHash .\gex-bot-v2.1.12.zip -Algorithm SHA256   # the file being sent
 ```
 
 ---
@@ -195,3 +195,43 @@ There is no broker adapter, no order type, no position sizing, no execution
 path, and no strategy. `tests/unit/test_architecture.py` fails the build if one
 appears. See [MODEL_ASSUMPTIONS.md](MODEL_ASSUMPTIONS.md) for the boundary of
 what the numbers in this repository mean.
+
+---
+
+## Before the first raw ThetaData session
+
+This is the checklist for the capture, not for the release. Every line is a
+thing that has gone wrong somewhere, and the session costs money.
+
+- [ ] remote CI green on **both** Python 3.12 and 3.13 for the released commit
+- [ ] Theta Terminal installed and running, and reachable at the configured
+      `base_url`
+- [ ] subscription tier confirmed to be `standard` or better, against the
+      account rather than against `config/thetadata_capture.yaml`
+- [ ] licensing and data-use terms confirmed for storing raw responses
+- [ ] output destination **new, empty, and outside this repository** — the
+      command refuses anything else, including a symlink that resolves inside
+- [ ] sufficient disk space for a full SPX+SPXW chain plus retry bodies
+- [ ] dry run completed successfully and its report reviewed line by line:
+
+```bash
+python -m src.tools.capture_thetadata_once \
+  --config config/thetadata_capture.yaml \
+  --output /absolute/path/outside/this/repo/capture-YYYY-MM-DD
+```
+
+Check in that output: `capture_readiness` is `READY_FOR_RAW_CAPTURE_ONLY`,
+`expected_capture_origin` is what you expect for your `base_url`,
+`effective_transport` shows the timeouts and cap you configured, and
+`destination_refusals` is empty.
+
+Then add `--execute-live`.
+
+Afterwards the run leaves `run-intent.json`, `raw/`, `attempts/`, `artifacts/`,
+`manifest.json` and `capture-summary.json`. Exit 0 means every planned endpoint
+answered and the manifest verified against the store; every other code is
+documented in `docs/THETADATA_INTEGRATION.md`.
+
+**No GEX is computed from that capture**, and none should be trusted until the
+eight vendor conventions in `docs/ADAPTER_CERTIFICATION.md` have been compared
+against the captured bytes.

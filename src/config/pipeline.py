@@ -905,6 +905,15 @@ class UniverseResolution:
     source_store: Any = None
     source_verification: Any = None
     extraction: Any = None
+    #: The whole documentation resolution in portable form: the rule with no
+    #: host path, the digest of the verified bytes, and the extraction. v2.1.11
+    #: carried only the extraction, so re-running the resolution needed the
+    #: registry the caller had used -- and ``capture_session`` re-runs it without
+    #: one, so every documentation universe resolved with a custom registry was
+    #: refused by the capture that was supposed to accept it.
+    documentation_evidence: Any = None
+    #: The exact bytes the extractor read, in memory for revalidation.
+    document_text: Any = None
     session_date: Any = None
 
     @property
@@ -942,6 +951,11 @@ class UniverseResolution:
             ),
             "extraction_fingerprint": (
                 self.extraction.fingerprint if self.extraction is not None else ""
+            ),
+            "documentation_evidence_hash": (
+                self.documentation_evidence.artifact_hash
+                if self.documentation_evidence is not None
+                else ""
             ),
             "session_date": (
                 self.session_date.isoformat() if self.session_date else None
@@ -1121,7 +1135,12 @@ def _settlement_date_for_fetch(session: Any, open_interest_as_of: Any) -> Any:
 
 
 def _persist_artifacts(
-    store: Any, *, settlement: Any, universe: Any, resolution: Any = None
+    store: Any,
+    *,
+    settlement: Any,
+    universe: Any,
+    resolution: Any = None,
+    configuration: Any = None,
 ) -> None:
     """Write the whole evidence chain, so replay depends on no live object.
 
@@ -1156,6 +1175,11 @@ def _persist_artifacts(
         resolution.semantic_payload(),
         sources=tuple(getattr(resolution.declaration, "source_record_ids", ())),
     )
+    if configuration is not None:
+        # Content-addressed, so a later capture comparing itself against this one
+        # derives the difference from two configurations rather than believing a
+        # waiver's account of it.
+        store.put(ArtifactKind.PIPELINE_CONFIGURATION, configuration)
     if resolution.source_verification is not None:
         from src.adapters.universe_resolvers import verification_receipt
 
@@ -1172,6 +1196,99 @@ def _persist_artifacts(
             resolution.extraction.semantic_payload(),
             sources=(resolution.extraction.document_content_hash,),
         )
+    if resolution.documentation_evidence is not None:
+        from src.adapters.universe_evidence import document_bytes_payload
+
+        # The exact bytes, content-addressed. Recovery re-runs the extractor
+        # over these rather than over whatever is at the path the rule was
+        # registered from -- a path is a fact about one machine on one day.
+        store.put(
+            ArtifactKind.DOCUMENT_BYTES,
+            document_bytes_payload(resolution.document_text or ""),
+        )
+        store.put(
+            ArtifactKind.UNIVERSE_DOCUMENTATION_EVIDENCE,
+            resolution.documentation_evidence.semantic_payload(),
+            sources=(resolution.documentation_evidence.document_bytes_artifact_hash,),
+        )
+
+
+def _recover_documentation_evidence(
+    artifact: Any, *, artifact_store: Any
+) -> tuple[Any, Any, str]:
+    """The portable documentation evidence and the bytes it names.
+
+    The v2.1.12 gap this closes: v2.1.11 recovered the *extraction* and then
+    asked the process-global registry for the rule, so recovery worked only in a
+    process that had registered it -- and production keeps that registry empty,
+    so no documentation universe could be recovered at all.
+    """
+    from src.adapters.universe_evidence import UniverseDocumentationEvidenceArtifact
+    from src.domain.expected_universe import ExpectedUniverseSourceKind
+
+    kind = ExpectedUniverseSourceKind(artifact.source_kind)
+    if kind is not ExpectedUniverseSourceKind.AUTHORITATIVE_DOCUMENTATION:
+        return None, None, ""
+    key = artifact.documentation_evidence_hash
+    if not key:
+        return (
+            None,
+            None,
+            (
+                "this universe was resolved from a document and records no "
+                "documentation evidence artifact, so the rule and the bytes it was "
+                "read from cannot be produced"
+            ),
+        )
+    if artifact_store is None:
+        return (
+            None,
+            None,
+            (
+                "this capture rests on a documentation universe and no artifact "
+                "store was supplied, so the reading of that document cannot be "
+                "produced"
+            ),
+        )
+    payload = artifact_store.payload_of(key)
+    if payload is None:
+        return (
+            None,
+            None,
+            (
+                f"the documentation evidence {short_id(key)}... this universe was "
+                "resolved from is not in the artifact store"
+            ),
+        )
+    try:
+        evidence = UniverseDocumentationEvidenceArtifact.rebuilt_from(payload)
+    except Exception as error:
+        return (
+            None,
+            None,
+            f"the stored documentation evidence does not reconstruct: {error}",
+        )
+    if evidence.artifact_hash != key:
+        return (
+            None,
+            None,
+            (
+                f"the recovered documentation evidence hashes to "
+                f"{short_id(evidence.artifact_hash)}... and the universe names "
+                f"{short_id(key)}..."
+            ),
+        )
+    bytes_payload = artifact_store.payload_of(evidence.document_bytes_artifact_hash)
+    if bytes_payload is None:
+        return (
+            None,
+            None,
+            (
+                "the verified document bytes this universe was read from are not in "
+                "the artifact store, so the extraction cannot be re-run"
+            ),
+        )
+    return evidence, bytes_payload.get("text", ""), ""
 
 
 def _recover_source_manifest(
@@ -1363,6 +1480,7 @@ class ThetaDataResearchPipeline:
         symbol: str = "SPXW",
         transport: Any = None,
         clock: Any = None,
+        attempt_observer: Any = None,
     ) -> ThetaDataResearchPipeline:
         """Build one session from the whole configuration file.
 
@@ -1380,6 +1498,7 @@ class ThetaDataResearchPipeline:
             clock=clock,
             model_spec=loaded.engine.model_spec,
             engine_config=loaded.engine,
+            attempt_observer=attempt_observer,
         )
 
     @classmethod
@@ -1392,6 +1511,7 @@ class ThetaDataResearchPipeline:
         clock: Any = None,
         model_spec: ModelSpec | None = None,
         engine_config: Any = None,
+        attempt_observer: Any = None,
     ) -> ThetaDataResearchPipeline:
         """Build a coherent session, or refuse.
 
@@ -1436,7 +1556,11 @@ class ThetaDataResearchPipeline:
             )
 
         runtime = ThetaDataRuntime.from_config(
-            config, symbol=symbol, transport=transport, clock=clock
+            config,
+            symbol=symbol,
+            transport=transport,
+            clock=clock,
+            attempt_observer=attempt_observer,
         )
         # Runs on the IV question alone. In v2.1.3 selecting the vendor-gamma
         # comparison moved the session into a different ``PricingMode`` and this
@@ -1624,7 +1748,9 @@ class ThetaDataResearchPipeline:
             store=store if store is not None else self.runtime.client.raw_store,
             session_id=new_capture_session_id(as_of=as_of),
             as_of=as_of,
-            capture_origin=capture_origin_of(self.runtime.client.transport),
+            capture_origin=capture_origin_of(
+                self.runtime.client.transport, self.runtime.client.settings.base_url
+            ),
         )
 
     def capture_session(
@@ -1641,6 +1767,7 @@ class ThetaDataResearchPipeline:
         universe_max_age: Any = None,
         pipeline_compatibility: Any = None,
         universe_compatibility_waiver: Any = None,
+        source_pipeline_configuration: Any = None,
     ) -> Any:
         """A capture session stamped with this pipeline's identity.
 
@@ -1724,6 +1851,7 @@ class ThetaDataResearchPipeline:
                 max_age=universe_max_age,
                 policy=pipeline_compatibility,
                 waiver=universe_compatibility_waiver,
+                source_configuration=source_pipeline_configuration,
             )
 
         recipe = self.normalization_recipe(
@@ -1748,6 +1876,7 @@ class ThetaDataResearchPipeline:
                 settlement=artifact,
                 universe=universe,
                 resolution=resolution,
+                configuration=self.configuration_payload(),
             )
         return CaptureSession(
             store=store,
@@ -1755,7 +1884,10 @@ class ThetaDataResearchPipeline:
             capture_origin=(
                 capture_origin
                 if capture_origin is not None
-                else capture_origin_of(self.runtime.client.transport)
+                else capture_origin_of(
+                    self.runtime.client.transport,
+                    self.runtime.client.settings.base_url,
+                )
             )
             or CaptureOrigin.UNKNOWN_ORIGIN,
             pipeline_fingerprint=self.fingerprint(),
@@ -1793,6 +1925,27 @@ class ThetaDataResearchPipeline:
             expected_universe=universe,
             declared_expected_universe=declared,
         )
+
+    def configuration_payload(self) -> dict[str, Any]:
+        """The configuration a pipeline difference is *derived* from.
+
+        The same inputs ``fingerprint()`` hashes, unhashed, so two pipelines can
+        be compared key by key. v2.1.11 had only the digest, so the only thing a
+        compatibility waiver could do was assert what the difference was -- and
+        the caller asserting it was the caller asking for the waiver.
+        """
+        return {
+            "pipeline_fingerprint": self.fingerprint(),
+            "config": self.config.as_dict(),
+            "model": (
+                self.model_spec.as_dict()
+                if hasattr(self.model_spec, "as_dict")
+                else self.model_spec.fingerprint()
+            ),
+            "pricing_mode": self.pricing_mode.value,
+            "vendor_gamma_policy": self.vendor_gamma_policy.value,
+            "spot_synchronization_policy": self.spot_synchronization_policy,
+        }
 
     def request_scope(self, *, requested_at: datetime) -> Any:
         """The question this session's chain request asks, in comparable terms.
@@ -1867,6 +2020,8 @@ class ThetaDataResearchPipeline:
         session_date: Any = None,
         registry: Any = None,
         extraction: Any = None,
+        documentation_evidence: Any = None,
+        document_text: Any = None,
         as_of: datetime | None = None,
     ) -> UniverseResolution:
         """Establish what a declaration covers, from a *verified* source capture.
@@ -1903,6 +2058,8 @@ class ThetaDataResearchPipeline:
             registry=registry,
             session_date=session,
             extraction=extraction,
+            documentation_evidence=documentation_evidence,
+            document_text=document_text,
         )
         return UniverseResolution(
             declaration=declaration,
@@ -1912,6 +2069,8 @@ class ThetaDataResearchPipeline:
             source_store=source_store,
             source_verification=verification,
             extraction=outcome.extraction,
+            documentation_evidence=outcome.documentation_evidence,
+            document_text=outcome.document_text,
             session_date=session,
         )
 
@@ -1936,6 +2095,11 @@ class ThetaDataResearchPipeline:
                 else session_date
             ),
             extraction=resolution.extraction,
+            # Deliberately no ``registry``. The evidence carries the rule and
+            # the bytes, so this re-derivation consults no process-global state
+            # -- which is what a recovery in another process will also have.
+            documentation_evidence=resolution.documentation_evidence,
+            document_text=resolution.document_text,
         )
         if not replayed.established:
             raise PipelineConsistencyError(
@@ -1963,6 +2127,7 @@ class ThetaDataResearchPipeline:
         max_age: Any = None,
         policy: Any = None,
         waiver: Any = None,
+        source_configuration: Any = None,
     ) -> None:
         """Refuse a verified universe that does not describe *this* chain.
 
@@ -1994,6 +2159,10 @@ class ThetaDataResearchPipeline:
                 else PipelineCompatibilityPolicy.IDENTICAL_PIPELINE
             ),
             waiver=waiver,
+            # Derived, not declared. A waiver may approve the difference this
+            # comparison finds; it may not say what the difference is.
+            source_configuration=source_configuration,
+            target_configuration=self.configuration_payload(),
         )
         if reasons:
             raise PipelineConsistencyError(
@@ -2966,6 +3135,9 @@ class ThetaDataResearchPipeline:
                 resolver_version=payload["resolver_version"],
                 declaration_hash=payload.get("declaration_hash", ""),
                 documentation_evidence_id=payload.get("documentation_evidence_id"),
+                documentation_evidence_hash=payload.get(
+                    "documentation_evidence_hash", ""
+                ),
                 source_verification_fingerprint=payload.get(
                     "source_verification_fingerprint", ""
                 ),
@@ -2996,6 +3168,11 @@ class ThetaDataResearchPipeline:
         )
         if extraction_failure:
             return None, extraction_failure
+        evidence, text, evidence_failure = _recover_documentation_evidence(
+            artifact, artifact_store=artifact_store
+        )
+        if evidence_failure:
+            return None, evidence_failure
         source_manifest, manifest_failure = _recover_source_manifest(
             artifact, artifact_store=artifact_store, chain_manifest=manifest
         )
@@ -3007,6 +3184,8 @@ class ThetaDataResearchPipeline:
             source_store=store,
             session_date=_session_of(artifact.observed_at),
             extraction=extraction,
+            documentation_evidence=evidence,
+            document_text=text,
         )
         if not resolved.established:
             return None, (

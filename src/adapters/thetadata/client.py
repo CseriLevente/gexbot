@@ -771,20 +771,35 @@ VENDOR_TIMEZONE_ASSUMPTION_STATUS = (
 )
 
 
-def capture_origin_of(transport: Any) -> CaptureOrigin:
-    """Which kind of capture a transport produces.
+def capture_origin_of(transport: Any, url: str | None = None) -> CaptureOrigin:
+    """Which kind of capture a transport produces, for a given destination.
 
     Read off the transport rather than declared by the caller. v2.1.5 set
     ``live_capture = False`` as a constant on the validation report -- correct
     then, and it would have stayed correct-looking through the first real
     session, because nothing derived it from anything.
 
-    A transport that does not say is ``UNKNOWN_ORIGIN``, which is never
-    treated as live.
+    ``url`` is what v2.1.12 adds, and it is not cosmetic.
+    ``HttpxTransport.origin_for`` has always distinguished a local Theta
+    Terminal from a remote vendor call, and nothing ever called it: the class
+    attribute reads ``LIVE_HTTP_CAPTURE``, so the shipped capture profile --
+    which points at ``http://127.0.0.1:25503`` -- would have stamped every
+    record of the first real session as a direct vendor round trip. Both are
+    live and they fail differently, and any later claim about vendor behaviour
+    rests on knowing which one produced the bytes.
+
+    A transport that does not say is ``UNKNOWN_ORIGIN``, which is never treated
+    as live.
     """
     from src.adapters.raw_store import CaptureOrigin
 
-    declared = getattr(transport, "capture_origin", None)
+    declared: Any = None
+    if url:
+        resolver = getattr(transport, "origin_for", None)
+        if callable(resolver):
+            declared = resolver(url)
+    if declared is None:
+        declared = getattr(transport, "capture_origin", None)
     if declared is None:
         return CaptureOrigin.UNKNOWN_ORIGIN
     try:

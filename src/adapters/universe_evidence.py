@@ -41,16 +41,24 @@ from src.domain.universe_scope import UniverseRequestScope
 
 __all__ = [
     "PAGINATION_METADATA_FIELDS",
+    "RECOVERED_DOCUMENT_LOCATION",
     "UNIVERSE_DOCUMENTATION_RULES",
+    "UNIVERSE_DOCUMENTATION_SCHEMA_VERSION",
     "UNIVERSE_EXTRACTION_SCHEMA_VERSION",
     "UNIVERSE_EXTRACTORS",
     "PaginationCoverageEvidence",
+    "UniverseDocumentationEvidenceArtifact",
     "UniverseDocumentationRegistry",
     "UniverseDocumentationRule",
     "UniverseExtractionArtifact",
+    "build_documentation_evidence",
+    "document_bytes_payload",
     "extractor_for",
     "read_pagination_metadata",
 ]
+
+#: Bumped when what a documentation universe has to carry changes.
+UNIVERSE_DOCUMENTATION_SCHEMA_VERSION = "universe-documentation/2.1.12"
 
 #: Columns a response would have to carry for pagination coverage to be
 #: verifiable. **No ThetaData v3 snapshot endpoint returns any of them**, which
@@ -552,8 +560,8 @@ class UniverseDocumentationRule:
 
     # -- extraction ----------------------------------------------------------
 
-    def extract(self, *, executed_at: datetime) -> UniverseExtractionArtifact:
-        """Open the verified document and read the contracts out of it."""
+    def document_text(self) -> str:
+        """The verified bytes, read from where registration found them."""
         import pathlib
 
         from src.adapters.evidence_resolvers import content_hash_of
@@ -563,7 +571,6 @@ class UniverseDocumentationRule:
                 f"universe rule {self.evidence_id!r} has not been content "
                 "verified; a hash nobody computed is not a hash"
             )
-        assert self.document_verified_at is not None  # implied by established
         location = pathlib.Path(self.verified_location)
         actual = content_hash_of(location)
         if actual != self.document_content_hash:
@@ -574,8 +581,33 @@ class UniverseDocumentationRule:
                 "registration, so the extraction would be from a different "
                 "document"
             )
+        return location.read_text(encoding="utf-8")
+
+    def extract(
+        self, *, executed_at: datetime, document_text: str | None = None
+    ) -> UniverseExtractionArtifact:
+        """Read the contracts out of the verified document.
+
+        ``document_text`` is the v2.1.12 addition: the *recovered* bytes, which
+        arrive from the artifact store rather than from a path. Until then a
+        documentation resolution could only be re-run on a machine that still
+        had the file at the same location and a registry populated in the same
+        process -- so ``capture_session``, which re-runs the resolution, refused
+        every documentation universe a caller had resolved with its own
+        registry.
+        """
+        text = document_text if document_text is not None else self.document_text()
+        digest = _text_hash(text)
+        if digest != self.document_content_hash:
+            raise ThetaDataProvenanceError(
+                f"the document behind universe rule {self.evidence_id!r} hashes "
+                f"to {digest[:12]}... and the rule records "
+                f"{self.document_content_hash[:12]}...; these are different "
+                "documents, so the extraction would be from the wrong one"
+            )
+        assert self.document_verified_at is not None  # implied by established
         identities, ranges = extractor_for(self.extractor_version)(
-            location.read_text(encoding="utf-8"), self.rule_identifier
+            text, self.rule_identifier
         )
         assert self.effective_from is not None  # callers check period first
         return UniverseExtractionArtifact(
@@ -589,7 +621,12 @@ class UniverseDocumentationRule:
             source_ranges=ranges,
         )
 
-    def confirm(self, artifact: UniverseExtractionArtifact) -> tuple[str, ...]:
+    def confirm(
+        self,
+        artifact: UniverseExtractionArtifact,
+        *,
+        document_text: str | None = None,
+    ) -> tuple[str, ...]:
         """Why a stored extraction is not what this rule produces today.
 
         The recovery path. Re-running :meth:`extract` would stamp a fresh
@@ -598,7 +635,10 @@ class UniverseDocumentationRule:
         keeping the instant the extraction actually happened.
         """
         try:
-            fresh = self.extract(executed_at=artifact.extraction_executed_at)
+            fresh = self.extract(
+                executed_at=artifact.extraction_executed_at,
+                document_text=document_text,
+            )
         except ThetaDataProvenanceError as error:
             return (str(error),)
         if fresh.identities != artifact.identities:
@@ -625,7 +665,7 @@ class UniverseDocumentationRule:
 
     def semantic_payload(self) -> dict[str, Any]:
         return {
-            "schema_version": "universe-documentation/2.1.11",
+            "schema_version": UNIVERSE_DOCUMENTATION_SCHEMA_VERSION,
             "evidence_id": self.evidence_id,
             "document_reference": self.document_reference,
             "document_content_hash": self.document_content_hash,
@@ -656,6 +696,222 @@ class UniverseDocumentationRule:
             ),
             "established": self.established,
         }
+
+    # -- reconstruction ------------------------------------------------------
+
+    def portable_payload(self) -> dict[str, Any]:
+        """Everything :meth:`rebuilt_from` needs, and nothing about this host.
+
+        Deliberately includes ``document_verified_at`` -- which is a fact about
+        the registration, and enters the extraction artifact -- and deliberately
+        excludes ``verified_location``, which is a path on one machine.
+        """
+        return {
+            **self.semantic_payload(),
+            "document_verified_at": (
+                self.document_verified_at.isoformat()
+                if self.document_verified_at
+                else None
+            ),
+        }
+
+    @classmethod
+    def rebuilt_from(cls, payload: dict[str, Any]) -> UniverseDocumentationRule:
+        """Reconstruct a rule from its portable payload.
+
+        ``verified_location`` comes back as a marker rather than a path: the
+        rebuilt rule is used with recovered *bytes*, and a rule that could still
+        open a file would be a rule that could read a different document from
+        the one the capture was resolved against.
+        """
+        return cls(
+            evidence_id=payload["evidence_id"],
+            document_reference=payload["document_reference"],
+            document_content_hash=payload["document_content_hash"],
+            rule_identifier=payload["rule_identifier"],
+            scope=UniverseRequestScope(
+                root=payload["scope"]["root"],
+                expirations=(
+                    tuple(
+                        date.fromisoformat(v) for v in payload["scope"]["expirations"]
+                    )
+                    if payload["scope"].get("expirations")
+                    else None
+                ),
+                max_dte=payload["scope"].get("max_dte"),
+                strike_range=payload["scope"].get("strike_range"),
+                rights=tuple(payload["scope"].get("rights") or ("call", "put")),
+                request_filters=tuple(
+                    (pair[0], pair[1])
+                    for pair in payload["scope"].get("request_filters") or ()
+                ),
+                requested_at=(
+                    datetime.fromisoformat(payload["scope"]["requested_at"])
+                    if payload["scope"].get("requested_at")
+                    else None
+                ),
+            ),
+            extractor_version=payload["extractor_version"],
+            effective_from=(
+                date.fromisoformat(payload["effective_from"])
+                if payload.get("effective_from")
+                else None
+            ),
+            effective_to=(
+                date.fromisoformat(payload["effective_to"])
+                if payload.get("effective_to")
+                else None
+            ),
+            verified_location=RECOVERED_DOCUMENT_LOCATION,
+            document_verified_at=(
+                datetime.fromisoformat(payload["document_verified_at"])
+                if payload.get("document_verified_at")
+                else None
+            ),
+        )
+
+
+#: What a rebuilt rule records instead of a filesystem path. It is deliberately
+#: not openable: recovery works from the content-addressed bytes, and a rule that
+#: could reopen a file could read a document other than the one the capture was
+#: resolved against.
+RECOVERED_DOCUMENT_LOCATION = "<recovered-from-artifact-store>"
+
+
+def _text_hash(text: str) -> str:
+    """The document hash, over exactly the bytes an extractor will read."""
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseDocumentationEvidenceArtifact:
+    """A documentation universe, reconstructable without any live object.
+
+    The v2.1.12 gap. A ``UniverseResolution`` produced with a caller-supplied
+    :class:`UniverseDocumentationRegistry` resolved, and then ``capture_session``
+    re-ran it *without* that registry and refused it -- so the only documentation
+    resolution that could open a capture was one registered in the process-global
+    registry, which production keeps empty.
+
+    Everything needed to run the extractor again is here or content-addressed
+    beside it: the rule (portably, with no host path), the digest of the exact
+    verified bytes, the artifact key those bytes are stored under, the extractor
+    version and the extraction it produced.
+    """
+
+    evidence_id: str
+    rule_semantic_payload: dict[str, Any]
+    document_content_hash: str
+    #: SHA-256 of the exact text the extractor read. Equal to
+    #: ``document_content_hash`` for a UTF-8 document, and carried separately
+    #: because "what the rule claims" and "what was read" are two statements.
+    verified_document_bytes_hash: str
+    #: The artifact store key those bytes live under.
+    document_bytes_artifact_hash: str
+    extractor_version: str
+    extraction_artifact_hash: str
+    effective_from: date | None
+    effective_to: date | None
+    scope: UniverseRequestScope
+
+    def __post_init__(self) -> None:
+        if self.verified_document_bytes_hash != self.document_content_hash:
+            raise ThetaDataProvenanceError(
+                "the bytes stored for this evidence hash to "
+                f"{self.verified_document_bytes_hash[:12]}... and the rule "
+                f"records {self.document_content_hash[:12]}...; a document "
+                "artifact that is not the document the rule names cannot rerun "
+                "the extraction"
+            )
+
+    @property
+    def rule(self) -> UniverseDocumentationRule:
+        return UniverseDocumentationRule.rebuilt_from(self.rule_semantic_payload)
+
+    def semantic_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": UNIVERSE_DOCUMENTATION_SCHEMA_VERSION,
+            "evidence_id": self.evidence_id,
+            "rule_semantic_payload": dict(sorted(self.rule_semantic_payload.items())),
+            "document_content_hash": self.document_content_hash,
+            "verified_document_bytes_hash": self.verified_document_bytes_hash,
+            "document_bytes_artifact_hash": self.document_bytes_artifact_hash,
+            "extractor_version": self.extractor_version,
+            "extraction_artifact_hash": self.extraction_artifact_hash,
+            "effective_from": (
+                self.effective_from.isoformat() if self.effective_from else None
+            ),
+            "effective_to": (
+                self.effective_to.isoformat() if self.effective_to else None
+            ),
+            "scope": self.scope.semantic_payload(),
+        }
+
+    @property
+    def artifact_hash(self) -> str:
+        return digest_of(self.semantic_payload())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {**self.semantic_payload(), "artifact_hash": self.artifact_hash}
+
+    @classmethod
+    def rebuilt_from(
+        cls, payload: dict[str, Any]
+    ) -> UniverseDocumentationEvidenceArtifact:
+        return cls(
+            evidence_id=payload["evidence_id"],
+            rule_semantic_payload=dict(payload["rule_semantic_payload"]),
+            document_content_hash=payload["document_content_hash"],
+            verified_document_bytes_hash=payload["verified_document_bytes_hash"],
+            document_bytes_artifact_hash=payload["document_bytes_artifact_hash"],
+            extractor_version=payload["extractor_version"],
+            extraction_artifact_hash=payload["extraction_artifact_hash"],
+            effective_from=(
+                date.fromisoformat(payload["effective_from"])
+                if payload.get("effective_from")
+                else None
+            ),
+            effective_to=(
+                date.fromisoformat(payload["effective_to"])
+                if payload.get("effective_to")
+                else None
+            ),
+            scope=UniverseDocumentationRule.rebuilt_from(
+                payload["rule_semantic_payload"]
+            ).scope,
+        )
+
+
+def document_bytes_payload(text: str) -> dict[str, Any]:
+    """The content-addressed envelope the verified document is stored in."""
+    return {
+        "schema_version": UNIVERSE_DOCUMENTATION_SCHEMA_VERSION,
+        "content_hash": _text_hash(text),
+        "text": text,
+    }
+
+
+def build_documentation_evidence(
+    rule: UniverseDocumentationRule,
+    extraction: UniverseExtractionArtifact,
+    *,
+    document_text: str,
+) -> UniverseDocumentationEvidenceArtifact:
+    """Assemble the portable evidence for one documentation resolution."""
+    return UniverseDocumentationEvidenceArtifact(
+        evidence_id=rule.evidence_id,
+        rule_semantic_payload=rule.portable_payload(),
+        document_content_hash=rule.document_content_hash,
+        verified_document_bytes_hash=_text_hash(document_text),
+        document_bytes_artifact_hash=digest_of(document_bytes_payload(document_text)),
+        extractor_version=rule.extractor_version,
+        extraction_artifact_hash=extraction.fingerprint,
+        effective_from=rule.effective_from,
+        effective_to=rule.effective_to,
+        scope=rule.scope,
+    )
 
 
 class UniverseDocumentationRegistry:

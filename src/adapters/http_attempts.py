@@ -45,7 +45,7 @@ __all__ = [
 ATTEMPT_BODY_SUFFIX = ".bin"
 
 #: Bumped when the *meaning* of an attempt record changes.
-HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.13"
+HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.14"
 
 #: Response headers worth keeping. Everything else is dropped rather than
 #: filtered: an allow-list cannot leak a header nobody thought about, and a

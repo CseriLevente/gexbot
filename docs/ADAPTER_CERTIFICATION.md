@@ -917,6 +917,10 @@ pipeline is built with a transport whose every method raises. The live run
 refuses a destination inside the repository, requires durable stores, verifies
 what it wrote, computes no GEX and places no orders.
 
+**The `--output` directory must not exist.** The run creates it and owns it, so
+that everything in it afterwards is what that run wrote. Its parent may exist.
+Both modes apply the same rule, so what the dry run accepts the live run accepts.
+
 ### What this changes about the shipped state
 
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
@@ -1117,3 +1121,78 @@ report instead.
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
 `ADAPTER_CERTIFIED`. What changed is that the command can now be run without
 modifying the repository it was run from.
+
+---
+
+## v2.1.14: integrity is a statement about bytes
+
+### The scan read text and reported on bytes
+
+`verify_integrity()` opened every payload with `read_text()`. Two consequences,
+both of which would have hit the first paid session:
+
+* **CRLF.** Text mode translates `\r\n` to `\n` on read, so the bytes hashed are
+  not the bytes on disk. A vendor sending Windows line endings would have had
+  *every record* report `HASH_MISMATCH`. An operator reading that concludes the
+  capture is corrupt.
+* **Anything not UTF-8.** One undecodable byte raised `UnicodeDecodeError`,
+  which aborted the scan -- so a single odd payload made every *other* record
+  unverified too.
+
+It now reads bytes and hashes bytes. Decoding is the parser's job; this layer
+answers one question and nothing else.
+
+### What a stored payload is, written down
+
+The digest says the bytes have not changed. It does not say what they are. Every
+record and every manifest entry now carries `raw_response_schema_version`,
+`body_representation`, the content type, the declared and the selected charset,
+the decode status and the digest of the decoded text -- inside the manifest hash,
+so the description travels with the evidence and cannot be edited away from it.
+
+A record written before v2.1.14 states no schema, and `validate_metadata` and
+`verify_capture` refuse it rather than reinterpreting it under rules it was not
+written under. Its digest may cover a UTF-8 re-encoding of decoded text.
+
+### The timeout that was reported and the timeout that was applied
+
+`httpx` reads a scalar `timeout=` as connect *and* read *and* write *and* pool.
+Passing a per-request read budget therefore discarded the configured connect
+budget -- the one the profile states, the client is constructed with, and the dry
+run prints. The transport now holds a full `httpx.Timeout`; a per-request budget
+rebuilds every dimension rather than replacing all of them.
+
+### Provenance is not decided by the vendor's own text
+
+Whether a capture is evidence about the vendor or a local fixture was answered by
+searching the whole URL -- path and query included -- for `localhost` or
+`127.0.0.1`. A redirect carrying `?next=localhost`, or a host called
+`notlocalhost.com`, would have answered it for us. The host is parsed, lowercased
+and compared: `localhost`, or an address `ipaddress` calls loopback.
+
+### A run that never starts leaves nothing behind
+
+The destination used to be created first, and the configuration loaded,
+credentials resolved, pipeline built and readiness graded afterwards. Every one
+of those failures left an empty directory -- which the next attempt refused,
+because a capture directory is created by the run that owns it. So an operator
+had to delete the evidence of their own typo before they could retry.
+
+Preflight now does all of it before the `mkdir`, against a temporary store, and
+the same destination policy applies in both modes: **the destination itself must
+not exist. Its parent may.**
+
+### Evidence that survives being moved
+
+Every recorded location was absolute, so copying a run directory to an archive
+host produced an index describing a directory that is not there. Locations are
+relative to their store root and resolved against where the store is now; the run
+summary names one absolute `output_root` and everything else relative to it. The
+regression copies a completed run elsewhere, deletes the original, and verifies
+from the new location.
+
+### What this changes about the shipped state
+
+Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
+`ADAPTER_CERTIFIED`. What changed is that a capture taken with it can be verified
+by somebody who is not the machine that took it.

@@ -336,6 +336,47 @@ def test_an_old_schema_manifest_is_refused_rather_than_reinterpreted():
     assert any("schema" in f.lower() for f in result.failures)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        (
+            "raw_response_schema_version",
+            "raw-response/2.1.12",
+            "RAW_RESPONSE_SCHEMA_UNSUPPORTED",
+        ),
+        (
+            "body_representation",
+            "decoded-text-reencoded-as-utf8",
+            "BODY_REPRESENTATION_UNSUPPORTED",
+        ),
+    ],
+)
+def test_a_record_under_older_raw_response_semantics_does_not_verify(
+    field, value, expected
+):
+    """The named regression: what the bytes *are* is part of the evidence.
+
+    A payload hash says the bytes have not changed since they were written. It
+    does not say what they are. Through v2.1.12 the stored bytes were a UTF-8
+    re-encoding of a lossily decoded string, so a digest from that era covers a
+    different thing from a digest today -- and comparing them under v2.1.14
+    rules would be reading an answer to a question that was never asked.
+    Refused, not reinterpreted.
+    """
+    pipeline = resolved_pipeline()
+    store, manifest = build_capture(pipeline=pipeline)
+    older = dataclasses.replace(
+        manifest,
+        records=(
+            dataclasses.replace(manifest.records[0], **{field: value}),
+            *manifest.records[1:],
+        ),
+    )
+    result = verified(older, store, pipeline)
+    assert not result.verified
+    assert any(expected in failure for failure in result.failures), result.failures
+
+
 # =============================================================================
 # §4 -- paid capture needs durable storage
 # =============================================================================

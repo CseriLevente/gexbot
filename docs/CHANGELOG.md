@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.1.14 - what the bytes are, and where a failure leaves you
+
+The last code release before the first paid session, again -- and for a reason
+worth stating plainly: v2.1.13 was reviewed by *reading the capture path as an
+operator would run it*, and the two defects that surfaced were both cases of a
+layer answering a question next to the one it was asked.
+
+**`FileRawStore.verify_integrity()` read payloads with `read_text()`.** Text mode
+translates CRLF to LF. A vendor sending Windows line endings -- not exotic, not a
+defect -- would have had every single record report `HASH_MISMATCH`, and an
+operator reading that concludes the capture is corrupt and pays for another one.
+A body that is not valid UTF-8 raised `UnicodeDecodeError` and took the whole
+scan down with it. The layer whose job is "are these the bytes we wrote?" was
+answering "does text mode give them back?"
+
+**`HttpxTransport.get()` passed a scalar `timeout=` per request.** httpx reads a
+scalar as *all four* budgets, so the connect timeout the profile states and the
+dry run prints was silently discarded on every actual request.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.13 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Integrity verified through `read_text()` | CRLF bodies reported `HASH_MISMATCH` on every record; non-UTF-8 bodies raised and aborted the scan | `read_bytes()` and `sha256` over those bytes. Verified for LF, CRLF, CR, BOM, empty, latin-1, NUL bytes and arbitrary binary, plus an end-to-end CRLF capture finishing `COMPLETED_VERIFIED` |
+| 2 | A scalar per-request `timeout=` | httpx applies a scalar to connect, read, write *and* pool, so the configured connect budget never reached the wire | One `httpx.Timeout` naming every dimension, stored on the transport; a per-request read budget rebuilds it rather than replacing it. The reported settings are the applied ones |
+| 3 | The destination was created before anything was validated | A typo in the profile or an unset password left an empty directory the next attempt then refused | Two phases. Phase A validates the destination, loads the config, resolves credentials, checks the HTTP extra, builds a pipeline that cannot send, grades readiness against a temporary store and checks free space -- writing nothing. Phase B claims the directory and only then builds the run |
+| 4 | `ConfigError` fell through to `INTERNAL_ERROR` | "Re-run with `--debug` for a traceback" sends an operator to read this code instead of their YAML | `CONFIGURATION_ERROR`, exit code 3, in both the classifier and the handler |
+| 5 | `build_transport=False` still built a transport | The flag chose between two ways of passing `None` to a factory that builds one for `None` | Removed. Pass the transport you want, or get the configured one |
+| 6 | Origin decided by substring search over the URL | `?next=localhost` or `notlocalhost.com` could label a paid live capture as a local terminal fixture | `urlsplit().hostname`, compared against `localhost` and `ipaddress.ip_address(...).is_loopback`. The path and query are not consulted |
+| 7 | The dry run accepted an existing empty destination | The live run claims with `exist_ok=False`, so the operator got "no refusals" and then an untyped `FileExistsError` | One policy in both modes: the destination itself must not exist. Its parent may |
+| 8 | Raw-response semantics were computed and dropped | A reader could not tell what a stored payload *is*, and a record from an older release would have been reinterpreted under new rules | `raw_response_schema_version`, `body_representation`, content type, declared and selected charset, decode status and decoded-text hash on every record and manifest entry, inside the manifest hash. `validate_metadata` and `verify_capture` refuse a schema this code does not implement |
+| 9 | `FAILED_PARTIAL` was hardcoded in the emergency summary | A run where nothing answered reported the same state as one that lost the disk after three endpoints | Derived from the attempt log and the store; a run that already reached a failure state keeps it |
+| 10 | Payload and attempt-body locations were absolute | An archived or renamed run directory carried an index full of paths to a directory that was not there | Locations are relative to their store root and resolved against where the store is *now*; summaries name paths relative to `output_root`. `validate_metadata` refuses an absolute location |
+| 11 | The profile did not say the destination must not exist | Step 3 pointed at `artifacts/raw`, which is a fallback the capture never writes to | `config/thetadata_capture.yaml` states the `--output` rule and separates the configured fallback from the effective store |
+
+### Frozen values
+
+No change. The GEX outputs, the engine version and the parser version are
+untouched: v2.1.14 changed how evidence is verified, transported and described,
+not how a payload is read or how a gamma is computed.
+
 ## 2.1.13 - the capture path, checked against itself
 
 The final code release before the first paid session. v2.1.12 made the command

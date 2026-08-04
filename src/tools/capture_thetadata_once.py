@@ -62,11 +62,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.13"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.14"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.13"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.14"
 
 _RULE = "-" * 76
 

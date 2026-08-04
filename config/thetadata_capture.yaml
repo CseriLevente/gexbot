@@ -19,7 +19,11 @@
 # Before running it:
 #   1. set THETADATA_USERNAME / THETADATA_PASSWORD if the terminal needs them;
 #   2. confirm the subscription tier really is `standard` or better;
-#   3. confirm `artifacts/raw` is on a disk with room for the session;
+#   3. choose an `--output` directory outside this checkout, on a disk with room
+#      for the session. **That directory must not exist yet** -- the run creates
+#      it and owns it, so that everything in it afterwards is what the run wrote.
+#      Its parent may exist. `raw_capture_path` below is *not* where the capture
+#      goes;
 #   4. read docs/ADAPTER_CERTIFICATION.md, which describes what to compare
 #      afterwards and how to record the answers.
 #
@@ -117,6 +121,19 @@ thetadata:
 
   # The capture is the deliverable. Turning this off makes the profile invalid.
   raw_capture_enabled: true
+
+  # **A fallback, not an instruction.** The operator command writes to
+  # `<--output>/raw` and passes that store to the session, so this path receives
+  # nothing during a capture and is not created by one. It names where a caller
+  # that opens no session of its own would store responses.
+  #
+  # Since v2.1.13 nothing constructs a store from it eagerly: it used to be
+  # built during pipeline construction for every caller, which created
+  # `artifacts/raw` inside the checkout -- including during a dry run whose
+  # whole promise is that it writes nothing.
+  #
+  # The effective store is reported as `effective_raw_store_path` in the run
+  # summary. That is the one that received the bytes.
   raw_capture_path: artifacts/raw
 
   greeks_version: latest

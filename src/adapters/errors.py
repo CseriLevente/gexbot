@@ -33,6 +33,7 @@ __all__ = [
     "ThetaDataSchemaError",
     "ThetaDataValidationError",
     "ThetaDataVendorError",
+    "endpoint_of_error",
     "redact_secrets",
 ]
 
@@ -53,9 +54,19 @@ def redact_secrets(text: str) -> str:
 class ThetaDataError(RuntimeError):
     """Base class for every ThetaData adapter failure.
 
-    Carries the vendor status and request id when they exist, so an operator
-    debugging a failed capture has the two identifiers the vendor's support
-    would ask for. Never carries a credential.
+    Carries the vendor status, the request id, **and which endpoint failed**,
+    so an operator debugging a failed capture has the identifiers the vendor's
+    support would ask for and the run report can say where it stopped without
+    reading the message.
+
+    ``endpoint`` is structural since v2.1.15. The operator used to recover it
+    with ``str(getattr(error, "url", ""))``, which no adapter exception set --
+    so ``failed_endpoint`` was empty for every schema error, every vendor error
+    document and every response-too-large, which are the three failures a
+    discovery session is most likely to produce.
+
+    ``safe_url`` is the redacted URL. The full one is never stored: it reaches
+    a log, a traceback and a bug report.
     """
 
     def __init__(
@@ -64,10 +75,25 @@ class ThetaDataError(RuntimeError):
         *,
         status_code: int | None = None,
         request_id: str = "",
+        endpoint: str = "",
+        safe_url: str = "",
     ) -> None:
         super().__init__(redact_secrets(message))
         self.status_code = status_code
         self.request_id = request_id
+        self.endpoint = endpoint
+        self.safe_url = redact_secrets(safe_url)
+
+    @property
+    def failure_identity(self) -> dict[str, object]:
+        """What this failure was, structurally. Read by the operator report."""
+        return {
+            "error_type": type(self).__name__,
+            "endpoint": self.endpoint,
+            "safe_url": self.safe_url,
+            "request_id": self.request_id,
+            "status_code": self.status_code,
+        }
 
 
 class ThetaDataConfigurationError(ThetaDataError):
@@ -133,19 +159,51 @@ class ThetaDataValidationError(ThetaDataCertificationError):
 
 
 def http_error_for(
-    *, endpoint: str, status_code: int, request_id: str = "", body_length: int = 0
+    *,
+    endpoint: str,
+    status_code: int,
+    request_id: str = "",
+    body_length: int = 0,
+    safe_url: str = "",
 ) -> ThetaDataHTTPError:
     """The right subclass for a status, so callers can act on the category."""
     message = (
         f"{endpoint} returned HTTP {status_code}; refusing to parse a "
         f"non-success body as CSV ({body_length} bytes)"
     )
+    kind: type[ThetaDataHTTPError] = ThetaDataHTTPError
     if status_code in (401, 403):
-        return ThetaDataAuthenticationError(
-            message, status_code=status_code, request_id=request_id
-        )
-    if status_code == 429:
-        return ThetaDataRateLimitError(
-            message, status_code=status_code, request_id=request_id
-        )
-    return ThetaDataHTTPError(message, status_code=status_code, request_id=request_id)
+        kind = ThetaDataAuthenticationError
+    elif status_code == 429:
+        kind = ThetaDataRateLimitError
+    return kind(
+        message,
+        status_code=status_code,
+        request_id=request_id,
+        endpoint=endpoint,
+        safe_url=safe_url,
+    )
+
+
+def endpoint_of_error(error: BaseException) -> str:
+    """Which endpoint a failure is about, following the cause chain.
+
+    Structural, never a message parse. A failure raised deep in the transport
+    and re-raised by the client carries the endpoint on the outer exception;
+    one that escaped a layer that did not know the endpoint carries it on its
+    cause. Returns ``""`` when nothing in the chain knows, which is an honest
+    answer and a different one from a guess.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        endpoint = getattr(current, "endpoint", "")
+        if isinstance(endpoint, str) and endpoint:
+            return endpoint
+        # ``url`` is what the transport-level errors carry.
+        url = getattr(current, "url", "")
+        if isinstance(url, str) and url:
+            return url.partition("?")[0]
+        current = getattr(current, "last_error", None) or current.__cause__
+    return ""

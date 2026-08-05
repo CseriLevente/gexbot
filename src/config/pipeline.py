@@ -1448,6 +1448,53 @@ def _require_a_chain(chain: Any, *, mode: str) -> None:
     )
 
 
+def _error_status(error: BaseException) -> int | None:
+    """The HTTP status behind a failure, following the cause chain.
+
+    Distinguishes "the vendor said no" from "nothing answered", which are
+    different operational facts and get different endpoint statuses.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "status_code", None)
+        if isinstance(status, int):
+            return status
+        current = getattr(current, "last_error", None) or current.__cause__
+    return None
+
+
+def _attempt_ids(observer: Any, since: int) -> tuple[str, ...]:
+    """Which attempt records this request produced, by stable identifier.
+
+    ``logical_request_id#attempt_number`` rather than a fingerprint: an
+    operator reading a report wants to find the line in ``attempts/index.jsonl``,
+    and the fingerprint changes if anything about the attempt does.
+    """
+    records = list(getattr(observer, "records", ()) or ())
+    return tuple(
+        f"{record.logical_request_id}#{record.attempt_number}"
+        for record in records[since:]
+    )
+
+
+def _replayed(response_type: Any, endpoint: Any, body: bytes, record: Any) -> Any:
+    """A response object over stored bytes, under the recorded headers.
+
+    The headers matter: they carry the content type and charset the capture
+    decoded under, so re-reading the bytes without them would be a *different*
+    reading of the same evidence.
+    """
+    headers = dict(getattr(record, "response_headers", {}) or {})
+    return response_type(
+        status_code=int(getattr(record, "http_status", 200) or 200),
+        body=body,
+        headers=headers,
+        request_id=str(getattr(record, "request_id", "") or ""),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ThetaDataResearchPipeline:
     """Everything one research session needs, built once from one config.
@@ -1609,6 +1656,307 @@ class ThetaDataResearchPipeline:
     # then call the engine with an engine config obtained from somewhere else.
     # Every step was optional, and each one omitted produced a plausible-looking
     # snapshot with a piece of its provenance missing.
+
+    # -- raw acquisition, which is not parsing --------------------------------
+
+    def raw_request_parameters(self) -> tuple[tuple[Any, dict[str, Any]], ...]:
+        """Every planned endpoint and the exact query it will be asked with.
+
+        Derived from the canonical sources and nothing else: the capture plan
+        says which endpoints, the chain request says the symbol, DTE window,
+        strike range and minimum time, the Greeks parameters say the rate and
+        dividend the vendor computes under, and the index symbol comes from the
+        same chain request. Nothing here needs a ``ChainSnapshot`` to exist,
+        which is the point -- a snapshot is a *result* of parsing, and the
+        requests must be knowable before anything has been parsed.
+        """
+        from src.adapters.thetadata.endpoints import Endpoint
+
+        request = self.runtime.default_chain_request
+        greeks = self.runtime.client.greeks
+        chain_query = request.as_query()
+        greeks_query = {**chain_query, **greeks.as_query()}
+
+        per_endpoint: dict[Any, dict[str, Any]] = {
+            Endpoint.INDEX_PRICE_SNAPSHOT: {"symbol": request.symbol},
+            Endpoint.OPTION_QUOTE_SNAPSHOT: chain_query,
+            Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT: chain_query,
+            Endpoint.OPTION_GREEKS_FIRST_ORDER: greeks_query,
+            Endpoint.OPTION_GREEKS_SECOND_ORDER: greeks_query,
+            Endpoint.OPTION_GREEKS_ALL: greeks_query,
+        }
+        return tuple(
+            (endpoint, dict(per_endpoint.get(endpoint, chain_query)))
+            for endpoint in self._acquisition_order()
+        )
+
+    def _acquisition_order(self) -> tuple[Any, ...]:
+        """The plan's endpoints, index first, then the chain, then the greeks.
+
+        Ordered rather than arbitrary so two runs of one profile produce
+        comparable reports -- but the order carries no dependency. Every
+        request is built before the first one is sent, so a failure anywhere
+        leaves the rest unaffected.
+        """
+        from src.adapters.thetadata.endpoints import Endpoint
+
+        preferred = (
+            Endpoint.INDEX_PRICE_SNAPSHOT,
+            Endpoint.OPTION_QUOTE_SNAPSHOT,
+            Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT,
+            Endpoint.OPTION_GREEKS_FIRST_ORDER,
+            Endpoint.OPTION_GREEKS_SECOND_ORDER,
+            Endpoint.OPTION_GREEKS_ALL,
+        )
+        required = set(self.capture_plan.required_endpoints)
+        ordered = [e for e in preferred if e in required]
+        ordered += [e for e in self.capture_plan.required_endpoints if e not in preferred]
+        return tuple(ordered)
+
+    def capture_required_endpoints_raw(
+        self,
+        *,
+        capture: Any,
+        as_of: datetime,
+    ) -> Any:
+        """Request every planned endpoint and store whatever comes back.
+
+        **The v2.1.15 correction.** The operator used to reach the wire through
+        ``fetch_chain()``, which parses each response in order to build the
+        next request. An index snapshot that came back as an HTML error page --
+        a maintenance window, a proxy, a schema nobody had seen -- raised before
+        the quote request was issued, so the session that exists to *discover
+        the real schemas* captured one response out of four and stopped.
+
+        Here every request is derived up front from the configuration, issued
+        independently, and stored before anything looks at it. A body that does
+        not parse is a finding recorded against that endpoint; the sweep
+        continues.
+
+        Stopping early is permitted only under the named systemic policy in
+        :mod:`src.adapters.thetadata.raw_acquisition` -- rejected credentials,
+        nothing answering, a spent rate-limit budget, operator cancellation, or
+        a store that cannot write. The reason is recorded either way.
+
+        Returns a :class:`RawAcquisitionOutcome`. Computes no GEX and assembles
+        no chain.
+        """
+        from src.adapters.errors import endpoint_of_error, redact_secrets
+        from src.adapters.thetadata.endpoints import MINIMUM_TIER, Tier, tier_satisfies
+        from src.adapters.thetadata.raw_acquisition import (
+            RawAcquisitionOutcome,
+            RawAcquisitionStopReason,
+            RawEndpointAcquisitionStatus,
+            RawEndpointCaptureResult,
+            classify_failure,
+            nothing_is_answering,
+            stop_reason_for,
+        )
+
+        self.validate_integrity()
+        planned = self.raw_request_parameters()
+        client = self.runtime.client
+        observer = getattr(getattr(client, "transport", None), "attempt_observer", None)
+
+        results: list[RawEndpointCaptureResult] = []
+        stop = RawAcquisitionStopReason.NONE
+        stop_detail = ""
+
+        for endpoint, params in planned:
+            frozen = tuple(sorted((str(k), str(v)) for k, v in params.items()))
+            if stop is not RawAcquisitionStopReason.NONE:
+                results.append(
+                    RawEndpointCaptureResult(
+                        endpoint=endpoint.value,
+                        request_parameters=frozen,
+                        record_id=None,
+                        attempt_record_ids=(),
+                        http_status=None,
+                        acquisition_status=(
+                            RawEndpointAcquisitionStatus.NOT_ATTEMPTED
+                        ),
+                        transport_error_code=None,
+                        detail=f"stopped under {stop.value}",
+                    )
+                )
+                continue
+
+            if not tier_satisfies(
+                Tier(self.config.tier), MINIMUM_TIER[endpoint]
+            ):  # pragma: no cover - refused at config load
+                results.append(
+                    RawEndpointCaptureResult(
+                        endpoint=endpoint.value,
+                        request_parameters=frozen,
+                        record_id=None,
+                        attempt_record_ids=(),
+                        http_status=None,
+                        acquisition_status=(
+                            RawEndpointAcquisitionStatus.TIER_NOT_ENTITLED
+                        ),
+                        transport_error_code=None,
+                        detail=f"tier {self.config.tier} cannot serve this endpoint",
+                    )
+                )
+                continue
+
+            before = len(getattr(observer, "records", ()) or ())
+            try:
+                acquired = client.acquire(endpoint, params, capture=capture)
+            except BaseException as error:  # classified, never swallowed silently
+                stop = stop_reason_for(error)
+                http_status = _error_status(error)
+                if stop is RawAcquisitionStopReason.STORAGE_FAILURE:
+                    status = RawEndpointAcquisitionStatus.STORAGE_FAILED
+                elif http_status is not None:
+                    # The vendor answered; the transport refuses to hand a
+                    # non-success body on as data. The bytes are still preserved
+                    # -- content-addressed in the attempt log -- and the sweep
+                    # continues, because a 400 on one endpoint says nothing
+                    # about whether the next one will answer.
+                    status = RawEndpointAcquisitionStatus.VENDOR_REFUSED
+                else:
+                    status = RawEndpointAcquisitionStatus.NO_RESPONSE
+                results.append(
+                    RawEndpointCaptureResult(
+                        endpoint=endpoint_of_error(error) or endpoint.value,
+                        request_parameters=frozen,
+                        record_id=None,
+                        attempt_record_ids=_attempt_ids(observer, before),
+                        http_status=http_status,
+                        acquisition_status=status,
+                        transport_error_code=type(error).__name__,
+                        detail=redact_secrets(str(error))[:400],
+                        error_code=classify_failure(error),
+                    )
+                )
+                if stop is RawAcquisitionStopReason.NONE and nothing_is_answering(
+                    results
+                ):
+                    stop = RawAcquisitionStopReason.CONNECTION_UNAVAILABLE
+                    stop_detail = (
+                        f"{len(results)} consecutive endpoints produced no "
+                        "response; nothing is listening at the configured "
+                        "address"
+                    )
+                elif stop is not RawAcquisitionStopReason.NONE:
+                    stop_detail = redact_secrets(str(error))[:400]
+                if isinstance(error, BaseException) and not isinstance(error, Exception):
+                    # KeyboardInterrupt and SystemExit: the finding is recorded,
+                    # then the sweep ends. Not re-raised -- the caller gets a
+                    # report saying the operator cancelled, which is more useful
+                    # than a traceback with an unexplained directory beside it.
+                    stop = RawAcquisitionStopReason.OPERATOR_CANCELLED
+                    break
+                continue
+
+            results.append(
+                RawEndpointCaptureResult(
+                    endpoint=endpoint.value,
+                    request_parameters=frozen,
+                    record_id=acquired.record_id,
+                    attempt_record_ids=_attempt_ids(observer, before),
+                    http_status=acquired.http_status,
+                    acquisition_status=RawEndpointAcquisitionStatus.ACQUIRED,
+                    transport_error_code=None,
+                    byte_length=acquired.decoded.byte_length,
+                )
+            )
+
+        return RawAcquisitionOutcome(
+            results=tuple(results),
+            stop_reason=stop,
+            stop_detail=stop_detail,
+            planned_endpoints=tuple(endpoint.value for endpoint, _ in planned),
+        )
+
+    def parse_captured_endpoints(
+        self,
+        *,
+        outcome: Any,
+        store: Any,
+    ) -> dict[str, Any]:
+        """Read the stored bytes and say what they are. After the capture.
+
+        Runs against the raw store, not against a live response, so by the time
+        anything here can fail every byte the session paid for is already on
+        disk and verified. A parser finding is a finding; it cannot shorten a
+        capture that is already over.
+        """
+        from src.adapters.errors import redact_secrets
+        from src.adapters.thetadata.endpoints import Endpoint
+        from src.adapters.thetadata.raw_acquisition import (
+            PARSER_REPORT_SCHEMA_VERSION,
+            ParserStatus,
+        )
+        from src.adapters.transport import HttpResponse
+
+        client = self.runtime.client
+        findings: list[dict[str, Any]] = []
+        by_id = {record.record_id: record for record in store.records()}
+
+        for result in outcome.results:
+            if not result.acquired or result.record_id is None:
+                findings.append(
+                    {
+                        "endpoint": result.endpoint,
+                        "record_id": result.record_id,
+                        "parser_status": ParserStatus.PARSER_NOT_RUN.value,
+                        "detail": "no stored bytes to read",
+                        "row_count": None,
+                    }
+                )
+                continue
+            record = by_id.get(result.record_id)
+            try:
+                rows = client.interpret(
+                    _replayed(
+                        HttpResponse,
+                        Endpoint(result.endpoint),
+                        store.get_body(result.record_id),
+                        record,
+                    )
+                )
+            except BaseException as error:
+                findings.append(
+                    {
+                        "endpoint": result.endpoint,
+                        "record_id": result.record_id,
+                        "parser_status": ParserStatus.PARSER_FAILED.value,
+                        "detail": redact_secrets(str(error))[:400],
+                        "error_type": type(error).__name__,
+                        "row_count": None,
+                    }
+                )
+                continue
+            findings.append(
+                {
+                    "endpoint": result.endpoint,
+                    "record_id": result.record_id,
+                    "parser_status": ParserStatus.PARSER_VALID.value,
+                    "detail": "",
+                    "row_count": len(rows),
+                }
+            )
+
+        statuses = {entry["parser_status"] for entry in findings}
+        overall = (
+            ParserStatus.PARSER_VALID
+            if statuses == {ParserStatus.PARSER_VALID.value}
+            else ParserStatus.PARSER_FAILED
+            if ParserStatus.PARSER_FAILED.value in statuses
+            else ParserStatus.PARSER_NOT_RUN
+        )
+        return {
+            "schema_version": PARSER_REPORT_SCHEMA_VERSION,
+            "parser_version": PARSER_VERSION,
+            "parser_status": overall.value,
+            "endpoints": findings,
+            # Said out loud, because a parser report next to a capture is
+            # exactly the thing somebody would mistake for a result.
+            "trusted_gex_computed": False,
+            "chain_assembled": False,
+        }
 
     def fetch_chain(
         self,

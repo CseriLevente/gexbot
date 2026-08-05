@@ -52,6 +52,7 @@ from src.adapters.errors import (
 #: that the raw store can share it without importing this module, and re-exported
 #: here because this is where callers already look for it.
 __all__ = [
+    "AcquiredResponse",
     "ChainAssemblyInputs",
     "ChainCompleteness",
     "ChainRequest",
@@ -97,12 +98,14 @@ from src.adapters.thetadata.endpoints import (
     tier_satisfies,
 )
 from src.adapters.transport import (
+    DecodedBody,
     HttpResponse,
     HttpTransport,
     ResponseTooLargeError,
     RetryBudgetExhaustedError,
     TransportError,
     VendorHTTPError,
+    redact_url,
 )
 from src.domain.completeness import ChainCompleteness, CompletenessStatus
 from src.domain.contracts import (
@@ -1428,6 +1431,35 @@ class UnconfiguredTransport:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AcquiredResponse:
+    """One vendor response, safely stored, not yet interpreted.
+
+    The seam v2.1.15 introduces. Everything before it is "did the bytes
+    arrive and are they written down"; everything after it is "what do they
+    say". Holding the seam as a value rather than a moment in a method is what
+    lets the operator finish acquiring every planned endpoint before the first
+    parser runs.
+    """
+
+    endpoint: Endpoint
+    response: HttpResponse
+    decoded: DecodedBody
+    #: The stored record, when a capture session was supplied. ``None`` means
+    #: the bytes were read and deliberately not kept -- a caller with no
+    #: session -- which is a different thing from a failed write.
+    record: Any = None
+    safe_url: str = ""
+
+    @property
+    def record_id(self) -> str | None:
+        return getattr(self.record, "record_id", None)
+
+    @property
+    def http_status(self) -> int:
+        return self.response.status_code
+
+
 class ThetaDataClient:
     """Request builder + parser over the verified v3 endpoints."""
 
@@ -1480,13 +1512,25 @@ class ThetaDataClient:
             "needs_shadow_gamma": self.needs_shadow_gamma,
         }
 
-    def _get(
+    def acquire(
         self,
         endpoint: Endpoint,
         params: dict[str, Any],
         *,
         capture: CaptureSession | None = None,
-    ) -> list[dict[str, str]]:
+    ) -> AcquiredResponse:
+        """Request one endpoint and store whatever comes back. No parsing.
+
+        The half of ``_get`` that gets bytes, separated from the half that
+        interprets them, because until v2.1.15 they were one method and the
+        interpretation decided whether the *next* endpoint was ever requested.
+
+        Raises only when nothing was stored: a tier that cannot serve the
+        endpoint, a transport that never answered, or a store that could not
+        write. A vendor 500, an HTML error page, a body with the wrong columns
+        -- all of those return normally, with the bytes on disk, because they
+        are findings and the session exists to find them.
+        """
         required = MINIMUM_TIER[endpoint]
         if not tier_satisfies(self.tier, required):
             raise ThetaDataError(
@@ -1504,13 +1548,16 @@ class ThetaDataClient:
             raise
         except RetryBudgetExhaustedError as exc:
             raise ThetaDataRetryExhaustedError(
-                f"{endpoint.value}: retry budget exhausted -- {exc}"
+                f"{endpoint.value}: retry budget exhausted -- {exc}",
+                endpoint=endpoint.value,
+                safe_url=redact_url(url),
             ) from exc
         except VendorHTTPError as exc:
             raise http_error_for(
                 endpoint=endpoint.value,
                 status_code=exc.status_code,
                 request_id=exc.request_id,
+                safe_url=redact_url(url),
             ) from exc
         except ResponseTooLargeError:
             # Deliberately not wrapped: the cap is our decision, not a vendor
@@ -1518,7 +1565,9 @@ class ThetaDataClient:
             raise
         except TransportError as exc:
             raise ThetaDataError(
-                f"{endpoint.value}: transport failure -- {exc}"
+                f"{endpoint.value}: transport failure -- {exc}",
+                endpoint=endpoint.value,
+                safe_url=redact_url(url),
             ) from exc
         received = self._clock()
 
@@ -1527,10 +1576,10 @@ class ThetaDataClient:
         # reading. v2.1.12 stored the reading and called its digest the hash of
         # the vendor's response.
         decoded = response.decode_text()
-        body_text = decoded.text
 
+        record = None
         if capture is not None:
-            capture.capture(
+            record = capture.capture(
                 endpoint=endpoint.value,
                 query_params=dict(params),
                 payload=response.body,
@@ -1539,7 +1588,27 @@ class ThetaDataClient:
                 http_status=response.status_code,
                 request_id=response.request_id,
                 decode=decoded.as_dict(),
+                response_headers=response.safe_headers(),
             )
+        return AcquiredResponse(
+            endpoint=endpoint,
+            response=response,
+            decoded=decoded,
+            record=record,
+            safe_url=redact_url(url),
+        )
+
+    def interpret(self, acquired: AcquiredResponse) -> list[dict[str, str]]:
+        """Turn stored bytes into rows, or say precisely why they are not rows.
+
+        Every raise here is a *finding about a response that is already on
+        disk*. Nothing this method does can lose evidence, which is what makes
+        it safe to run after the capture rather than during it.
+        """
+        endpoint = acquired.endpoint
+        response = acquired.response
+        decoded = acquired.decoded
+        body_text = decoded.text
 
         # Status first, unconditionally, before the body is looked at at all.
         # A 500 is a 500 whether or not its body happens to resemble a vendor
@@ -1555,12 +1624,17 @@ class ThetaDataClient:
                 status_code=response.status_code,
                 request_id=response.request_id,
                 body_length=decoded.byte_length,
+                safe_url=acquired.safe_url,
             )
 
         vendor_error = detect_vendor_error(body_text)
         if vendor_error:
             raise ThetaDataVendorError(
-                f"{endpoint.value} returned a vendor error body: {vendor_error}"
+                f"{endpoint.value} returned a vendor error body: {vendor_error}",
+                endpoint=endpoint.value,
+                safe_url=acquired.safe_url,
+                request_id=response.request_id,
+                status_code=response.status_code,
             )
         # A 200 with an HTML error page parses into zero rows, and zero rows
         # is a legitimate outcome for a filtered request. Confirm the body is
@@ -1572,12 +1646,32 @@ class ThetaDataClient:
         if body_status is not CsvBodyStatus.VALID_EMPTY_CSV:
             raise ThetaDataSchemaError(
                 f"{endpoint.value} returned HTTP {response.status_code} with a "
-                f"body that is not usable CSV ({body_status.value}): {body_detail}"
+                f"body that is not usable CSV ({body_status.value}): {body_detail}",
+                endpoint=endpoint.value,
+                safe_url=acquired.safe_url,
+                request_id=response.request_id,
+                status_code=response.status_code,
             )
 
         rows = parse_csv(normalize_response_body(body_text))
         check_schema(rows, endpoint)
         return rows
+
+    def _get(
+        self,
+        endpoint: Endpoint,
+        params: dict[str, Any],
+        *,
+        capture: CaptureSession | None = None,
+    ) -> list[dict[str, str]]:
+        """Acquire, then interpret. The ordinary read path, unchanged.
+
+        Everything that reads a chain goes through here and gets exactly the
+        behaviour it had before. The raw operator does not: it calls
+        :meth:`acquire` for every planned endpoint first, and interprets
+        afterwards.
+        """
+        return self.interpret(self.acquire(endpoint, params, capture=capture))
 
     def option_quotes(
         self, request: ChainRequest, *, capture: CaptureSession | None = None

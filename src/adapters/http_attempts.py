@@ -33,6 +33,7 @@ from src.domain.digests import digest_of
 
 __all__ = [
     "HTTP_ATTEMPT_SCHEMA_VERSION",
+    "INTERPRETIVE_RESPONSE_HEADERS",
     "SAFE_RESPONSE_HEADERS",
     "HttpAttemptLog",
     "HttpAttemptRecord",
@@ -51,14 +52,36 @@ HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.14"
 #: filtered: an allow-list cannot leak a header nobody thought about, and a
 #: deny-list can.
 SAFE_RESPONSE_HEADERS = (
+    # Content decoding. These decide what the bytes *mean*, so a record without
+    # them cannot be replayed under the reading it was captured with.
+    "content-encoding",
     "content-length",
     "content-type",
+    # Who answered, and when they say they did.
     "date",
+    "x-request-id",
+    "x-thetadata-request-id",
+    # Whether this response is the whole answer. A paginated body that reads as
+    # complete is the one failure a coverage claim cannot detect from the rows.
+    "link",
+    "x-next-page",
+    "x-page",
+    "x-total-count",
+    "x-has-more",
+    # Rate-limit diagnostics, which is what an operator needs after a 429.
     "retry-after",
     "x-ratelimit-limit",
     "x-ratelimit-remaining",
     "x-ratelimit-reset",
-    "x-request-id",
+)
+
+#: The subset whose value changes how a stored body is *interpreted*. These go
+#: into the raw record's fingerprint: a capture replayed under a different
+#: content type is a different reading of the same bytes, and evidence should
+#: not be able to change its meaning without changing its identity.
+INTERPRETIVE_RESPONSE_HEADERS = (
+    "content-encoding",
+    "content-type",
 )
 
 

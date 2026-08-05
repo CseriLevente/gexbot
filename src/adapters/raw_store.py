@@ -311,6 +311,9 @@ class RawResponseRecord:
     #: decoded text.
     raw_response_schema_version: str = RAW_RESPONSE_SCHEMA_VERSION
     body_representation: str = BODY_REPRESENTATION
+    #: The allow-listed response headers, kept because several of them decide
+    #: what the bytes mean and the rest are what an audit asks for.
+    response_headers: Mapping[str, str] = field(default_factory=dict)
     #: How the *parser* read those bytes. Descriptive only: the bytes and their
     #: digest stay authoritative, and this says what one reading of them was.
     content_type: str = ""
@@ -318,6 +321,20 @@ class RawResponseRecord:
     selected_charset: str = ""
     decode_status: str = ""
     decoded_text_hash: str = ""
+
+    @property
+    def interpretive_headers(self) -> dict[str, str]:
+        """The retained headers that change how these bytes read.
+
+        Content type and content encoding decide the charset and whether the
+        body was compressed on the wire. A replay under a different one is a
+        different reading of the same bytes, so they belong to the record's
+        identity rather than beside it.
+        """
+        from src.adapters.http_attempts import INTERPRETIVE_RESPONSE_HEADERS
+
+        held = {k.lower(): v for k, v in dict(self.response_headers).items()}
+        return {name: held[name] for name in INTERPRETIVE_RESPONSE_HEADERS if name in held}
 
     @property
     def raw_response_semantics(self) -> dict[str, Any]:
@@ -330,6 +347,7 @@ class RawResponseRecord:
             "selected_charset": self.selected_charset,
             "decode_status": self.decode_status,
             "decoded_text_hash": self.decoded_text_hash,
+            "response_headers": dict(sorted(self.response_headers.items())),
         }
 
     @property
@@ -408,6 +426,19 @@ def is_portable_location(location: str) -> bool:
         or pathlib.PurePosixPath(location).is_absolute()
         or pathlib.PureWindowsPath(location).is_absolute()
     )
+
+
+def _safe_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Allow-listed, lowercased, sorted. Never a credential.
+
+    Filtered again here rather than trusted from the caller: a record is
+    evidence, and evidence that retained whatever it was handed would be one
+    careless call away from carrying an ``Authorization`` header into an
+    archive.
+    """
+    from src.adapters.http_attempts import safe_headers
+
+    return dict(sorted(safe_headers(headers).items()))
 
 
 def _decode_fields(decode: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -839,6 +870,7 @@ class RawResponseStore(Protocol):
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> RawResponseRecord: ...
 
     def get_payload(self, record_id: str) -> str: ...
@@ -880,6 +912,7 @@ class InMemoryRawStore:
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         if record_id in self._records:
             raise RawStoreError(
@@ -935,6 +968,7 @@ class InMemoryRawStore:
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
             **_decode_fields(decode),
+            response_headers=_safe_headers(response_headers),
         )
         self._records[record_id] = record
         self._payloads[record_id] = _as_body(payload)
@@ -1024,6 +1058,7 @@ class FileRawStore:
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         path = self.payload_path(record_id)
         if path.exists():
@@ -1084,6 +1119,7 @@ class FileRawStore:
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
             **_decode_fields(decode),
+            response_headers=_safe_headers(response_headers),
         )
         # Atomic write: temp file -> flush -> fsync -> rename. A crash midway
         # leaves either nothing or a complete file, never a truncated payload
@@ -1359,6 +1395,7 @@ class FileRawStore:
                     http_status=data["http_status"],
                     payload_hash=data["payload_hash"],
                     payload_location=data["payload_location"],
+                    response_headers=dict(data.get("response_headers", {})),
                     parser_version=data["parser_version"],
                     vendor_schema_version=data.get("vendor_schema_version"),
                     byte_length=data.get("byte_length", 0),
@@ -1420,6 +1457,7 @@ class NullRawStore:
         capture_origin: CaptureOrigin = CaptureOrigin.UNKNOWN_ORIGIN,
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         return RawResponseRecord(
             record_id=record_id,
@@ -1470,6 +1508,7 @@ class NullRawStore:
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
             **_decode_fields(decode),
+            response_headers=_safe_headers(response_headers),
         )
 
     def get_payload(self, record_id: str) -> str:
@@ -1775,6 +1814,7 @@ class CaptureSession:
         request_id: str = "",
         capture_origin: CaptureOrigin | None = None,
         decode: Mapping[str, Any] | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         sequence = self.next_sequence()
         record = self.store.put(
@@ -1799,6 +1839,7 @@ class CaptureSession:
                 else replace(self.identity, capture_origin=capture_origin)
             ),
             decode=decode,
+            response_headers=response_headers,
         )
         self.captured.append(record)
         return record
@@ -1873,6 +1914,9 @@ class ManifestRecord:
     #: decoded text.
     raw_response_schema_version: str = RAW_RESPONSE_SCHEMA_VERSION
     body_representation: str = BODY_REPRESENTATION
+    #: The allow-listed response headers, kept because several of them decide
+    #: what the bytes mean and the rest are what an audit asks for.
+    response_headers: Mapping[str, str] = field(default_factory=dict)
     #: How the *parser* read those bytes. Descriptive only: the bytes and their
     #: digest stay authoritative, and this says what one reading of them was.
     content_type: str = ""
@@ -1880,6 +1924,20 @@ class ManifestRecord:
     selected_charset: str = ""
     decode_status: str = ""
     decoded_text_hash: str = ""
+
+    @property
+    def interpretive_headers(self) -> dict[str, str]:
+        """The retained headers that change how these bytes read.
+
+        Content type and content encoding decide the charset and whether the
+        body was compressed on the wire. A replay under a different one is a
+        different reading of the same bytes, so they belong to the record's
+        identity rather than beside it.
+        """
+        from src.adapters.http_attempts import INTERPRETIVE_RESPONSE_HEADERS
+
+        held = {k.lower(): v for k, v in dict(self.response_headers).items()}
+        return {name: held[name] for name in INTERPRETIVE_RESPONSE_HEADERS if name in held}
 
     @property
     def raw_response_semantics(self) -> dict[str, Any]:
@@ -1892,6 +1950,7 @@ class ManifestRecord:
             "selected_charset": self.selected_charset,
             "decode_status": self.decode_status,
             "decoded_text_hash": self.decoded_text_hash,
+            "response_headers": dict(sorted(self.response_headers.items())),
         }
 
     @property

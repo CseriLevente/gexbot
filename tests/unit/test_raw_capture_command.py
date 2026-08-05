@@ -572,7 +572,7 @@ def test_a_live_run_captures_verifies_and_reports(tmp_path):
 
     assert report["schema_version"] == RAW_CAPTURE_RUN_SCHEMA_VERSION
     assert report["mode"] == "LIVE"
-    assert report["run_state"] == RawCaptureRunState.COMPLETED_VERIFIED.value
+    assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value
     assert report["partial"] is False
     assert report["run_id"].startswith("capture-")
     assert report["operation_id"]
@@ -690,12 +690,18 @@ def test_a_partial_failure_still_writes_a_manifest_and_a_summary(tmp_path):
     """
     report, _ = failing_run(tmp_path)
 
-    assert report["run_state"] == RawCaptureRunState.FAILED_PARTIAL.value
+    assert report["run_state"] == RawCaptureRunState.FAILED_PARTIAL_ACQUISITION.value
     assert report["partial"] is True
     assert report["error_code"] in ("RETRY_EXHAUSTED", "VENDOR_HTTP_ERROR")
     assert report["error_message"]
     assert "/v3/option/snapshot/quote" in report["missing_endpoints"]
     assert "/v3/index/snapshot/price" in report["completed_endpoints"]
+    # And -- the v2.1.15 correction -- the endpoints *after* the failing one
+    # were still requested. A 503 on quotes is not a reason to skip open
+    # interest, which is the weight on every GEX term.
+    acquired = set(report["raw_acquisition"]["acquired_endpoints"])
+    assert "/v3/option/snapshot/open_interest" in acquired
+    assert "/v3/option/snapshot/greeks/first_order" in acquired
 
     manifest_path = run_path(report, "manifest_path")
     summary_path = run_path(report, "summary_path")

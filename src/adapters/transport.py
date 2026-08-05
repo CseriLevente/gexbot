@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 from src.adapters.errors import ThetaDataResponseTooLargeError
 
@@ -119,6 +119,15 @@ def _parameters_hash(params: Mapping[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def redact_url(url: str) -> str:
+    """The URL with credential-shaped query values replaced.
+
+    Public because exceptions carry it now: an operator needs to know which
+    request failed, and the full URL reaches a log, a traceback and a ticket.
+    """
+    return _redact(url)
 
 
 def _redact(url: str) -> str:
@@ -267,6 +276,18 @@ def decode_body(body: bytes, headers: Mapping[str, str] | None = None) -> Decode
     )
 
 
+#: Identity-checked sentinels. ``body=b""`` is a real empty HTTP response --
+#: a 204, a filtered query that matched nothing -- and it is a *different fact*
+#: from "this fixture did not supply a body". v2.1.14 spelled both ``b""``, so
+#: a genuinely empty vendor response was recorded ``SUPPLIED_AS_TEXT``: a claim
+#: that no decoding happened, about bytes that came off a socket.
+#:
+#: Compared with ``is``, never ``==``, so no value a caller could construct
+#: collides with them.
+BODY_NOT_SUPPLIED: Final[bytes] = b"\x00<gex:body-not-supplied>"
+TEXT_NOT_SUPPLIED: Final[str] = "\x00<gex:text-not-supplied>"
+
+
 @dataclass(frozen=True, slots=True)
 class HttpResponse:
     """One vendor response, bytes first.
@@ -275,10 +296,13 @@ class HttpResponse:
     that a fixture can still be written as ``HttpResponse(status_code=200,
     text="a,b\\n1,2\\n")`` -- ``__post_init__`` fills in whichever was not
     supplied, and a caller who supplies text is recorded as having done so.
+
+    Supplying neither is a response with an empty body, decoded as such. Only a
+    caller who actually passed ``text=`` is ``SUPPLIED_AS_TEXT``.
     """
 
     status_code: int
-    text: str = ""
+    text: str = TEXT_NOT_SUPPLIED
     headers: Mapping[str, str] = field(default_factory=dict)
     url: str = ""
     request_id: str = ""
@@ -287,18 +311,26 @@ class HttpResponse:
     #: Vendor error code parsed from the body, when the vendor supplies one.
     vendor_error_code: str | None = None
     #: The entity body after content decoding. See :data:`BODY_REPRESENTATION`.
-    body: bytes = b""
+    body: bytes = BODY_NOT_SUPPLIED
     _supplied_as_text: bool = field(default=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.body:
-            if not self.text:
-                object.__setattr__(
-                    self, "text", decode_body(self.body, self.headers).text
-                )
+        gave_body = self.body is not BODY_NOT_SUPPLIED
+        gave_text = self.text is not TEXT_NOT_SUPPLIED
+        if gave_body:
+            object.__setattr__(
+                self,
+                "text",
+                self.text if gave_text else decode_body(self.body, self.headers).text,
+            )
             return
-        object.__setattr__(self, "body", self.text.encode("utf-8"))
-        object.__setattr__(self, "_supplied_as_text", True)
+        if gave_text:
+            object.__setattr__(self, "body", self.text.encode("utf-8"))
+            object.__setattr__(self, "_supplied_as_text", True)
+            return
+        # Neither: a response with no body. Real bytes, of which there are none.
+        object.__setattr__(self, "body", b"")
+        object.__setattr__(self, "text", "")
 
     def decode_text(self) -> DecodedBody:
         """The typed reading of this response's bytes."""
@@ -306,6 +338,20 @@ class HttpResponse:
         if self._supplied_as_text:
             return replace(decoded, decode_status=DecodeStatus.SUPPLIED_AS_TEXT)
         return decoded
+
+    def safe_headers(self) -> dict[str, str]:
+        """The response headers that may be written down. Allow-listed.
+
+        Retained on the raw record since v2.1.15 because several of them change
+        what the bytes *mean*: the content type and charset decide how they
+        decode, the vendor request id is what support asks for, and the date
+        and pagination headers are how a reader knows whether the response is
+        the whole answer. An allow-list cannot leak a header nobody thought
+        about; a deny-list can.
+        """
+        from src.adapters.http_attempts import safe_headers
+
+        return safe_headers(self.headers)
 
     @property
     def retry_after_seconds(self) -> float | None:

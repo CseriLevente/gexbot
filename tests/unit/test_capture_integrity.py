@@ -489,10 +489,21 @@ def test_a_vendor_status_gets_its_own_classification(tmp_path, status, code, exi
     from src.tools.capture_thetadata_once import _EXIT_FOR
 
     assert _EXIT_FOR[report["error_code"]] is exit_code
-    assert report["run_state"] == RawCaptureRunState.FAILED_PARTIAL.value
+    # The vendor answered and the transport refused to hand a non-success body
+    # on as data, so no endpoint produced a raw record. Every endpoint was
+    # still *attempted* -- see §1 -- which is what separates this from v2.1.14.
+    assert report["run_state"] == RawCaptureRunState.FAILED_PARTIAL_ACQUISITION.value
+    assert report["raw_acquisition"]["attempted_endpoints"], report["raw_acquisition"]
 
 
-def test_a_two_hundred_vendor_error_document_is_a_vendor_error(tmp_path):
+def test_a_two_hundred_vendor_error_document_is_captured_then_reported(tmp_path):
+    """A 200 carrying an error document is *evidence*, and it is stored.
+
+    v2.1.14 raised out of the fetch path, so the bytes reached the store for
+    one endpoint and the rest were never requested. Now the body is acquired
+    like any other, the run completes, and the parser report is where the
+    finding lives.
+    """
     from tests.certification_fixtures import AS_OF
 
     report = run_capture(
@@ -501,11 +512,25 @@ def test_a_two_hundred_vendor_error_document_is_a_vendor_error(tmp_path):
         transport=_StatusTransport(200, b'{"error":"no data for that symbol"}'),
         as_of=AS_OF,
     )
-    assert report["error_code"] in ("VENDOR_HTTP_ERROR", "SCHEMA_ERROR")
+    assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value
+    assert report["parser_state"] == "PARSER_FAILED"
     assert "INTERNAL_ERROR" not in report["error_code"]
+    findings = json.loads(
+        run_path(report, "parser_report_path").read_text(encoding="utf-8")
+    )
+    assert {entry["parser_status"] for entry in findings["endpoints"]} == {
+        "PARSER_FAILED"
+    }
 
 
-def test_a_two_hundred_malformed_csv_is_a_schema_error(tmp_path):
+def test_a_two_hundred_malformed_csv_is_a_parser_finding_not_a_lost_capture(tmp_path):
+    """The headline v2.1.15 regression, at the operator's level.
+
+    An HTML error page on a 200 used to raise inside ``fetch_chain``, which is
+    the call that decides whether the *next* endpoint is requested. So the one
+    thing the first paid session exists to discover -- an unexpected schema --
+    was the thing that stopped it discovering anything else.
+    """
     from tests.certification_fixtures import AS_OF
 
     report = run_capture(
@@ -514,7 +539,13 @@ def test_a_two_hundred_malformed_csv_is_a_schema_error(tmp_path):
         transport=_StatusTransport(200, b"<html><body>not csv</body></html>"),
         as_of=AS_OF,
     )
-    assert report["error_code"] == "SCHEMA_ERROR"
+    acquisition = report["raw_acquisition"]
+    assert acquisition["missing_endpoints"] == []
+    assert sorted(acquisition["acquired_endpoints"]) == sorted(
+        acquisition["planned_endpoints"]
+    )
+    assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value
+    assert report["parser_state"] == "PARSER_FAILED"
 
 
 def test_an_oversized_live_response_has_its_own_exit_code(tmp_path):
@@ -685,7 +716,7 @@ def test_a_crlf_vendor_completes_a_verified_run(tmp_path):
 
     report = live_run(tmp_path, transport=transport)
 
-    assert report["run_state"] == "COMPLETED_VERIFIED"
+    assert report["run_state"] == "COMPLETED_RAW_VERIFIED"
     assert report["integrity_ok"] is True
     assert report["capture_verified"] is True
     assert report["verification_failures"] == []
@@ -709,7 +740,7 @@ def test_a_run_directory_verifies_after_it_has_been_moved(tmp_path):
     from src.adapters.raw_store import FileRawStore
 
     report = live_run(tmp_path, destination=tmp_path / "original")
-    assert report["run_state"] == "COMPLETED_VERIFIED"
+    assert report["run_state"] == "COMPLETED_RAW_VERIFIED"
 
     archive = tmp_path / "archive" / "renamed-capture"
     shutil.copytree(tmp_path / "original", archive)

@@ -1479,19 +1479,27 @@ def _attempt_ids(observer: Any, since: int) -> tuple[str, ...]:
     )
 
 
-def _replayed(response_type: Any, endpoint: Any, body: bytes, record: Any) -> Any:
-    """A response object over stored bytes, under the recorded headers.
+def _replayed(endpoint: Any, body: bytes, record: Any) -> Any:
+    """The stored bytes, as something :meth:`interpret` can read.
 
     The headers matter: they carry the content type and charset the capture
     decoded under, so re-reading the bytes without them would be a *different*
     reading of the same evidence.
     """
-    headers = dict(getattr(record, "response_headers", {}) or {})
-    return response_type(
+    from src.adapters.thetadata.client import AcquiredResponse
+    from src.adapters.transport import HttpResponse
+
+    response = HttpResponse(
         status_code=int(getattr(record, "http_status", 200) or 200),
         body=body,
-        headers=headers,
+        headers=dict(getattr(record, "response_headers", {}) or {}),
         request_id=str(getattr(record, "request_id", "") or ""),
+    )
+    return AcquiredResponse(
+        endpoint=endpoint,
+        response=response,
+        decoded=response.decode_text(),
+        record=record,
     )
 
 
@@ -1710,7 +1718,9 @@ class ThetaDataResearchPipeline:
         )
         required = set(self.capture_plan.required_endpoints)
         ordered = [e for e in preferred if e in required]
-        ordered += [e for e in self.capture_plan.required_endpoints if e not in preferred]
+        ordered += [
+            e for e in self.capture_plan.required_endpoints if e not in preferred
+        ]
         return tuple(ordered)
 
     def capture_required_endpoints_raw(
@@ -1772,9 +1782,7 @@ class ThetaDataResearchPipeline:
                         record_id=None,
                         attempt_record_ids=(),
                         http_status=None,
-                        acquisition_status=(
-                            RawEndpointAcquisitionStatus.NOT_ATTEMPTED
-                        ),
+                        acquisition_status=(RawEndpointAcquisitionStatus.NOT_ATTEMPTED),
                         transport_error_code=None,
                         detail=f"stopped under {stop.value}",
                     )
@@ -1841,7 +1849,9 @@ class ThetaDataResearchPipeline:
                     )
                 elif stop is not RawAcquisitionStopReason.NONE:
                     stop_detail = redact_secrets(str(error))[:400]
-                if isinstance(error, BaseException) and not isinstance(error, Exception):
+                if isinstance(error, BaseException) and not isinstance(
+                    error, Exception
+                ):
                     # KeyboardInterrupt and SystemExit: the finding is recorded,
                     # then the sweep ends. Not re-raised -- the caller gets a
                     # report saying the operator cancelled, which is more useful
@@ -1889,7 +1899,6 @@ class ThetaDataResearchPipeline:
             PARSER_REPORT_SCHEMA_VERSION,
             ParserStatus,
         )
-        from src.adapters.transport import HttpResponse
 
         client = self.runtime.client
         findings: list[dict[str, Any]] = []
@@ -1911,7 +1920,6 @@ class ThetaDataResearchPipeline:
             try:
                 rows = client.interpret(
                     _replayed(
-                        HttpResponse,
                         Endpoint(result.endpoint),
                         store.get_body(result.record_id),
                         record,

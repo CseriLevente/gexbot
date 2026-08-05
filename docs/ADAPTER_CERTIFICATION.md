@@ -1196,3 +1196,124 @@ from the new location.
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
 `ADAPTER_CERTIFIED`. What changed is that a capture taken with it can be verified
 by somebody who is not the machine that took it.
+
+---
+
+## v2.1.15: getting the bytes is not understanding them
+
+### The command was raw-only and parsed as it went
+
+`pipeline.fetch_chain()` fetches the index snapshot, **parses it** to read the
+spot, and uses that to build the chain request. Every endpoint after the first
+is downstream of a successful parse of the one before.
+
+For a session whose entire purpose is to find out what the vendor actually
+sends, that is exactly backwards. An HTML error page on the index endpoint --
+maintenance, a proxy, a schema nobody had seen -- raised before the quote
+request existed. The operator paid for four endpoints and got one, and the
+reason was the single most interesting thing the session had found.
+
+Acquisition and interpretation are now separate operations:
+
+* `ThetaDataClient.acquire(endpoint, params, capture=...)` issues one request
+  and stores whatever comes back. It raises only when nothing was stored.
+* `ThetaDataClient.interpret(acquired)` turns stored bytes into rows, or says
+  precisely why they are not rows. Every raise is a finding about a response
+  that is already on disk.
+* `_get()` is the two composed, so every existing chain reader behaves exactly
+  as before.
+
+`pipeline.capture_required_endpoints_raw()` builds every planned request up
+front -- from the capture plan, the chain request, the index symbol, the Greeks
+parameters and the tier, none of which needs a `ChainSnapshot` -- issues them
+independently, and returns one `RawEndpointCaptureResult` per endpoint.
+
+**A 200 that does not parse is `ACQUIRED`.** A non-2xx is `VENDOR_REFUSED`,
+with the body preserved byte-exact in the attempt log, and the sweep continues.
+
+### Stopping early is a policy, not an escaping exception
+
+Five named reasons, and only five: rejected credentials, a retry budget spent on
+**429s specifically**, two consecutive endpoints answering with nothing at all,
+operator cancellation, and a store that cannot write. The reason is recorded in
+the run report whether or not it fired.
+
+A 503 retried to exhaustion on one endpoint is a finding about that endpoint.
+Treating it as systemic -- which the first draft of this release did -- would
+have reintroduced the defect the release exists to remove.
+
+### Two states, because they are two questions
+
+`run_state` is about bytes: did every planned response arrive, and is it stored
+and verified. `parser_state` is about what those bytes say. A capture where all
+four endpoints answered and none of them parse is a **successful** discovery
+session, and reporting it as a failed run is what made a schema error look like
+a reason to stop requesting.
+
+Parsing runs after finalization, against the store, into `parser-report.json`
+with its own schema version. No GEX is computed.
+
+### The claim is guarded from the moment it is made
+
+`mkdir(exist_ok=False)` makes the directory this run's responsibility. v2.1.14
+then constructed the attempt log, three stores, the transport and the pipeline,
+validated durability, derived the origin, opened the capture session and wrote
+the intent -- all before the guard. Any of them raising left an empty directory
+nobody had written a word about, which the next invocation refused as an earlier
+run's.
+
+A bootstrap run object now exists before anything else can fail, and everything
+after the claim is inside one `try/except/finally`. Every post-claim failure
+produces `capture-bootstrap-failure.json` naming which resources had been built;
+a directory containing nothing at all is removed rather than left ownerless.
+
+### Replay consumes the bytes, not a reading of them
+
+`StoredPayloadTransport.from_capture()` used `store.get_payload()`, which
+decodes UTF-8 with replacement. A latin-1 body replayed as U+FFFD; a body with
+one invalid byte was re-encoded into something the capture never contained. A
+replay that changes the evidence is not a replay, and the comparison it feeds --
+"does the rebuilt chain equal the original?" -- was answering a different
+question from the one it claimed to.
+
+It now reads `get_body()` and carries the captured headers, so the ordinary
+decoder selects the charset the capture selected. Before anything is parsed, the
+reconstructed response is checked against the record's own decode: body hash,
+byte length, decode status, selected charset, decoded-text hash. A disagreement
+refuses the replay.
+
+### Evidence that verifies after the process is gone
+
+`HttpAttemptLog(root)` starts with an empty in-memory list, and `verify_bodies`
+iterates over it -- so opening an archived capture and asking whether it had
+been tampered with always answered "no". `open_existing()` derives everything
+from disk: the index is parsed, every schema validated, every fingerprint
+recomputed, every body located, hashed and measured, and orphaned bodies
+reported. A malformed line in the *middle* of the index is a finding; only a
+torn final line is forgiven, because that is an interrupted append and
+forgiving it is what append-only buys.
+
+The index hash, the counts and the schema are recorded in the capture summary at
+finalization, so a later reader can tell whether the log has changed since.
+
+### A location that cannot lie
+
+`verify_integrity` confirmed `payload_location` was relative and then derived
+the path from `record_id` instead. An index could name `missing/other.raw` and
+the scan reported VALID. The location must now equal the store's canonical
+location for that record, it is carried on `ManifestRecord`, it is inside the
+manifest hash, and `verify_capture` compares it against the store.
+
+### The disk requirement comes from the configuration
+
+The shipped profile allows a 64 MiB response per endpoint, four endpoints, four
+attempts each. The preflight asked for 64 MiB total -- so it passed on a disk
+that could not hold one endpoint's response. It is now derived: endpoints x cap
+x (attempts + 1), plus fixed overhead, times a stated safety margin, printed by
+the dry run with its inputs.
+
+### What this changes about the shipped state
+
+Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
+`ADAPTER_CERTIFIED`. What changed is that the first session will now come back
+with all four endpoints' bytes whatever any of them turn out to contain.

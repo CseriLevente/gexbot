@@ -109,7 +109,7 @@ first and re-run the verification in step 2.
 ## 4. Produce the archive
 
 ```bash
-git archive --format=zip --output=gex-bot-v2.1.14.zip HEAD
+git archive --format=zip --output=gex-bot-v2.1.15.zip HEAD
 ```
 
 The archive is:
@@ -126,12 +126,12 @@ Record the digest alongside the artefact so it can be verified later:
 
 ```bash
 # Unix
-sha256sum gex-bot-v2.1.14.zip
+sha256sum gex-bot-v2.1.15.zip
 ```
 
 ```powershell
 # Windows
-Get-FileHash gex-bot-v2.1.14.zip -Algorithm SHA256
+Get-FileHash gex-bot-v2.1.15.zip -Algorithm SHA256
 ```
 
 ### The digest must describe the file that was uploaded
@@ -146,7 +146,7 @@ would get a mismatch and have no way to tell an innocent re-wrap from a
 substituted artefact. Verify the digest against the uploaded file, after upload:
 
 ```powershell
-Get-FileHash .\gex-bot-v2.1.14.zip -Algorithm SHA256   # the file being sent
+Get-FileHash .\gex-bot-v2.1.15.zip -Algorithm SHA256   # the file being sent
 ```
 
 ---

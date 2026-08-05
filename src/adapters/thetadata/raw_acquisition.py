@@ -123,7 +123,9 @@ class RawAcquisitionStopReason(str, Enum):
 #: The systemic reasons, as a set, so a caller can ask "was this systemic?"
 #: without enumerating the enum and drifting from it.
 SYSTEMIC_STOP_REASONS = frozenset(
-    reason for reason in RawAcquisitionStopReason if reason is not RawAcquisitionStopReason.NONE
+    reason
+    for reason in RawAcquisitionStopReason
+    if reason is not RawAcquisitionStopReason.NONE
 )
 
 
@@ -229,9 +231,7 @@ class RawAcquisitionOutcome:
 
     @property
     def missing_endpoints(self) -> tuple[str, ...]:
-        return tuple(
-            sorted(set(self.planned_endpoints) - set(self.acquired_endpoints))
-        )
+        return tuple(sorted(set(self.planned_endpoints) - set(self.acquired_endpoints)))
 
     @property
     def any_response(self) -> bool:

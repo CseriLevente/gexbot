@@ -301,14 +301,18 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.14"
+    assert package["project"]["version"] == "2.1.15"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
-    # The engine and parser stay at 2.1.10: v2.1.11 changed what a universe has
-    # to prove, not how a payload is read or how a gamma is computed. A version
-    # bumped because a release happened says nothing about what changed.
+    # The engine stays at 2.1.10. Nothing about how rows become a gamma has
+    # changed since, and a version bumped because a release happened says
+    # nothing about what changed.
     assert "gex-engine/2.1.10" in text
-    assert "thetadata-v3-parser/2.1.10" in text
+    # The parser moved in v2.1.15 because *how a stored payload becomes text*
+    # changed: replay now consumes the exact bytes under the captured content
+    # type and charset rather than a UTF-8-with-replacement reading of them.
+    assert "thetadata-v3-parser/2.1.15" in text
+    assert "parser-report/2.1.15" in text
     # A version table that stops being exhaustive stops being the thing a reader
     # consults, so every schema this release touched is in it.
     assert "settlement-evidence/2.1.10" in text
@@ -321,11 +325,11 @@ def test_all_three_versions_are_documented():
         "universe-resolver/2.1.12",
         "adapter-certification/2.1.13",
         "universe-documentation/2.1.12",
-        "raw-capture-run/2.1.14",
-        "raw-capture-intent/2.1.14",
-        "http-attempt/2.1.14",
+        "raw-capture-run/2.1.15",
+        "raw-capture-intent/2.1.15",
+        "http-attempt/2.1.15",
         "analytical-readiness/2.1.13",
-        "raw-response/2.1.14",
-        "raw-capture-manifest/2.1.14",
+        "raw-response/2.1.15",
+        "raw-capture-manifest/2.1.15",
     ):
         assert version in text, version

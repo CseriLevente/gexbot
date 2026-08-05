@@ -64,11 +64,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.14"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.15"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.14"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.15"
 
 _RULE = "-" * 76
 
@@ -333,6 +333,19 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
             raw_store=FileRawStore(pathlib.Path(probe) / "raw"),
         )
 
+    requirement = disk_requirement(
+        endpoints=len(pipeline.capture_plan.required_endpoints),
+        max_response_bytes=int(loaded.thetadata.max_response_bytes),
+        max_attempts=int(loaded.thetadata.max_retries) + 1,
+    )
+    anchor, free = _free_bytes(destination)
+    planned_disk = {
+        **requirement,
+        "measured_at": str(anchor),
+        "available_free_bytes": free,
+        "sufficient": free >= int(requirement["minimum_required_free_bytes"]),
+    }
+
     # What the *live* transport would report, derived from the same URL the live
     # run will send to. A local Theta Terminal is a different origin from a
     # direct vendor call, and the shipped profile is the local one.
@@ -356,6 +369,10 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         "artifact_store_destination": str(destination / "artifacts"),
         "attempt_store_destination": str(destination / "attempts"),
         "configured_raw_capture_path": loaded.thetadata.raw_capture_path,
+        # What the configured worst case would need, the arithmetic behind
+        # it, and what is actually free. Printed so an operator sees the
+        # requirement *before* the session rather than as an OSError during it.
+        "disk_space": planned_disk,
         "capture_readiness": readiness.state.value,
         "capture_ready": readiness.ready,
         "capture_blockers": list(readiness.blockers),
@@ -431,6 +448,9 @@ class _Preflight:
     settings: dict[str, Any]
     expected_origin: str
     readiness_state: str
+    #: The worst case this configuration could write, the arithmetic behind it,
+    #: and what was actually free. Printed by the dry run.
+    disk: dict[str, Any] = field(default_factory=dict)
 
 
 def _preflight(
@@ -495,7 +515,15 @@ def _preflight(
             f"capture worth paying for: {list(readiness.blockers)}"
         )
 
-    _refuse_without_room(destination)
+    disk = _refuse_without_room(
+        destination,
+        disk_requirement(
+            endpoints=len(pipeline.capture_plan.required_endpoints),
+            max_response_bytes=int(loaded.thetadata.max_response_bytes),
+            # The first attempt plus the retries the profile allows.
+            max_attempts=int(loaded.thetadata.max_retries) + 1,
+        ),
+    )
 
     return _Preflight(
         destination=destination,
@@ -503,39 +531,109 @@ def _preflight(
         settings=settings,
         expected_origin=str(_live_capture_origin(settings["base_url"]).value),
         readiness_state=readiness.state.value,
+        disk=disk,
     )
 
 
-#: A capture is a few megabytes. This is not a quota -- it is the difference
-#: between "the disk is fine" and "the disk is full", asked before the money is
-#: spent rather than as an ``OSError`` in the middle of writing the third
-#: endpoint's payload.
-MINIMUM_FREE_BYTES = 64 * 1024 * 1024
+#: Room for the documents beside the payloads: the manifest, the summary, the
+#: intent, the artifact store, both indexes. Small and fixed, unlike the
+#: payloads, which are bounded by the configured cap.
+FIXED_OVERHEAD_BYTES = 8 * 1024 * 1024
+
+#: Multiplied onto the worst case. Not a fudge factor: a filesystem that is
+#: exactly full enough is a filesystem that fails on the last write, and the
+#: last write is the summary that would have explained it.
+DISK_SAFETY_MARGIN = 1.25
 
 
-def _refuse_without_room(destination: pathlib.Path) -> None:
-    """Refuse a destination whose filesystem has no room for the capture.
+def disk_requirement(
+    *, endpoints: int, max_response_bytes: int, max_attempts: int
+) -> dict[str, int | float]:
+    """What this configuration could consume, worst case, with the arithmetic.
 
-    Asked of the nearest existing ancestor, because the destination itself does
-    not exist yet -- that is the policy.
+    v2.1.14 asked for a flat 64 MiB. The shipped profile allows a **64 MiB
+    response per endpoint** across four endpoints with four attempts each, so
+    the configured worst case is two orders of magnitude larger than the check
+    that was supposed to protect it -- and the check passed on a disk that
+    could not hold one endpoint's response.
+
+    Every attempt body is stored as well as every successful response, because
+    preserving the attempts that failed is the whole point of the attempt log.
+    Attempt bodies are content-addressed, so identical retries collapse to one
+    file; this does not assume that, because a vendor that returns a different
+    error body each time is exactly the case worth surviving.
     """
+    successful = endpoints * max_response_bytes
+    attempts = endpoints * max_attempts * max_response_bytes
+    raw = successful + attempts + FIXED_OVERHEAD_BYTES
+    return {
+        "required_endpoint_count": endpoints,
+        "max_response_bytes": max_response_bytes,
+        "max_attempts_per_endpoint": max_attempts,
+        "successful_response_bytes": successful,
+        "attempt_body_bytes": attempts,
+        "fixed_overhead_bytes": FIXED_OVERHEAD_BYTES,
+        "safety_margin": DISK_SAFETY_MARGIN,
+        "minimum_required_free_bytes": int(raw * DISK_SAFETY_MARGIN),
+    }
+
+
+def _free_bytes(destination: pathlib.Path) -> tuple[pathlib.Path, int]:
+    """Free space at the nearest existing ancestor of a path that does not exist."""
     import shutil
 
     anchor = destination.resolve(strict=False)
     while not anchor.exists() and anchor != anchor.parent:
         anchor = anchor.parent
     try:
-        free = shutil.disk_usage(anchor).free
+        return anchor, shutil.disk_usage(anchor).free
     except OSError as error:  # an unreadable mount point is its own refusal
         raise CaptureRunError(
             f"the free space at {anchor} could not be read: {error}"
         ) from error
-    if free < MINIMUM_FREE_BYTES:
+
+
+def _refuse_without_room(
+    destination: pathlib.Path, requirement: Mapping[str, int | float]
+) -> dict[str, Any]:
+    """Refuse a destination whose filesystem cannot hold the configured capture.
+
+    Asked of the nearest existing ancestor, because the destination itself does
+    not exist yet -- that is the policy.
+    """
+    anchor, free = _free_bytes(destination)
+    needed = int(requirement["minimum_required_free_bytes"])
+    report = {
+        **dict(requirement),
+        "measured_at": str(anchor),
+        "available_free_bytes": free,
+        "sufficient": free >= needed,
+    }
+    if free < needed:
         raise CaptureRunError(
-            f"{anchor} has {free} bytes free and a capture needs at least "
-            f"{MINIMUM_FREE_BYTES}. A paid session that fills the disk halfway "
+            f"{anchor} has {free} bytes free and this configuration could need "
+            f"{needed}: {requirement['required_endpoint_count']} endpoints x "
+            f"{requirement['max_response_bytes']} bytes x "
+            f"({requirement['max_attempts_per_endpoint']} attempts + 1 stored "
+            f"response), plus {FIXED_OVERHEAD_BYTES} overhead, x "
+            f"{DISK_SAFETY_MARGIN}. A paid session that fills the disk halfway "
             "through is a paid session with an incomplete manifest."
         )
+    return report
+
+
+@dataclass(frozen=True)
+class _NoAttempts:
+    """The attempt log a run has before it has one.
+
+    Reads like an empty log and cannot raise while being constructed, which
+    matters because it is built at the very moment the destination becomes this
+    run's responsibility -- if *this* could fail there would be no run object
+    to write a failure report from.
+    """
+
+    root: pathlib.Path | None = None
+    records: tuple[Any, ...] = ()
 
 
 @dataclass
@@ -654,7 +752,7 @@ def run_capture(
         pipeline=None,
         store=None,
         artifacts=None,
-        attempts=HttpAttemptLog(None),
+        attempts=_NoAttempts(),
     )
     run.extra["effective_transport"] = checked.settings
     run.extra["effective_raw_store_path"] = str(raw_root)
@@ -899,8 +997,16 @@ def _emergency_summary(run: _Run, error: BaseException) -> dict[str, Any]:
 
 
 def _close(pipeline: Any) -> None:
-    """Release the HTTP connection pool. A leaked socket outlives the process."""
-    closer = getattr(getattr(pipeline.runtime.client, "transport", None), "close", None)
+    """Release the HTTP connection pool. A leaked socket outlives the process.
+
+    Tolerates a pipeline that was never built: this runs in a ``finally`` that
+    now covers every post-claim failure, including the ones that happen before
+    there is a transport to close.
+    """
+    runtime = getattr(pipeline, "runtime", None)
+    closer = getattr(
+        getattr(getattr(runtime, "client", None), "transport", None), "close", None
+    )
     if callable(closer):
         # Closing must never mask the outcome of the capture: a socket that
         # would not shut down is not a reason to lose the report.
@@ -985,6 +1091,15 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
             else RawCaptureRunState.COMPLETED_RAW_UNVERIFIED
         )
 
+    # ---- Bind the attempt evidence to this capture -------------------------
+    #
+    # The index hash, the counts and the schema, recorded at finalization so a
+    # later reader can tell whether the attempt log has been appended to,
+    # truncated or rewritten since. Without it, "the log verifies" only ever
+    # meant "the log is internally consistent right now" -- which a tamperer
+    # can arrange.
+    run.extra["attempt_evidence"] = _attempt_receipt(run)
+
     # ---- Parsing, now that every byte is stored and verified ---------------
     #
     # After the manifest and the integrity scan, against the *store* rather
@@ -1064,6 +1179,40 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
     _write_json(run.destination / "parser-report.json", run.parser_report)
     _write_json(run.destination / "capture-summary.json", report)
     return report
+
+
+def _attempt_receipt(run: _Run) -> dict[str, Any]:
+    """Reload the persisted attempt log and record what it says about itself.
+
+    Read back off disk rather than taken from the in-memory log: the receipt is
+    about the *files*, and a receipt derived from the objects that wrote them
+    would agree with itself no matter what happened to the files.
+    """
+    from src.adapters.http_attempts import (
+        ATTEMPT_EVIDENCE_SCHEMA_VERSION,
+        HttpAttemptLog,
+    )
+
+    if run.attempts.root is None:
+        return {
+            "schema_version": ATTEMPT_EVIDENCE_SCHEMA_VERSION,
+            "attempt_count": 0,
+            "attempt_body_count": 0,
+            "attempt_index_hash": "",
+            "ok": True,
+            "findings": [],
+        }
+    try:
+        return HttpAttemptLog.open_existing(run.attempts.root).as_dict()
+    except BaseException as error:  # a receipt is not allowed to break a capture
+        return {
+            "schema_version": ATTEMPT_EVIDENCE_SCHEMA_VERSION,
+            "attempt_count": len(run.attempts.records),
+            "attempt_body_count": 0,
+            "attempt_index_hash": "",
+            "ok": False,
+            "findings": [f"the attempt log could not be reopened: {_redacted(error)}"],
+        }
 
 
 def _parser_report(run: _Run) -> dict[str, Any]:

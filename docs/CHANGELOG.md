@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.1.15 - true raw capture, and replay that changes nothing
+
+The command was described as raw-only. It reached the wire through
+`pipeline.fetch_chain()`, which requests one endpoint, **parses it**, and uses
+the result to build the next request.
+
+So an index snapshot that came back as an HTML error page -- a maintenance
+window, a proxy, a schema nobody had seen -- raised before the quote request was
+ever issued. The session whose entire purpose is to discover the real vendor
+schemas would have captured one response out of four and stopped, at full price,
+and the finding that ended it would have been the finding it was paid to make.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.14 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Parsing decided what got requested | One unexpected schema ended the capture, and an unexpected schema is what the session exists to find | `client.acquire()` gets bytes and stores them; `interpret()` reads them. `pipeline.capture_required_endpoints_raw()` derives every request from the capture plan, chain request, index symbol, Greeks parameters and tier -- no `ChainSnapshot` needed -- issues them independently, and records a typed result per endpoint. Parsing runs afterwards against the store, into `parser-report.json` |
+| 1 | One run state answered two questions | A capture where all four endpoints answered and none parsed read as a failed run | `COMPLETED_RAW_VERIFIED` / `COMPLETED_RAW_UNVERIFIED` / `FAILED_PARTIAL_ACQUISITION` / `FAILED_NO_RESPONSE`, separate from `PARSER_NOT_RUN` / `PARSER_VALID` / `PARSER_FAILED` / `CHAIN_ASSEMBLY_FAILED` |
+| 1 | Stopping early was whatever exception escaped | A 503 retried away on one endpoint cancelled the rest of the capture | A closed, named policy: rejected credentials, a budget spent on 429s, two consecutive silences, operator cancellation, or a store that cannot write. The reason is recorded either way |
+| 2 | Seven fallible operations ran after `mkdir` and before the guard | Any of them raising left an empty directory nobody had written a word about, which the next invocation then refused | A bootstrap run object is created immediately after the claim and everything else is inside one `try/except/finally`. A failure writes `capture-bootstrap-failure.json` naming what had been constructed; a directory with nothing in it is given back |
+| 3 | Replay went through `store.get_payload()` | UTF-8 with replacement: a latin-1 body replayed as U+FFFD and one invalid byte was re-encoded into something the capture never contained | `get_body()`, plus the captured headers, so the ordinary decoder selects the charset the capture selected. Replay is refused before parsing when the body hash, length, decode status, charset or decoded-text hash disagree with the record |
+| 3 | `b""` and "no body supplied" were the same value | A genuinely empty vendor response was recorded `SUPPLIED_AS_TEXT` -- a claim that no decoding happened, about bytes off a socket | Identity-checked sentinels distinguish the two |
+| 4 | A reopened attempt log had no records, so `verify_bodies()` iterated over nothing | An archived capture could have every attempt body replaced and the check that exists to notice said it was fine | `HttpAttemptLog.open_existing()` parses the index, validates every schema, recomputes every fingerprint, locates and hashes every body, and reports orphans. A malformed *middle* line is a finding; only a torn final line is forgiven. The index hash and counts are bound into the summary at finalization |
+| 5 | `payload_location` was validated and then ignored | An index could name `missing/other.raw` for a record whose bytes were elsewhere and the scan reported VALID | The location must equal the store's canonical location for that record. Carried on `ManifestRecord`, inside the manifest hash, and checked by `verify_capture` |
+| 6 | Decode metadata was recorded and never re-derived | A digest says the bytes have not changed; it says nothing about whether the description of them is still true | Content type, charsets, decode status and decoded-text hash are re-derived from the stored bytes and compared. The status must be a known enum, the digest a full SHA-256, the charsets canonical -- and a live capture may not claim `SUPPLIED_AS_TEXT` |
+| 7 | A flat 64 MiB disk preflight | The shipped profile allows 64 MiB **per response** across four endpoints with four attempts each, so the check passed on a disk that could not hold one response | Derived from the plan: endpoints x cap x (attempts + 1), plus overhead, times a stated margin. The dry run prints the requirement, the arithmetic and what is free |
+| 8 | `failed_endpoint` came from `getattr(error, "url", "")` | No adapter exception set it, so it was empty for schema errors, vendor error documents and response-too-large -- the three failures a discovery session produces most | `endpoint`, `safe_url`, `request_id` and `status_code` are structural on `ThetaDataError`, and one classification table serves both the endpoint results and the run report |
+| 9 | The safe-header allow-list was decode-blind | Content encoding and pagination headers change what stored bytes mean and whether they are the whole answer | Extended, and retained on raw records |
+
+### Frozen values
+
+No change. `gex-engine/2.1.10` is untouched and the 46 frozen-reference
+regressions pass unmodified. The **parser** version moved to
+`thetadata-v3-parser/2.1.15` because how a stored payload becomes text changed;
+how rows become a gamma did not.
+
 ## 2.1.14 - what the bytes are, and where a failure leaves you
 
 The last code release before the first paid session, again -- and for a reason

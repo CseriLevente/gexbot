@@ -585,6 +585,19 @@ def verify_capture(
                 f"{entry.body_representation!r}: this code compares "
                 f"{BODY_REPRESENTATION!r}"
             )
+        # Where the manifest says the bytes are, against where this store keeps
+        # them. Both are in the manifest hash, so a location edited to point
+        # somewhere else changes the manifest's identity as well as failing
+        # here -- which is the point: evidence should not be able to move
+        # without saying so.
+        canonical = getattr(store, "canonical_location", None)
+        if callable(canonical) and entry.payload_location:
+            expected = canonical(entry.record_id)
+            if entry.payload_location != expected:
+                failures.append(
+                    f"PAYLOAD_LOCATION_MISMATCH:{entry.record_id}:"
+                    f"{entry.payload_location!r} is not {expected!r}"
+                )
     if not expected_pipeline_fingerprint:
         failures.append(
             "EXPECTED_PIPELINE_FINGERPRINT_MISSING: verification was asked to "

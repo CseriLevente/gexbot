@@ -564,6 +564,57 @@ class ConsumedRecord:
         }
 
 
+class ReplayFidelityError(TransportError):
+    """The stored bytes and the metadata describing them have come apart.
+
+    Raised *before* anything is parsed. A replay whose decode does not match
+    the capture's own record is reading something the session never saw, and
+    the comparison it feeds -- "does the rebuilt chain equal the original?" --
+    would be answering a different question from the one it claims to.
+    """
+
+
+def _replay_disagreements(
+    record_id: str, body: bytes, headers: Mapping[str, str], record: Any
+) -> list[str]:
+    """Where a replayed reading differs from the one the capture recorded.
+
+    Independently derived from the bytes on disk rather than copied out of the
+    record: the point is to catch metadata that no longer describes its own
+    payload, and a check that reads the claim back to itself catches nothing.
+    """
+    derived = decode_body(body, headers)
+    expected_status = str(getattr(record, "decode_status", "") or "")
+    problems: list[str] = []
+
+    if getattr(record, "payload_hash", "") and record.payload_hash != derived.body_hash:
+        problems.append(f"{record_id}: body hash")
+    if (
+        getattr(record, "byte_length", None) is not None
+        and int(record.byte_length) != derived.byte_length
+    ):
+        problems.append(f"{record_id}: byte length")
+
+    # A record written by a caller that supplied text says so, and there is
+    # nothing to reproduce -- the bytes are a re-encoding by construction.
+    if expected_status and expected_status != DecodeStatus.SUPPLIED_AS_TEXT.value:
+        if expected_status != derived.decode_status.value:
+            problems.append(
+                f"{record_id}: decode status {expected_status!r} vs "
+                f"{derived.decode_status.value!r}"
+            )
+        selected = str(getattr(record, "selected_charset", "") or "")
+        if selected and selected != derived.selected_charset:
+            problems.append(
+                f"{record_id}: selected charset {selected!r} vs "
+                f"{derived.selected_charset!r}"
+            )
+        stored_text_hash = str(getattr(record, "decoded_text_hash", "") or "")
+        if stored_text_hash and stored_text_hash != derived.decoded_text_hash:
+            problems.append(f"{record_id}: decoded-text hash")
+    return problems
+
+
 class StoredPayloadTransport:
     """Answers from a verified capture instead of from the vendor.
 
@@ -590,12 +641,21 @@ class StoredPayloadTransport:
 
     def __init__(
         self,
-        responses: Mapping[str, list[str]],
+        responses: Mapping[str, list[str | bytes]],
         *,
         record_ids: Mapping[str, list[str]] | None = None,
+        headers: Mapping[str, list[Mapping[str, str]]] | None = None,
     ) -> None:
-        self._queues = {
+        self._queues: dict[str, list[str | bytes]] = {
             endpoint: list(bodies) for endpoint, bodies in responses.items()
+        }
+        #: The headers each stored response was captured under, in the same
+        #: order. Replaying without them would decode the bytes under a
+        #: *different* charset from the one the capture recorded, which is a
+        #: different reading of the same evidence.
+        self._headers = {
+            endpoint: [dict(entry) for entry in entries]
+            for endpoint, entries in (headers or {}).items()
         }
         self._record_ids = {
             endpoint: list(ids) for endpoint, ids in (record_ids or {}).items()
@@ -617,28 +677,55 @@ class StoredPayloadTransport:
 
         Ordered by the capture sequence rather than by record id, because the
         order responses arrived in is part of what the session did.
+
+        **Bytes, and the headers they were read under.** v2.1.14 used
+        ``store.get_payload()``, which decodes UTF-8 with replacement -- so a
+        latin-1 body replayed as U+FFFD, and a body with one invalid byte was
+        re-encoded into something the capture never contained. A replay that
+        changes the evidence is not a replay.
+
+        Refuses before parsing when the reconstructed response does not
+        reproduce the capture's own decode record: same body hash, same length,
+        same decode status, same selected charset, same decoded-text hash. A
+        disagreement there means the bytes on disk and the metadata describing
+        them have come apart, and the honest answer is to stop.
         """
         records = {record.record_id: record for record in store.records()}
-        by_endpoint: dict[str, list[tuple[int, str, str]]] = {}
+        by_endpoint: dict[str, list[tuple[int, bytes, str, dict[str, str]]]] = {}
+        failures: list[str] = []
         for entry in manifest.records:
             record = records.get(entry.record_id)
             if record is None:
                 continue
-            by_endpoint.setdefault(record.endpoint, []).append(
-                (
-                    record.request_sequence,
-                    store.get_payload(entry.record_id),
-                    entry.record_id,
-                )
+            body = store.get_body(entry.record_id)
+            headers = dict(getattr(record, "response_headers", {}) or {})
+            failures.extend(
+                _replay_disagreements(entry.record_id, body, headers, record)
             )
-        ordered = {endpoint: sorted(items) for endpoint, items in by_endpoint.items()}
+            by_endpoint.setdefault(record.endpoint, []).append(
+                (record.request_sequence, body, entry.record_id, headers)
+            )
+        if failures:
+            raise ReplayFidelityError(
+                "the stored bytes do not reproduce the decode this capture "
+                f"recorded, so replaying them would parse something the session "
+                f"never saw: {failures[:5]}"
+            )
+        ordered = {
+            endpoint: sorted(items, key=lambda item: item[0])
+            for endpoint, items in by_endpoint.items()
+        }
         return cls(
             {
-                endpoint: [payload for _, payload, _ in items]
+                endpoint: [body for _, body, _, _ in items]
                 for endpoint, items in ordered.items()
             },
             record_ids={
-                endpoint: [record_id for _, _, record_id in items]
+                endpoint: [record_id for _, _, record_id, _ in items]
+                for endpoint, items in ordered.items()
+            },
+            headers={
+                endpoint: [held for _, _, _, held in items]
                 for endpoint, items in ordered.items()
             },
         )
@@ -675,8 +762,22 @@ class StoredPayloadTransport:
                     ),
                 )
             )
+            held = bodies[index]
+            headers = self._headers.get(endpoint, [])
+            # Bytes go in as bytes so nothing is re-encoded on the way through,
+            # and the captured headers go with them so the ordinary decoder
+            # selects the same charset the capture selected. A fixture that
+            # supplied text still replays as text.
+            if isinstance(held, bytes):
+                return HttpResponse(
+                    status_code=200,
+                    body=held,
+                    headers=dict(headers[index]) if index < len(headers) else {},
+                    url=url,
+                    request_id="replay",
+                )
             return HttpResponse(
-                status_code=200, text=bodies[index], url=url, request_id="replay"
+                status_code=200, text=held, url=url, request_id="replay"
             )
         raise TransportError(
             f"the capture holds no response for {url!r}. Rebuilding a chain "

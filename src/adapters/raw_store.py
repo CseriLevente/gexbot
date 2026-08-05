@@ -60,20 +60,24 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-PARSER_VERSION = "thetadata-v3-parser/2.1.10"
+# Moved in v2.1.15 because *how a stored payload becomes text* changed:
+# replay consumes the exact bytes under the captured content type and charset
+# rather than a UTF-8-with-replacement reading of them. Nothing about how rows
+# become a gamma changed -- that is the engine version, and it has not moved.
+PARSER_VERSION = "thetadata-v3-parser/2.1.15"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.14"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.15"
 
 #: What a stored raw payload *is*. Bumped when that changes, which it did in
 #: v2.1.13 -- the store holds the response's entity bytes rather than a UTF-8
 #: re-encoding of a lossily decoded string -- and again in v2.1.14, when the
 #: statement stopped being an unused constant and started being written onto
 #: every record, checked by the scanner, and covered by the manifest hash.
-RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.14"
+RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.15"
 
 #: Which bytes those are: the HTTP entity body **after transfer- and
 #: content-decoding**, so a gzip response is stored decompressed. That is the
@@ -334,12 +338,15 @@ class RawResponseRecord:
         from src.adapters.http_attempts import INTERPRETIVE_RESPONSE_HEADERS
 
         held = {k.lower(): v for k, v in dict(self.response_headers).items()}
-        return {name: held[name] for name in INTERPRETIVE_RESPONSE_HEADERS if name in held}
+        return {
+            name: held[name] for name in INTERPRETIVE_RESPONSE_HEADERS if name in held
+        }
 
     @property
     def raw_response_semantics(self) -> dict[str, Any]:
         """The v2.1.14 block, as one thing, so it travels as one thing."""
         return {
+            "payload_location": self.payload_location,
             "raw_response_schema_version": self.raw_response_schema_version,
             "body_representation": self.body_representation,
             "content_type": self.content_type,
@@ -388,7 +395,6 @@ class RawResponseRecord:
             "round_trip_seconds": self.round_trip_seconds,
             "http_status": self.http_status,
             "payload_hash": self.payload_hash,
-            "payload_location": self.payload_location,
             "parser_version": self.parser_version,
             "vendor_schema_version": self.vendor_schema_version,
             "byte_length": self.byte_length,
@@ -409,6 +415,54 @@ def _moment_or_none(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value))
     except ValueError:
         return None
+
+
+#: Decode statuses this code knows how to reason about. A record claiming
+#: anything else is not one this reader can interpret, and guessing is how a
+#: reading becomes a fact.
+KNOWN_DECODE_STATUSES = frozenset({"EXACT", "REPLACED", "SUPPLIED_AS_TEXT"})
+
+#: Origins where the bytes came off a socket. ``SUPPLIED_AS_TEXT`` means "no
+#: decoding happened because a caller handed us a string", which cannot be true
+#: of a response that arrived over HTTP.
+LIVE_CAPTURE_ORIGINS = frozenset({"LIVE_HTTP_CAPTURE", "LOCAL_TERMINAL_CAPTURE"})
+
+
+def _decode_metadata_problem(payload: Mapping[str, Any]) -> str:
+    """Whether the recorded decode metadata is even the right shape.
+
+    Checked before the bytes are read, because a malformed claim about a
+    payload is a reason to refuse the record rather than to compare against it.
+    """
+    status = str(payload.get("decode_status", "") or "")
+    if status and status not in KNOWN_DECODE_STATUSES:
+        return (
+            f"decode_status {status!r} is not one this reader implements "
+            f"({sorted(KNOWN_DECODE_STATUSES)})"
+        )
+    origin = str(payload.get("capture_origin", "") or "")
+    if status == "SUPPLIED_AS_TEXT" and origin in LIVE_CAPTURE_ORIGINS:
+        return (
+            f"a {origin} record claims SUPPLIED_AS_TEXT, which means no bytes "
+            "were decoded -- but these arrived over HTTP. An offline fixture may "
+            "say this; a live capture may not."
+        )
+    digest = str(payload.get("decoded_text_hash", "") or "")
+    if digest and (len(digest) != 64 or not _is_hex(digest)):
+        return f"decoded_text_hash {digest!r} is not a full SHA-256 digest"
+    if status in ("EXACT", "REPLACED") and not str(
+        payload.get("selected_charset", "") or ""
+    ):
+        return f"decode_status is {status} but no charset was selected"
+    for name in ("content_type", "declared_charset", "selected_charset"):
+        value = str(payload.get(name, "") or "")
+        if value and value != value.strip().lower():
+            return f"{name} {value!r} is not canonicalized (lowercase, trimmed)"
+    return ""
+
+
+def _is_hex(text: str) -> bool:
+    return all(character in "0123456789abcdef" for character in text)
 
 
 def is_portable_location(location: str) -> bool:
@@ -439,6 +493,38 @@ def _safe_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     from src.adapters.http_attempts import safe_headers
 
     return dict(sorted(safe_headers(headers).items()))
+
+
+def _decode_drift(body: bytes, data: Mapping[str, Any]) -> str:
+    """Where a record's decode metadata stops describing its own payload.
+
+    Compares independently derived values against the stored ones. A record
+    that supplied text is exempt from the *reading* comparison -- there was
+    nothing to decode -- but its shape is still checked above.
+    """
+    from src.adapters.transport import decode_body
+
+    status = str(data.get("decode_status", "") or "")
+    if not status or status == "SUPPLIED_AS_TEXT":
+        return ""
+    headers = dict(data.get("response_headers", {}) or {})
+    derived = decode_body(body, headers)
+
+    if status != derived.decode_status.value:
+        return (
+            f"decode_status says {status!r}; these bytes under these headers "
+            f"decode {derived.decode_status.value!r}"
+        )
+    for name, derived_value in (
+        ("selected_charset", derived.selected_charset),
+        ("declared_charset", derived.declared_charset),
+        ("content_type", derived.content_type),
+        ("decoded_text_hash", derived.decoded_text_hash),
+    ):
+        stated = str(data.get(name, "") or "")
+        if stated and stated != derived_value:
+            return f"{name} says {stated!r}; re-derives to {derived_value!r}"
+    return ""
 
 
 def _decode_fields(decode: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -663,6 +749,10 @@ def validate_metadata(payload: Any) -> tuple[IntegrityStatus | None, str]:
             f"{BODY_REPRESENTATION!r}; the digest would be over a different "
             "thing from the one this code compares"
         )
+
+    decode_problem = _decode_metadata_problem(payload)
+    if decode_problem:
+        return IntegrityStatus.INVALID_METADATA, decode_problem
 
     location = payload["payload_location"]
     if not isinstance(location, str) or not location.strip():
@@ -1025,6 +1115,15 @@ class FileRawStore:
         # append-only store permanently added to it.
         self._probe_root = self._root.parent / f"{self._root.name}.health"
 
+    def canonical_location(self, record_id: str) -> str:
+        """Where this store keeps a record, relative to its own root.
+
+        The single authority. A manifest or an index entry that states anything
+        else is describing a different store, and the honest response is to
+        refuse rather than to quietly read the file the id points at.
+        """
+        return self.payload_path(record_id).relative_to(self._root.resolve()).as_posix()
+
     def payload_path(self, record_id: str) -> pathlib.Path:
         """Where this record's bytes are, for this store, right now.
 
@@ -1281,6 +1380,29 @@ class FileRawStore:
 
                 path = self.payload_path(record_id)
                 indexed_paths.add(path)
+
+                # **The location is checked, not merely validated.** v2.1.14
+                # confirmed that ``payload_location`` was relative and then
+                # ignored it, deriving the path from ``record_id`` instead -- so
+                # an index could name ``missing/other.raw`` for a record whose
+                # bytes were somewhere else entirely and the scan reported
+                # VALID. A location nobody consults is a location that can lie.
+                canonical = path.relative_to(self._root.resolve()).as_posix()
+                stated = str(data["payload_location"])
+                if stated != canonical:
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.INVALID_METADATA,
+                            artifact=record_id,
+                            detail=(
+                                f"payload_location {stated!r} is not where this "
+                                f"store keeps {record_id!r}, which is "
+                                f"{canonical!r}"
+                            ),
+                        )
+                    )
+                    continue
+
                 if not path.exists():
                     findings.append(
                         IntegrityFinding(
@@ -1301,6 +1423,24 @@ class FileRawStore:
                 actual_hash = hashlib.sha256(payload).hexdigest()
                 actual_length = len(payload)
                 expected_length = data.get("byte_length")
+
+                # **The reading, re-derived.** The digest says the bytes have
+                # not changed. It says nothing about whether the *description*
+                # of them is still true, and a capture is only as good as the
+                # description a later reader will parse it under. Derived from
+                # the bytes and the retained headers, never read back off the
+                # claim it is supposed to be checking.
+                drift = _decode_drift(payload, data)
+                if drift:
+                    findings.append(
+                        IntegrityFinding(
+                            status=IntegrityStatus.INVALID_METADATA,
+                            artifact=record_id,
+                            detail=drift,
+                        )
+                    )
+                    continue
+
                 if actual_hash != expected_hash:
                     findings.append(
                         IntegrityFinding(
@@ -1870,6 +2010,10 @@ class ManifestRecord:
     endpoint: str
     payload_hash: str
     parameter_hash: str
+    #: Where the bytes are, relative to the store root. In the manifest hash
+    #: since v2.1.15: a location that can be edited without changing the
+    #: manifest's identity is a location that can lie about where evidence is.
+    payload_location: str = ""
     request_id: str = ""
     request_sequence: int = 0
     http_status: int = 200
@@ -1937,12 +2081,15 @@ class ManifestRecord:
         from src.adapters.http_attempts import INTERPRETIVE_RESPONSE_HEADERS
 
         held = {k.lower(): v for k, v in dict(self.response_headers).items()}
-        return {name: held[name] for name in INTERPRETIVE_RESPONSE_HEADERS if name in held}
+        return {
+            name: held[name] for name in INTERPRETIVE_RESPONSE_HEADERS if name in held
+        }
 
     @property
     def raw_response_semantics(self) -> dict[str, Any]:
         """The v2.1.14 block, as one thing, so it travels as one thing."""
         return {
+            "payload_location": self.payload_location,
             "raw_response_schema_version": self.raw_response_schema_version,
             "body_representation": self.body_representation,
             "content_type": self.content_type,
@@ -1981,6 +2128,7 @@ class ManifestRecord:
     def of(cls, record: RawResponseRecord) -> ManifestRecord:
         return cls(
             record_id=record.record_id,
+            payload_location=record.payload_location,
             endpoint=record.endpoint,
             payload_hash=record.payload_hash,
             parameter_hash=canonical_parameter_hash(record.query_params),
@@ -2218,6 +2366,7 @@ class RawCaptureManifest:
                             endpoint=entry["endpoint"],
                             payload_hash=entry["payload_hash"],
                             parameter_hash=entry["parameter_hash"],
+                            payload_location=entry.get("payload_location", ""),
                             request_id=entry.get("request_id", ""),
                             request_sequence=int(entry.get("request_sequence", 0)),
                             http_status=int(entry.get("http_status", 200)),
@@ -2271,6 +2420,27 @@ class RawCaptureManifest:
                             ),
                             spot_synchronization_policy_fingerprint=entry.get(
                                 "spot_synchronization_policy_fingerprint", ""
+                            ),
+                            # **Restored explicitly, not left to defaults.** A
+                            # reconstructor whose round-trip works because the
+                            # current defaults happen to match what was written
+                            # is one release away from silently rebuilding a
+                            # different manifest -- and the manifest hash is
+                            # what says two captures are the same capture.
+                            raw_response_schema_version=entry.get(
+                                "raw_response_schema_version",
+                                RAW_RESPONSE_SCHEMA_VERSION,
+                            ),
+                            body_representation=entry.get(
+                                "body_representation", BODY_REPRESENTATION
+                            ),
+                            content_type=entry.get("content_type", ""),
+                            declared_charset=entry.get("declared_charset", ""),
+                            selected_charset=entry.get("selected_charset", ""),
+                            decode_status=entry.get("decode_status", ""),
+                            decoded_text_hash=entry.get("decoded_text_hash", ""),
+                            response_headers=dict(
+                                entry.get("response_headers", {}) or {}
                             ),
                         )
                         for entry in payload.get("records", ())

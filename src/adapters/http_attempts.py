@@ -32,9 +32,11 @@ from src.adapters.errors import ThetaDataRawStoreError
 from src.domain.digests import digest_of
 
 __all__ = [
+    "ATTEMPT_EVIDENCE_SCHEMA_VERSION",
     "HTTP_ATTEMPT_SCHEMA_VERSION",
     "INTERPRETIVE_RESPONSE_HEADERS",
     "SAFE_RESPONSE_HEADERS",
+    "AttemptEvidenceReport",
     "HttpAttemptLog",
     "HttpAttemptRecord",
     "safe_headers",
@@ -46,7 +48,7 @@ __all__ = [
 ATTEMPT_BODY_SUFFIX = ".bin"
 
 #: Bumped when the *meaning* of an attempt record changes.
-HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.14"
+HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.15"
 
 #: Response headers worth keeping. Everything else is dropped rather than
 #: filtered: an allow-list cannot leak a header nobody thought about, and a
@@ -91,6 +93,82 @@ def safe_headers(headers: Any) -> dict[str, str]:
         return {}
     lowered = {str(k).lower(): str(v) for k, v in dict(headers).items()}
     return {name: lowered[name] for name in SAFE_RESPONSE_HEADERS if name in lowered}
+
+
+#: Bumped when what an attempt-evidence report checks changes.
+ATTEMPT_EVIDENCE_SCHEMA_VERSION = "attempt-evidence/2.1.15"
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptEvidenceReport:
+    """What a persisted attempt log says about itself, read back off disk.
+
+    Derived, never asserted. Every number here was recomputed from the files
+    that are there now, which is the only way a report about evidence can be
+    evidence about anything.
+    """
+
+    root: pathlib.Path
+    findings: tuple[str, ...]
+    attempt_count: int
+    body_count: int
+    #: Digest of the index file exactly as it is on disk. Recorded at
+    #: finalization so a later reader can tell whether the log has been
+    #: appended to, truncated or rewritten since the capture ended.
+    index_hash: str
+    schema_version: str = ATTEMPT_EVIDENCE_SCHEMA_VERSION
+
+    @property
+    def ok(self) -> bool:
+        return not self.findings
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "attempt_index_hash": self.index_hash,
+            "attempt_count": self.attempt_count,
+            "attempt_body_count": self.body_count,
+            "ok": self.ok,
+            "findings": list(self.findings),
+        }
+
+
+def _schema_findings(entry: dict[str, Any]) -> list[str]:
+    """Whether one persisted attempt record has the shape this code reads."""
+    where = f"{entry.get('logical_request_id', '?')}#{entry.get('attempt_number', '?')}"
+    found: list[str] = []
+    version = entry.get("schema_version")
+    if version != HTTP_ATTEMPT_SCHEMA_VERSION:
+        found.append(
+            f"{where}: schema {version!r} is not {HTTP_ATTEMPT_SCHEMA_VERSION!r}"
+        )
+    for name, kind in (
+        ("logical_request_id", str),
+        ("attempt_number", int),
+        ("endpoint", str),
+        ("safe_url", str),
+        ("request_parameters_hash", str),
+        ("started_at", str),
+    ):
+        value = entry.get(name)
+        if not isinstance(value, kind) or (kind is str and not value):
+            found.append(f"{where}: {name} is {value!r}")
+    return found
+
+
+def _fingerprint_findings(entry: dict[str, Any]) -> list[str]:
+    """Whether the record still hashes to the fingerprint it carries."""
+    where = f"{entry.get('logical_request_id', '?')}#{entry.get('attempt_number', '?')}"
+    stated = entry.get("fingerprint")
+    if not isinstance(stated, str) or not stated:
+        return [f"{where}: no fingerprint"]
+    semantic = {k: v for k, v in entry.items() if k != "fingerprint"}
+    recomputed = digest_of(semantic)
+    if recomputed != stated:
+        return [
+            f"{where}: fingerprint {stated[:12]}... recomputes to {recomputed[:12]}..."
+        ]
+    return []
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,8 +338,104 @@ class HttpAttemptLog:
                 # A torn final line. Everything before it still counts, and
                 # discarding the whole file because of it would be the opposite
                 # of what an append-only index is for.
+                #
+                # A malformed line that is *not* the last one is a different
+                # fact and :meth:`open_existing` reports it as a finding. This
+                # method returns what is readable; that one says what is wrong.
                 continue
         return tuple(entries)
+
+    @classmethod
+    def open_existing(cls, root: pathlib.Path | str) -> AttemptEvidenceReport:
+        """Reload a persisted attempt log and check it against itself.
+
+        **The v2.1.15 correction.** ``HttpAttemptLog(root)`` constructs an
+        object with an empty in-memory ``records`` list, so
+        :meth:`verify_bodies` on a freshly opened log iterated over nothing and
+        returned no failures. An archived capture could have every attempt body
+        replaced and the check that exists to notice would say it was fine.
+
+        Everything here is derived from disk: the index is parsed, every record
+        validated against the schema, every fingerprint recomputed, every body
+        located, hashed and measured, and orphaned body files -- present on
+        disk, named by no record -- are reported too.
+        """
+        root_path = pathlib.Path(root)
+        index = root_path / "index.jsonl"
+        findings: list[str] = []
+        entries: list[dict[str, Any]] = []
+
+        if not index.is_file():
+            return AttemptEvidenceReport(
+                root=root_path,
+                findings=(f"{index} does not exist",),
+                attempt_count=0,
+                body_count=0,
+                index_hash="",
+            )
+
+        raw = index.read_text(encoding="utf-8")
+        lines = raw.splitlines()
+        for number, line in enumerate(lines, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                entries.append(json.loads(text))
+            except json.JSONDecodeError as error:
+                if number == len(lines) and not raw.endswith("\n"):
+                    # The last line of a file that does not end in a newline:
+                    # an append interrupted mid-write. Everything before it
+                    # still counts, which is what append-only buys.
+                    findings.append(f"line {number}: torn final line ({error})")
+                else:
+                    # A malformed line in the *middle* means a completed write
+                    # was later damaged. Silently skipping it -- which is what
+                    # v2.1.14 did -- turns tampering into a shorter list.
+                    findings.append(f"line {number}: malformed, not the final line")
+                continue
+
+        expected_bodies: set[pathlib.Path] = set()
+        for entry in entries:
+            findings.extend(_schema_findings(entry))
+            findings.extend(_fingerprint_findings(entry))
+            location = entry.get("response_body_location")
+            if not location:
+                continue
+            path = (
+                pathlib.Path(location)
+                if pathlib.Path(location).is_absolute()
+                else root_path / location
+            )
+            expected_bodies.add(path.resolve())
+            digest = str(entry.get("response_body_hash") or "")
+            if not path.is_file():
+                findings.append(f"{location}: body is missing")
+                continue
+            payload = path.read_bytes()
+            actual = hashlib.sha256(payload).hexdigest()
+            if digest and actual != digest:
+                findings.append(f"{location}: body hashes to {actual[:12]}...")
+            length = entry.get("response_byte_length")
+            if isinstance(length, int) and length != len(payload):
+                findings.append(
+                    f"{location}: {len(payload)} bytes, record says {length}"
+                )
+
+        for path in sorted(root_path.rglob(f"*{ATTEMPT_BODY_SUFFIX}")):
+            if path.resolve() not in expected_bodies:
+                findings.append(
+                    f"{path.relative_to(root_path).as_posix()}: orphaned body, "
+                    "no attempt record names it"
+                )
+
+        return AttemptEvidenceReport(
+            root=root_path,
+            findings=tuple(findings),
+            attempt_count=len(entries),
+            body_count=len(expected_bodies),
+            index_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        )
 
     def body_path(self, location: str) -> pathlib.Path:
         """Where a recorded location actually is, for this log, right now.

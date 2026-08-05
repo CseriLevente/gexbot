@@ -323,7 +323,7 @@ def test_the_manifest_carries_per_record_descriptors():
 
 def test_the_manifest_states_its_schema_version():
     _, manifest = build_capture()
-    assert manifest.schema_version == "raw-capture-manifest/2.1.14"
+    assert manifest.schema_version == "raw-capture-manifest/2.1.15"
     assert manifest.parser_version == PARSER_VERSION
 
 

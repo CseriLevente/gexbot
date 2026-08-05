@@ -546,7 +546,9 @@ def test_the_disk_requirement_reflects_the_configured_capture(tmp_path):
     report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
     disk = report["disk_space"]
 
-    assert disk["required_endpoint_count"] == 4
+    # Five since v2.1.16: the contract listing consumes the same response cap
+    # and the same retry budget as anything else the sweep requests.
+    assert disk["required_endpoint_count"] == 5
     assert disk["max_response_bytes"] == 64 * 1024 * 1024
     assert disk["max_attempts_per_endpoint"] == 4
     assert disk["minimum_required_free_bytes"] > 64 * 1024 * 1024 * 4
@@ -555,7 +557,7 @@ def test_the_disk_requirement_reflects_the_configured_capture(tmp_path):
 
     # The arithmetic is a function of the plan, not of a constant.
     doubled = disk_requirement(
-        endpoints=4, max_response_bytes=128 * 1024 * 1024, max_attempts=4
+        endpoints=5, max_response_bytes=128 * 1024 * 1024, max_attempts=4
     )
     assert (
         doubled["minimum_required_free_bytes"]

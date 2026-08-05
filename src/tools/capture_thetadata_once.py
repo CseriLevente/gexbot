@@ -344,7 +344,10 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         )
 
     requirement = disk_requirement(
-        endpoints=len(pipeline.capture_plan.required_endpoints),
+        # Every endpoint the sweep will *request*, not only the ones a chain
+        # needs: the contract listing consumes the same response cap and the
+        # same retry budget as anything else.
+        endpoints=len(pipeline.capture_plan.acquisition_endpoints),
         max_response_bytes=int(loaded.thetadata.max_response_bytes),
         max_attempts=int(loaded.thetadata.max_retries) + 1,
     )
@@ -543,7 +546,10 @@ def _preflight(
     disk = _refuse_without_room(
         destination,
         disk_requirement(
-            endpoints=len(pipeline.capture_plan.required_endpoints),
+            # Every endpoint the sweep will *request*, not only the ones a chain
+            # needs: the contract listing consumes the same response cap and the
+            # same retry budget as anything else.
+            endpoints=len(pipeline.capture_plan.acquisition_endpoints),
             max_response_bytes=int(loaded.thetadata.max_response_bytes),
             # The first attempt plus the retries the profile allows.
             max_attempts=int(loaded.thetadata.max_retries) + 1,

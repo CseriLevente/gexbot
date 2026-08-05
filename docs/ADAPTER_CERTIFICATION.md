@@ -1317,3 +1317,104 @@ the dry run with its inputs.
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
 `ADAPTER_CERTIFIED`. What changed is that the first session will now come back
 with all four endpoints' bytes whatever any of them turn out to contain.
+
+---
+
+## v2.1.16: the request plan the first session will actually run
+
+### An option root and an index are two different instruments
+
+The shipped profile captures `SPXW` -- the PM-settled weekly series on the S&P
+500 index. The index itself is `SPX`. v2.1.15 held one symbol on the chain
+request and gave it to every endpoint, so the first paid session would have
+asked:
+
+    GET /v3/index/snapshot/price?symbol=SPXW
+
+for the price of something that is not an index. Whatever that returned would
+have been recorded as the vendor's underlying print and become the denominator
+of every gamma in the chain.
+
+The fix is a table, not a rule:
+
+| option root | underlying index |
+|---|---|
+| `SPX` | `SPX` |
+| `SPXW` | `SPX` |
+
+"Strip a trailing W" would turn `SPW` into `SP` and would invent an answer for a
+root nobody has modelled. A root that is not in the table is **refused**,
+because an index symbol this repository derived by string manipulation would put
+an unchosen spot under every number it produces.
+
+**Why it survived review.** The rule existed three times. The fetch path derived
+it; `build_request_spec` derived it again to state "what this session would
+send"; `assess_readiness` rebuilt the capture plan from four of the pipeline's
+inputs. All three were wrong in the same way, so the verifier agreed with the
+defect it was verifying. There is now one mapping, and certification consults
+the pipeline's own plan rather than reconstructing it.
+
+Both symbols are in the capture-plan fingerprint, so a capture taken under the
+old mapping cannot be presented as one taken under the corrected one.
+
+### The contract listing is captured, and settles nothing
+
+`/v3/option/list/contracts/quote` exists. The first session requests it, with
+`symbol=SPXW`, the New York market-session date, and the same `max_dte` as the
+chain request -- a listing over a wider window would enumerate contracts the
+snapshot never asked for.
+
+It is an **evidence** endpoint, not a required one. `verify_capture` insists on
+every required endpoint, so requiring the listing would have retroactively
+invalidated every capture taken before it existed, and a chain does not need it.
+`CapturePlan` separates the two; the raw sweep requests both.
+
+And it authorises nothing. `is_dedicated_contract_list` is True --
+that is what the endpoint is *for*. `enumerates_request_universe` stays False,
+because a list of everything quoted on a session is a different set from the
+contracts a request bounded by `max_dte` and `strike_range` was owed, and nobody
+has compared the two against real bytes. Until that comparison exists the
+evidence state is `DEDICATED_CONTRACT_LIST_OBSERVED_UNVERIFIED`, and no path
+leads from it to `FULL_REQUEST_ENUMERATED`, `MEASURED_COMPLETE` or
+`READY_FOR_ANALYTICAL_DATASET`.
+
+Promoting it on the strength of its name would be the v2.1.9 defect with better
+vocabulary.
+
+### The plan is visible before it is authorised, and binding after
+
+The v2.1.15 dry run printed a count of endpoints and a tier. That is not enough
+to notice `symbol=SPXW` on an index request, which is precisely why nobody did.
+
+`RawRequestPlan` is derived up front and printed in full: every endpoint, its
+safe path, its sorted query parameters as strings, its required tier, its
+request-spec hash and its stop policy. The two symbols, the DTE window, the
+listing date and the rate and dividend parameters are all on the page before
+`--execute-live`. No credential is in it.
+
+The live run authorises each request against the same document -- a request that
+differs from the plan raises `RequestPlanViolation` before it reaches the
+transport -- and the plan is persisted in the run intent and the summary.
+
+### Attempt evidence is part of what "verified" means
+
+A run could report `COMPLETED_RAW_VERIFIED` beside `attempt_evidence.ok =
+false`. Four layers now gate it: raw-store integrity, the capture manifest,
+required-endpoint acquisition, and HTTP attempt evidence. A failure in any of
+them names `verification_layer` and `verification_findings`.
+
+The captured responses are not discarded and not downgraded. What changes is the
+claim the run makes about itself.
+
+### Two doors, named for what they do
+
+`HttpAttemptLog.create_new(root)` refuses a directory that already holds an
+index. `open_existing(root)` loads and verifies. `verify_bodies()` refuses when
+an index exists that this log never read, so an empty result means "nothing is
+wrong" and never "I looked at nothing".
+
+### What this changes about the shipped state
+
+Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
+`ADAPTER_CERTIFIED`. What changed is that the requests the first session makes
+are the requests it should make, and an operator can read them before paying.

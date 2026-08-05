@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.1.16 - the option root is not its underlying index
+
+    option chain symbol: SPXW
+    index price request: symbol=SPXW
+
+`SPXW` is the PM-settled weekly SPX option root. `SPX` is the index those
+options are written on. The shipped profile trades the first and, for the first
+paid session, would have asked `/v3/index/snapshot/price` for the second's price
+using the first's name -- a request for an instrument that does not exist.
+Whatever came back would have become the spot under every gamma in the chain,
+and nothing in the dry run showed the symbol at all.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.15 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | One symbol served the option root and the underlying index | The index request asked for a price that does not exist, and it is the denominator of every gamma | `InstrumentMapping`, an explicit table -- `SPX`->`SPX`, `SPXW`->`SPX`. No string rule: an undeclared root is refused rather than trimmed. Index endpoints take the underlying; everything else takes the root |
+| 1 | The symbol rule existed in three places | `build_request_spec` recomputed "what we would send" and got the same wrong answer, so the verifier agreed with the defect it was verifying; `assess_readiness` rebuilt the capture plan from four inputs | One mapping, read by the fetch path and the request spec. Certification uses the pipeline's own plan rather than a rebuilt one |
+| 1 | Neither symbol was in any fingerprint | A corrected mapping could have silently reused a capture taken under the wrong one | Both are in the capture-plan fingerprint and the request-plan hash |
+| 2 | The current contract-list endpoint was not requested | The first session is the chance to capture it; not having it costs another paid session | `/v3/option/list/contracts/quote` is captured with `symbol=SPXW`, the New York market-session date and the chain's `max_dte` -- as an **evidence** endpoint, whose absence is not a verification failure because a chain does not need it |
+| 2 | -- | -- | It grants no coverage authority. `enumerates_request_universe` stays False and the reports carry `DEDICATED_CONTRACT_LIST_OBSERVED_UNVERIFIED`: a listing of everything quoted on a session is a different set from the contracts a filtered request was owed, and nobody has compared them |
+| 3 | The dry run printed a count of endpoints and a tier | An operator cannot check a plan they cannot see, which is why the symbol defect survived review | `RawRequestPlan` is derived before the first request, printed as `planned_requests`, written into `run-intent.json`, and **every outgoing request is authorised against it** -- refused before the transport if it differs |
+| 4 | `COMPLETED_RAW_VERIFIED` beside `attempt_evidence.ok = false` | A contradiction: the attempt log is part of the evidence a capture produces | Four layers gate the verified state, and a failure names `verification_layer` and `verification_findings`. The captured responses are not discarded; only the claim changes |
+| 5 | `HttpAttemptLog(root).verify_bodies() == ()` | An empty answer from a log that had never read the directory | `create_new()` refuses an existing index, `open_existing()` loads and verifies, and `verify_bodies()` refuses when an index exists that this log never read |
+| 7 | `STOP_REASON_FOR` disagreed with `stop_reason_for()` | Two policies, one of them dead | Removed. The architecture assertion now states the narrower accurate position |
+| 8 | The access path was inferred | A later release choosing a different client should be a visible change | `access_mode = THETA_TERMINAL_REST_V3` is recorded in the dry run and the summary |
+
+### Frozen values
+
+No change. `gex-engine/2.1.10` is untouched and the frozen-reference
+regressions pass unmodified. The **parser** moves to
+`thetadata-v3-parser/2.1.16` because it reads a response shape it did not read
+before; `raw-response` stays at `2.1.15` because what a stored payload *is* did
+not change.
+
 ## 2.1.15 - true raw capture, and replay that changes nothing
 
 The command was described as raw-only. It reached the wire through

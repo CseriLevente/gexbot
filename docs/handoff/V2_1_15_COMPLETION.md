@@ -178,23 +178,22 @@ for it as a rule rather than a promise.
 
 ## Artifact
 
-| | |
-|---|---|
-| File | `gex-bot-v2.1.15.zip` |
-| SHA-256 | `0ad7adfd05061bc7145098e3201e1024a72792318f12c44ff7429e9acad57772` |
-| Bytes | 979,187 |
-| Entries | 246 |
-| Files | 204 |
-| Commit | `2627b49ecf06522e57fc392b9b599d8f7c3fb97c` |
+Built from a clean tree (`git status --porcelain` empty) with:
 
-Built with `git archive --format=zip --output=gex-bot-v2.1.15.zip HEAD` from a
-clean tree (`git status --porcelain` empty). The digest applies to that exact
-file; it is not wrapped inside the development checkout. The archive contains no
-`artifacts/`, no `.venv`, no nested archive and no scratch file.
+```bash
+git archive --format=zip --output=gex-bot-v2.1.15.zip HEAD
+```
 
-`src/broker/`, `src/strategy/`, `src/risk/`, `src/backtest/` and
+**The SHA-256 and byte count are reported at delivery, not here.** A digest of
+an archive that contains the document stating the digest cannot exist, and
+quoting a hash for a *different* archive than the one uploaded is the exact
+failure the requirement is guarding against. The commit is the anchor; the
+archive is a pure function of it.
+
+The archive contains no `artifacts/`, no `.venv`, no nested archive and no
+scratch file. `src/broker/`, `src/strategy/`, `src/risk/`, `src/backtest/` and
 `src/adapters/ibkr/` are present as zero-byte `__init__.py` scaffolding and
-nothing else. The only occurrences of order-shaped identifiers in the archive
+nothing else: the only occurrences of order-shaped identifiers anywhere in it
 are a docstring saying no `place_order` exists, a numerical root-finding
 bracket, and `"would_place_orders": False`.
 

@@ -64,11 +64,21 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.15"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.16"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.15"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.16"
+
+#: What a captured contract listing establishes today: that it was captured.
+#:
+#: Not ``FULL_REQUEST_ENUMERATED``, not ``MEASURED_COMPLETE``, and nothing that
+#: leads to ``READY_FOR_ANALYTICAL_DATASET``. The endpoint's documentation says
+#: it lists contracts quoted for a session; it does not say that set is the set
+#: our ``max_dte``/``strike_range``-filtered snapshot was owed, and nobody has
+#: compared the two. Promoting it on the strength of its name would be the
+#: v2.1.9 defect with better vocabulary.
+CONTRACT_LIST_EVIDENCE_STATE = "DEDICATED_CONTRACT_LIST_OBSERVED_UNVERIFIED"
 
 _RULE = "-" * 76
 
@@ -357,7 +367,22 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         "config_path": str(pathlib.Path(config_path).resolve()),
         "resolved_configuration": pipeline.as_dict(),
         "effective_transport": settings,
+        # **The actual requests, before --execute-live.** v2.1.15 printed a
+        # count of endpoints and a tier, and the requests it was authorising
+        # asked the index endpoint for SPXW. An operator cannot check a plan
+        # they cannot see.
+        "planned_requests": pipeline.raw_request_plan(as_of=as_of).as_dict(),
+        # **How this release reaches the vendor, recorded rather than assumed.**
+        # v2.1.16 deliberately targets the ThetaData v3 REST API through a local
+        # Theta Terminal. A later release choosing a different client or API
+        # style should be a visible change in a report, not an inference from
+        # which base URL happens to be configured.
+        "access_mode": "THETA_TERMINAL_REST_V3",
         "expected_capture_origin": live_origin.value,
+        # What the contract listing is allowed to establish. Printed with the
+        # plan because an operator reading "we now request a contract list"
+        # should see, in the same breath, that it settles nothing yet.
+        "contract_list_evidence_state": CONTRACT_LIST_EVIDENCE_STATE,
         "pipeline_fingerprint": pipeline.fingerprint(),
         "capture_plan_fingerprint": pipeline.capture_plan.fingerprint,
         "required_endpoints": sorted(
@@ -661,6 +686,8 @@ class _Run:
     capture_origin: Any = None
     #: What the raw sweep did. Set before finalization; read by the report.
     acquisition: Any = None
+    #: The exact requests this run authorised, derived before the first one.
+    request_plan: Any = None
     #: What a parser made of the stored bytes, afterwards. Never affects the
     #: raw state.
     parser_report: dict[str, Any] = field(default_factory=dict)
@@ -759,7 +786,7 @@ def run_capture(
 
     pipeline: Any = None
     try:
-        attempts = HttpAttemptLog(destination / "attempts")
+        attempts = HttpAttemptLog.create_new(destination / "attempts")
         run.attempts = attempts
 
         # **Exactly one** raw store for the whole run, and the pipeline is built
@@ -800,6 +827,10 @@ def run_capture(
             # these responses.
         )
         run.mark = run.session.mark()
+        # Derived before the intent is written, so the document that says what
+        # this run was going to do carries the actual requests -- and before the
+        # sweep, which authorises every request against this same object.
+        run.request_plan = pipeline.raw_request_plan(as_of=moment)
         _write_intent(run, config_path=config_path)
 
         # ---- Acquire every planned endpoint. Parsing comes later. -----------
@@ -1084,13 +1115,6 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
     captured_endpoints = set(manifest.endpoints)
     partial = bool(required - captured_endpoints)
 
-    if not run.state.is_failure:
-        run.state = (
-            RawCaptureRunState.COMPLETED_RAW_VERIFIED
-            if verification.verified and integrity.ok and not partial
-            else RawCaptureRunState.COMPLETED_RAW_UNVERIFIED
-        )
-
     # ---- Bind the attempt evidence to this capture -------------------------
     #
     # The index hash, the counts and the schema, recorded at finalization so a
@@ -1098,7 +1122,43 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
     # truncated or rewritten since. Without it, "the log verifies" only ever
     # meant "the log is internally consistent right now" -- which a tamperer
     # can arrange.
-    run.extra["attempt_evidence"] = _attempt_receipt(run)
+    receipt = _attempt_receipt(run)
+    run.extra["attempt_evidence"] = receipt
+
+    # ---- What "verified" means -------------------------------------------
+    #
+    # **Every layer, or none.** v2.1.15 could report
+    # ``COMPLETED_RAW_VERIFIED`` beside ``attempt_evidence.ok = false``, which
+    # is a contradiction: the attempt log is part of the evidence a capture
+    # produces, and a run that cannot vouch for it has not verified its
+    # capture. It has verified *some* of it, and the honest word for that is
+    # unverified.
+    #
+    # The captured responses are not discarded and not downgraded -- they are
+    # on disk and they verified. What changes is the claim the run makes about
+    # itself, and which layer failed is named rather than left to be inferred.
+    if not run.state.is_failure:
+        layers = {
+            "RAW_STORE_INTEGRITY": integrity.ok,
+            "CAPTURE_MANIFEST": verification.verified,
+            "REQUIRED_ENDPOINT_ACQUISITION": not partial,
+            "HTTP_ATTEMPT_EVIDENCE": bool(receipt.get("ok", False)),
+        }
+        unverified = sorted(name for name, held in layers.items() if not held)
+        run.extra["verification_layers"] = dict(sorted(layers.items()))
+        if unverified:
+            run.extra["verification_layer"] = unverified[0]
+            run.extra["verification_findings"] = _layer_findings(
+                unverified,
+                integrity=integrity,
+                verification=verification,
+                receipt=receipt,
+            )
+        run.state = (
+            RawCaptureRunState.COMPLETED_RAW_UNVERIFIED
+            if unverified
+            else RawCaptureRunState.COMPLETED_RAW_VERIFIED
+        )
 
     # ---- Parsing, now that every byte is stored and verified ---------------
     #
@@ -1127,6 +1187,11 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         "raw_acquisition": (
             run.acquisition.as_dict() if run.acquisition is not None else {}
         ),
+        "access_mode": "THETA_TERMINAL_REST_V3",
+        "request_plan": (
+            run.request_plan.as_dict() if run.request_plan is not None else {}
+        ),
+        "contract_list_evidence_state": CONTRACT_LIST_EVIDENCE_STATE,
         "parser_report_path": "parser-report.json",
         "captured_at": run.started_at.isoformat(),
         "finalized_at": datetime.now(UTC).isoformat(),
@@ -1179,6 +1244,36 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
     _write_json(run.destination / "parser-report.json", run.parser_report)
     _write_json(run.destination / "capture-summary.json", report)
     return report
+
+
+def _layer_findings(
+    unverified: list[str],
+    *,
+    integrity: Any,
+    verification: Any,
+    receipt: Mapping[str, Any],
+) -> list[str]:
+    """Why each unverified layer did not verify, prefixed by the layer.
+
+    Prefixed because "the capture did not verify" is not actionable and "the
+    attempt bodies do not hash to their names" is: they send an operator to
+    different files.
+    """
+    findings: list[str] = []
+    for layer in unverified:
+        if layer == "RAW_STORE_INTEGRITY":
+            findings.extend(
+                f"{layer}:{finding.status.value}:{finding.artifact}"
+                for finding in integrity.findings
+                if finding.status.value != "VALID"
+            )
+        elif layer == "CAPTURE_MANIFEST":
+            findings.extend(f"{layer}:{f}" for f in verification.failures)
+        elif layer == "HTTP_ATTEMPT_EVIDENCE":
+            findings.extend(f"{layer}:{f}" for f in receipt.get("findings", ()))
+        else:
+            findings.append(f"{layer}: a planned endpoint produced no record")
+    return findings
 
 
 def _attempt_receipt(run: _Run) -> dict[str, Any]:
@@ -1269,7 +1364,12 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
             "pipeline_fingerprint": run.pipeline.fingerprint(),
             "capture_plan_fingerprint": run.pipeline.capture_plan.fingerprint,
             "requested_endpoints": sorted(
-                e.value for e in run.pipeline.capture_plan.required_endpoints
+                e.value for e in run.pipeline.capture_plan.acquisition_endpoints
+            ),
+            # The exact requests, on disk before the first one is sent, so a run
+            # that dies mid-flight still says what it was going to ask for.
+            "request_plan": (
+                run.request_plan.as_dict() if run.request_plan is not None else {}
             ),
             "capture_origin": (
                 run.capture_origin.value if run.capture_origin is not None else ""

@@ -64,8 +64,7 @@ from src.adapters.raw_store import (
     probe_raw_store,
     record_id_belongs_to,
 )
-from src.adapters.thetadata.capture_plan import CapturePlan, capture_plan_for
-from src.adapters.thetadata.endpoints import Tier
+from src.adapters.thetadata.capture_plan import CapturePlan
 from src.adapters.validation import (
     AdapterValidationReport,
     AdapterValidator,
@@ -1906,12 +1905,13 @@ def assess_readiness(
     # Both derived here. The caller supplies a manifest and a store; the
     # verifier and the validator run inside this function, so neither verdict
     # can arrive pre-formed.
-    plan = capture_plan_for(
-        pricing_mode=pipeline.pricing_mode,
-        vendor_gamma_policy=pipeline.vendor_gamma_policy,
-        underlying_price_source=config.underlying_price_source,
-        tier=Tier(config.tier),
-    )
+    # **The pipeline's own plan, not a rebuilt one.** This rebuilt it from four
+    # of the pipeline's inputs and got a plan that was equal by luck: the
+    # moment the plan started covering the instrument mapping, the rebuilt
+    # fingerprint stopped matching the one every record was stamped with, and
+    # a correct capture read as belonging to another plan. A derived value with
+    # two derivations is a value with two answers.
+    plan = pipeline.capture_plan
     capture: CaptureVerification | None = None
     if manifest is not None:
         capture = verify_capture(

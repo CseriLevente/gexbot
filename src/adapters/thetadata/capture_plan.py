@@ -23,12 +23,31 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from src.adapters.thetadata.endpoints import Endpoint, Tier, tier_satisfies
+from src.adapters.thetadata.endpoints import (
+    MINIMUM_TIER,
+    Endpoint,
+    Tier,
+    tier_satisfies,
+)
+
+#: What the listing endpoint needs. Named rather than inlined so the plan and
+#: the tier matrix cannot drift.
+MINIMUM_TIER_FOR_LISTING = MINIMUM_TIER[Endpoint.OPTION_CONTRACT_LIST_QUOTE]
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.config.pipeline import IvGammaPricingMode, VendorGammaPolicy
 
-__all__ = ["CapturePlan", "MultipleRecordReason", "capture_plan_for"]
+__all__ = [
+    "CAPTURE_PLAN_SCHEMA_VERSION",
+    "CapturePlan",
+    "MultipleRecordReason",
+    "capture_plan_for",
+]
+
+#: Bumped when what a plan *says* changes. v2.1.16 splits endpoints a chain
+#: needs from endpoints captured as evidence, and carries both the option root
+#: and the underlying index symbol.
+CAPTURE_PLAN_SCHEMA_VERSION = "capture-plan/2.1.16"
 
 #: Underlying sources that mean "read the vendor's index print". Anything else
 #: is either synthetic or supplied from outside, and needs no index request.
@@ -67,11 +86,26 @@ class CapturePlan:
     """
 
     required_endpoints: tuple[Endpoint, ...]
+    #: Endpoints captured for their own sake rather than because a chain needs
+    #: them. **Absence is not a verification failure**: a chain built without
+    #: the vendor's contract listing is still the chain the snapshots describe,
+    #: and requiring the listing would have retroactively invalidated every
+    #: capture taken before it existed. Requesting it is how the coverage
+    #: question eventually gets settled against bytes; requiring it would be
+    #: asserting that it already has been.
+    evidence_endpoints: tuple[Endpoint, ...] = ()
     rationale: tuple[tuple[str, str], ...] = ()
     pricing_mode: str = ""
     vendor_gamma_policy: str = ""
     underlying_price_source: str = ""
     tier: str = ""
+    #: The option root every option-market request carries.
+    option_symbol: str = ""
+    #: The index the options are written on, which only the index snapshot
+    #: carries. Part of the plan's identity since v2.1.16: a plan that asked
+    #: the index endpoint for ``SPXW`` and one that asked it for ``SPX`` are
+    #: plans for different captures, and until now they hashed the same.
+    underlying_index_symbol: str = ""
     #: ``(endpoint, MultipleRecordReason)`` pairs. Empty in every shipped
     #: profile: a snapshot plan issues one request per endpoint, so a second
     #: response is a duplicate nobody accounted for rather than a page two.
@@ -87,11 +121,21 @@ class CapturePlan:
         """
         payload = json.dumps(
             {
+                "schema_version": CAPTURE_PLAN_SCHEMA_VERSION,
                 "required_endpoints": sorted(e.value for e in self.required_endpoints),
+                # In the fingerprint because a session that also captured the
+                # listing did something different from one that did not, even
+                # though both could build the same chain.
+                "evidence_endpoints": sorted(e.value for e in self.evidence_endpoints),
                 "pricing_mode": self.pricing_mode,
                 "vendor_gamma_policy": self.vendor_gamma_policy,
                 "underlying_price_source": self.underlying_price_source,
                 "tier": self.tier,
+                # Both symbols. Correcting the index mapping must produce a
+                # different plan, so a capture taken under the wrong one cannot
+                # be silently reused under the right one.
+                "option_symbol": self.option_symbol,
+                "underlying_index_symbol": self.underlying_index_symbol,
                 # Whether an endpoint may answer twice changes which bytes a
                 # chain was built from, so it is part of the plan's identity.
                 "declared_multiple_records": sorted(
@@ -105,6 +149,21 @@ class CapturePlan:
 
     def reason_for(self, endpoint: Endpoint) -> str:
         return dict(self.rationale).get(endpoint.value, "")
+
+    @property
+    def acquisition_endpoints(self) -> tuple[Endpoint, ...]:
+        """Everything the raw sweep requests: what a chain needs, plus evidence.
+
+        Distinct from :attr:`required_endpoints`, which is what verification
+        insists on. A session captures more than it must in order to answer
+        questions later, and confusing the two would make an extra capture into
+        an extra obligation.
+        """
+        return (*self.required_endpoints, *self.evidence_endpoints)
+
+    def is_evidence_only(self, endpoint: str) -> bool:
+        """Whether this endpoint was captured for evidence rather than for use."""
+        return any(held.value == endpoint for held in self.evidence_endpoints)
 
     def permits_multiple_records(self, endpoint: str) -> bool:
         """Whether this plan accounted for the endpoint answering more than once."""
@@ -134,6 +193,7 @@ def capture_plan_for(
     vendor_gamma_policy: VendorGammaPolicy,
     underlying_price_source: str,
     tier: Tier,
+    instruments: Any = None,
 ) -> CapturePlan:
     """Derive the plan from what the session is already configured to do."""
     required: list[tuple[Endpoint, str]] = [
@@ -172,11 +232,27 @@ def capture_plan_for(
             )
         )
 
+    # **Evidence, not authority, and therefore not "required".** The vendor's
+    # dedicated listing of contracts quoted on a session. Captured from the
+    # first session because the question it might answer -- "was the snapshot
+    # the whole universe?" -- cannot be answered without it, and cannot be
+    # answered *with* it either until a real response has been compared against
+    # a real snapshot. Requesting it costs one call; not having it costs
+    # another paid session.
+    evidence: list[tuple[Endpoint, str]] = []
+    if tier_satisfies(tier, MINIMUM_TIER_FOR_LISTING):
+        evidence.append(
+            (
+                Endpoint.OPTION_CONTRACT_LIST_QUOTE,
+                "raw completeness evidence: the vendor's own list of contracts "
+                "quoted for this session, captured so the coverage question can "
+                "eventually be settled against bytes rather than assumed",
+            )
+        )
+
     # A tier that cannot serve an endpoint is refused at configuration load, so
     # reaching here with one is a bug rather than a user error -- but the plan
     # should still say so rather than list a response that cannot arrive.
-    from src.adapters.thetadata.endpoints import MINIMUM_TIER
-
     unreachable = [
         endpoint.value
         for endpoint, _ in required
@@ -188,9 +264,15 @@ def capture_plan_for(
             "describes a capture that cannot happen"
         )
 
+    held = instruments
     return CapturePlan(
+        option_symbol=getattr(held, "option_symbol", ""),
+        underlying_index_symbol=getattr(held, "underlying_index_symbol", ""),
+        evidence_endpoints=tuple(endpoint for endpoint, _ in evidence),
         required_endpoints=tuple(endpoint for endpoint, _ in required),
-        rationale=tuple((endpoint.value, reason) for endpoint, reason in required),
+        rationale=tuple(
+            (endpoint.value, reason) for endpoint, reason in [*required, *evidence]
+        ),
         pricing_mode=pricing_mode.value,
         vendor_gamma_policy=vendor_gamma_policy.value,
         underlying_price_source=underlying_price_source,

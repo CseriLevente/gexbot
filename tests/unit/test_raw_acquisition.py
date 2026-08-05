@@ -75,7 +75,9 @@ def test_an_index_schema_error_does_not_prevent_the_other_endpoints(tmp_path):
 
     acquisition = report["raw_acquisition"]
     planned = set(acquisition["planned_endpoints"])
-    assert len(planned) == 4, sorted(planned)
+    # Five since v2.1.16: the four a chain is built from, plus the vendor's
+    # contract listing captured as evidence.
+    assert len(planned) == 5, sorted(planned)
     assert set(acquisition["attempted_endpoints"]) == planned
     assert set(acquisition["acquired_endpoints"]) == planned
     assert acquisition["missing_endpoints"] == []
@@ -85,7 +87,7 @@ def test_an_index_schema_error_does_not_prevent_the_other_endpoints(tmp_path):
     # And the bytes are on disk -- including the unusable ones, which are the
     # most interesting thing this session found.
     stored = sorted(p.name for p in run_path(report, "raw_store_path").glob("*.raw"))
-    assert len(stored) == 4, stored
+    assert len(stored) == 5, stored
     assert any(
         b"scheduled maintenance"
         in (run_path(report, "raw_store_path") / name).read_bytes()
@@ -134,7 +136,7 @@ def test_a_parser_failure_cannot_downgrade_a_complete_raw_acquisition(tmp_path):
     # Every other endpoint parsed, which is only knowable because they were
     # requested at all.
     assert (
-        sum(1 for e in parser["endpoints"] if e["parser_status"] == "PARSER_VALID") == 3
+        sum(1 for e in parser["endpoints"] if e["parser_status"] == "PARSER_VALID") == 4
     )
 
 
@@ -152,7 +154,7 @@ def test_requests_are_derivable_without_a_chain_snapshot():
     planned = pipeline.raw_request_parameters()
 
     assert {endpoint for endpoint, _ in planned} == set(
-        pipeline.capture_plan.required_endpoints
+        pipeline.capture_plan.acquisition_endpoints
     )
     for endpoint, params in planned:
         assert params, endpoint
@@ -445,8 +447,14 @@ def test_a_reopened_attempt_log_detects_a_modified_body(tmp_path):
     assert bodies, "the capture preserved no attempt bodies"
     bodies[0].write_bytes(b"a different body entirely")
 
-    # v2.1.14: an empty fresh log, no failures, tampering undetected.
-    assert HttpAttemptLog(root).verify_bodies() == ()
+    # v2.1.14/v2.1.15: ``HttpAttemptLog(root).verify_bodies()`` returned ``()``
+    # -- an empty answer from a log that had never read the directory. Since
+    # v2.1.16 the ambiguous path refuses rather than reassuring: an empty result
+    # now means "nothing is wrong", never "I looked at nothing".
+    from src.adapters.errors import ThetaDataRawStoreError
+
+    with pytest.raises(ThetaDataRawStoreError, match=r"(?i)has not loaded it"):
+        HttpAttemptLog(root).verify_bodies()
 
     reopened = HttpAttemptLog.open_existing(root)
     assert not reopened.ok

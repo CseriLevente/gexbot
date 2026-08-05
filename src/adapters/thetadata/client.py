@@ -628,6 +628,11 @@ REQUIRED_COLUMNS: dict[Endpoint, frozenset[str]] = {
     Endpoint.OPTION_GREEKS_SECOND_ORDER: frozenset(
         {"symbol", "expiration", "strike", "right", "gamma"}
     ),
+    # A listing that does not identify its contracts is not a listing. These
+    # four are the identity; nothing here assumes what else arrives.
+    Endpoint.OPTION_CONTRACT_LIST_QUOTE: frozenset(
+        {"symbol", "expiration", "strike", "right"}
+    ),
 }
 
 

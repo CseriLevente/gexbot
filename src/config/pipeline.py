@@ -1465,6 +1465,30 @@ def _error_status(error: BaseException) -> int | None:
     return None
 
 
+def _request_hash(
+    spec_fingerprint: str, endpoint: Any, canonical: tuple[tuple[str, str], ...]
+) -> str:
+    """One request's identity: the session's spec, the endpoint, the parameters.
+
+    The spec fingerprint is in it because two sessions asking the same URL under
+    different rate or dividend parameters are asking different questions of the
+    vendor, and the answer differs.
+    """
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        {
+            "request_spec_fingerprint": spec_fingerprint,
+            "endpoint": getattr(endpoint, "value", endpoint),
+            "parameters": [list(pair) for pair in canonical],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _attempt_ids(observer: Any, since: int) -> tuple[str, ...]:
     """Which attempt records this request produced, by stable identifier.
 
@@ -1667,35 +1691,110 @@ class ThetaDataResearchPipeline:
 
     # -- raw acquisition, which is not parsing --------------------------------
 
-    def raw_request_parameters(self) -> tuple[tuple[Any, dict[str, Any]], ...]:
+    def raw_request_parameters(
+        self, *, as_of: datetime | None = None
+    ) -> tuple[tuple[Any, dict[str, Any]], ...]:
         """Every planned endpoint and the exact query it will be asked with.
 
         Derived from the canonical sources and nothing else: the capture plan
-        says which endpoints, the chain request says the symbol, DTE window,
-        strike range and minimum time, the Greeks parameters say the rate and
-        dividend the vendor computes under, and the index symbol comes from the
-        same chain request. Nothing here needs a ``ChainSnapshot`` to exist,
-        which is the point -- a snapshot is a *result* of parsing, and the
-        requests must be knowable before anything has been parsed.
-        """
-        from src.adapters.thetadata.endpoints import Endpoint
+        says which endpoints, the chain request says the DTE window, strike
+        range and minimum time, the Greeks parameters say the rate and dividend
+        the vendor computes under, and **the instrument mapping says which
+        symbol each endpoint gets**. Nothing here needs a ``ChainSnapshot`` to
+        exist -- a snapshot is a *result* of parsing, and the requests must be
+        knowable before anything has been parsed.
 
+        The symbol split is the v2.1.16 correction. ``/v3/index/snapshot/price``
+        takes the underlying index; every option-market request takes the root.
+        v2.1.15 used one symbol for both and asked the index endpoint for
+        ``SPXW``.
+        """
+        from datetime import UTC
+        from datetime import datetime as _datetime
+
+        from src.adapters.thetadata.endpoints import Endpoint
+        from src.gex.sessions import market_session_date
+
+        instruments = self.runtime.instruments
         request = self.runtime.default_chain_request
         greeks = self.runtime.client.greeks
-        chain_query = request.as_query()
-        greeks_query = {**chain_query, **greeks.as_query()}
+
+        option_query = {**request.as_query(), "symbol": instruments.option_symbol}
+        greeks_query = {**option_query, **greeks.as_query()}
+
+        # The session date the vendor should list contracts for, in the options
+        # market's own zone. ``as_of.date()`` answers a different question and
+        # the two disagree for six hours out of every twenty-four.
+        moment = as_of if as_of is not None else _datetime.now(UTC)
+        listing_query: dict[str, Any] = {
+            "symbol": instruments.option_symbol,
+            "date": market_session_date(moment).isoformat(),
+        }
+        if request.max_dte is not None:
+            # The same DTE scope as the chain request. A listing over a wider
+            # window would be a list of contracts the snapshot never asked for,
+            # and comparing the two would answer a question nobody posed.
+            listing_query["max_dte"] = request.max_dte
 
         per_endpoint: dict[Any, dict[str, Any]] = {
-            Endpoint.INDEX_PRICE_SNAPSHOT: {"symbol": request.symbol},
-            Endpoint.OPTION_QUOTE_SNAPSHOT: chain_query,
-            Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT: chain_query,
+            Endpoint.INDEX_PRICE_SNAPSHOT: {
+                "symbol": instruments.underlying_index_symbol
+            },
+            Endpoint.OPTION_QUOTE_SNAPSHOT: option_query,
+            Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT: option_query,
             Endpoint.OPTION_GREEKS_FIRST_ORDER: greeks_query,
             Endpoint.OPTION_GREEKS_SECOND_ORDER: greeks_query,
             Endpoint.OPTION_GREEKS_ALL: greeks_query,
+            Endpoint.OPTION_CONTRACT_LIST_QUOTE: listing_query,
         }
         return tuple(
-            (endpoint, dict(per_endpoint.get(endpoint, chain_query)))
+            (endpoint, dict(per_endpoint.get(endpoint, option_query)))
             for endpoint in self._acquisition_order()
+        )
+
+    def raw_request_plan(self, *, as_of: datetime | None = None) -> Any:
+        """The exact requests this session will make, as a hashable document.
+
+        Built before anything is sent, printed by the dry run, persisted with
+        the run, and consulted on the way to the transport. An operator who
+        reads this has seen the actual requests -- not a count of endpoints and
+        a tier.
+        """
+        from src.adapters.thetadata.endpoints import MINIMUM_TIER
+        from src.adapters.thetadata.request_plan import (
+            PlannedEndpointRequest,
+            RawRequestPlan,
+            canonical_parameters,
+        )
+
+        instruments = self.runtime.instruments
+        spec_fingerprint = self.request_spec().fingerprint
+        entries: list[PlannedEndpointRequest] = []
+        for endpoint, params in self.raw_request_parameters(as_of=as_of):
+            canonical = canonical_parameters(params)
+            entries.append(
+                PlannedEndpointRequest(
+                    endpoint=endpoint.value,
+                    safe_path=endpoint.value,
+                    canonical_query_parameters=canonical,
+                    required_tier=MINIMUM_TIER[endpoint].value,
+                    request_spec_hash=_request_hash(
+                        spec_fingerprint, endpoint, canonical
+                    ),
+                )
+            )
+        return RawRequestPlan(
+            requests=tuple(entries),
+            option_symbol=instruments.option_symbol,
+            underlying_index_symbol=instruments.underlying_index_symbol,
+            base_url=self.runtime.client.settings.base_url,
+            notes=(
+                "the index snapshot takes the underlying index symbol; every "
+                "other request takes the option root",
+                "the contract listing is captured as raw evidence and grants no "
+                "coverage authority until its scope has been compared against a "
+                "real snapshot",
+            ),
         )
 
     def _acquisition_order(self) -> tuple[Any, ...]:
@@ -1715,12 +1814,15 @@ class ThetaDataResearchPipeline:
             Endpoint.OPTION_GREEKS_FIRST_ORDER,
             Endpoint.OPTION_GREEKS_SECOND_ORDER,
             Endpoint.OPTION_GREEKS_ALL,
+            # Last, because it is evidence rather than an input: if a systemic
+            # failure stops the sweep, the endpoints a chain needs have already
+            # been attempted.
+            Endpoint.OPTION_CONTRACT_LIST_QUOTE,
         )
-        required = set(self.capture_plan.required_endpoints)
-        ordered = [e for e in preferred if e in required]
-        ordered += [
-            e for e in self.capture_plan.required_endpoints if e not in preferred
-        ]
+        wanted = self.capture_plan.acquisition_endpoints
+        held = set(wanted)
+        ordered = [e for e in preferred if e in held]
+        ordered += [e for e in wanted if e not in preferred]
         return tuple(ordered)
 
     def capture_required_endpoints_raw(
@@ -1764,7 +1866,10 @@ class ThetaDataResearchPipeline:
         )
 
         self.validate_integrity()
-        planned = self.raw_request_parameters()
+        # One derivation, and the sweep is bound to it: every request is
+        # authorised against the same document the dry run printed.
+        plan = self.raw_request_plan(as_of=as_of)
+        planned = self.raw_request_parameters(as_of=as_of)
         client = self.runtime.client
         observer = getattr(getattr(client, "transport", None), "attempt_observer", None)
 
@@ -1810,6 +1915,9 @@ class ThetaDataResearchPipeline:
 
             before = len(getattr(observer, "records", ()) or ())
             try:
+                # Refused here, before the transport, if it is not the request
+                # the operator approved.
+                plan.authorize(endpoint.value, params)
                 acquired = client.acquire(endpoint, params, capture=capture)
             except BaseException as error:  # classified, never swallowed silently
                 stop = stop_reason_for(error)
@@ -1878,6 +1986,7 @@ class ThetaDataResearchPipeline:
             stop_reason=stop,
             stop_detail=stop_detail,
             planned_endpoints=tuple(endpoint.value for endpoint, _ in planned),
+            request_plan_hash=plan.request_plan_hash,
         )
 
     def parse_captured_endpoints(
@@ -2606,6 +2715,7 @@ class ThetaDataResearchPipeline:
             vendor_gamma_policy=self.vendor_gamma_policy,
             underlying_price_source=self.config.underlying_price_source,
             tier=Tier(self.config.tier),
+            instruments=self.runtime.instruments,
         )
 
     # -- binding a normalized chain to the bytes behind it --------------------
@@ -2912,7 +3022,13 @@ class ThetaDataResearchPipeline:
             request=self.runtime.default_chain_request,
             greeks=self.runtime.client.greeks,
             settings=self.runtime.client.settings,
+            # The endpoints a *chain* is built from. The contract listing is
+            # deliberately absent: its ``date`` parameter is the session's, so
+            # including it would make this fingerprint -- and therefore the
+            # pipeline identity every record is stamped with -- change daily
+            # for a configuration that had not changed at all.
             endpoints=self.capture_plan.required_endpoints,
+            instruments=self.runtime.instruments,
         )
 
     def normalization_recipe(

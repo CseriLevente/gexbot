@@ -96,6 +96,13 @@ def payloads(
         f"{VENDOR_INSTANT},SPXW,2026-03-20,{strike},call,10,1,12.30,0,10,1,12.50,0\n"
         for strike in STRIKES
     )
+    # The vendor's own listing of contracts quoted for the session. Deliberately
+    # the *same* contracts as the snapshots: a fixture where the listing and the
+    # snapshot disagree would be asserting an answer to the coverage question
+    # this release explicitly leaves open.
+    contract_list_rows = "".join(
+        f"SPXW,2026-03-20,{strike},call\n" for strike in STRIKES
+    )
     oi_rows = "".join(
         f"{VENDOR_INSTANT},SPXW,2026-03-20,{strike},call,{FIXTURE_OPEN_INTEREST}\n"
         for strike in STRIKES
@@ -123,9 +130,16 @@ def payloads(
             "rho,epsilon,lambda,implied_vol,iv_error,underlying_timestamp,"
             "underlying_price\n" + first_order_rows
         ),
+        # **SPX, not SPXW.** The index snapshot is a print of the underlying
+        # index; the chain around it is the SPXW option root. A fixture that
+        # echoed the option root here would have kept the v2.1.15 defect
+        # invisible to every test that reads it back.
         Endpoint.INDEX_PRICE_SNAPSHOT: (
             "timestamp,symbol,index_price\n"
-            f"{VENDOR_INSTANT},SPXW,{FIXTURE_INDEX_PRICE}\n"
+            f"{VENDOR_INSTANT},SPX,{FIXTURE_INDEX_PRICE}\n"
+        ),
+        Endpoint.OPTION_CONTRACT_LIST_QUOTE: (
+            "symbol,expiration,strike,right\n" + contract_list_rows
         ),
         Endpoint.OPTION_GREEKS_SECOND_ORDER: (
             "symbol,expiration,strike,right,timestamp,bid,ask,gamma,vanna,charm,"
@@ -208,12 +222,20 @@ def unresolved_pipeline(**overrides: Any) -> ThetaDataResearchPipeline:
 
 
 def plan_for(pipeline: ThetaDataResearchPipeline | None = None):
+    """The plan a pipeline would derive. Built from the pipeline's own inputs.
+
+    The instrument mapping is passed because the plan's fingerprint covers both
+    symbols since v2.1.16 -- a helper that rebuilt the plan without it would
+    produce a different fingerprint from the one the capture was stamped with,
+    and every record would read as belonging to another plan.
+    """
     built = pipeline if pipeline is not None else resolved_pipeline()
     return capture_plan_for(
         pricing_mode=built.pricing_mode,
         vendor_gamma_policy=built.vendor_gamma_policy,
         underlying_price_source=built.config.underlying_price_source,
         tier=Tier(built.config.tier),
+        instruments=built.runtime.instruments,
     )
 
 

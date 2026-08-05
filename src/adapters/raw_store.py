@@ -60,17 +60,19 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-# Moved in v2.1.15 because *how a stored payload becomes text* changed:
+# Moved in v2.1.16 because the parser reads a response shape it did not read
+# before: ``/v3/option/list/contracts/quote``. Moved in v2.1.15 because *how a
+# stored payload becomes text* changed:
 # replay consumes the exact bytes under the captured content type and charset
 # rather than a UTF-8-with-replacement reading of them. Nothing about how rows
 # become a gamma changed -- that is the engine version, and it has not moved.
-PARSER_VERSION = "thetadata-v3-parser/2.1.15"
+PARSER_VERSION = "thetadata-v3-parser/2.1.16"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.15"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.16"
 
 #: What a stored raw payload *is*. Bumped when that changes, which it did in
 #: v2.1.13 -- the store holds the response's entity bytes rather than a UTF-8

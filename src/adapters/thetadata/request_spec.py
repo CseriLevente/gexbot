@@ -142,6 +142,7 @@ def build_request_spec(
     greeks: Any,
     settings: Any,
     endpoints: tuple[Endpoint, ...],
+    instruments: Any = None,
 ) -> RequestSpec:
     """State, canonically, what this session would send to each endpoint.
 
@@ -150,15 +151,26 @@ def build_request_spec(
     of them. A separate description would be a second source of truth, and the
     defect this closes is exactly a claim that nothing checked.
     """
+    from src.adapters.thetadata.instruments import mapping_for
+
+    # **One symbol rule, not two.** This function used to derive
+    # ``{"symbol": request.symbol}`` for the index endpoint while the fetch path
+    # derived the same thing separately -- so both were wrong in the same way
+    # and agreed with each other, which is why nothing caught ``SPXW`` being
+    # sent to ``/v3/index/snapshot/price``. A verifier that recomputes the
+    # defect it is verifying against is not a verifier.
+    held = instruments if instruments is not None else mapping_for(request.symbol)
+
     expected: list[tuple[str, tuple[tuple[str, str], ...]]] = []
     for endpoint in sorted(set(endpoints), key=lambda e: e.value):
         params: dict[str, Any]
         if endpoint in SYMBOL_ONLY_ENDPOINTS:
-            params = {"symbol": request.symbol}
+            params = {"symbol": held.symbol_for(endpoint)}
         else:
             params = dict(
                 request.as_query(supports_filters=endpoint in FILTERED_ENDPOINTS)
             )
+            params["symbol"] = held.symbol_for(endpoint)
             if endpoint in GREEKS_ENDPOINTS:
                 params.update(greeks.as_query())
         expected.append((endpoint.value, _canonical(params)))

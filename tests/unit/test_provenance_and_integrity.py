@@ -183,7 +183,7 @@ def test_dst_edge_timestamps_are_still_accounted_for(stamp):
 
 
 def test_the_parser_version_reflects_this_release():
-    assert PARSER_VERSION == "thetadata-v3-parser/2.1.15"
+    assert PARSER_VERSION == "thetadata-v3-parser/2.1.16"
 
 
 def test_the_parser_version_is_defined_once():

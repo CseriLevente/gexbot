@@ -380,6 +380,9 @@ def test_no_snapshot_endpoint_is_a_dedicated_contract_list() -> None:
     established ``MEASURED_COMPLETE`` for the whole request. Having one row per
     returned contract is not listing every contract the request owed: a
     truncated response enumerates its own rows perfectly.
+
+    v2.1.16 adds a genuinely dedicated listing endpoint. The rule that matters
+    is unchanged and is checked below: being a list is not being *our* list.
     """
     from src.adapters.thetadata.endpoints import RESPONSE_CAPABILITIES, Endpoint
 
@@ -390,13 +393,27 @@ def test_no_snapshot_endpoint_is_a_dedicated_contract_list() -> None:
                 "market-data snapshot returns what the vendor sent."
             )
             assert not capability.enumerates_request_universe
-    # And the derived set is empty, which is the honest state (OD-11).
+
     from src.adapters.thetadata.endpoints import DEDICATED_CONTRACT_LIST_ENDPOINTS
 
-    assert frozenset() == DEDICATED_CONTRACT_LIST_ENDPOINTS
+    # **The narrower, accurate state (v2.1.16).** A dedicated listing endpoint
+    # exists and the first session captures it, so this set is no longer empty
+    # -- but membership says what an endpoint is *for*, not what it proves. No
+    # endpoint may claim ``enumerates_request_universe`` until a real response
+    # has been compared against a real filtered snapshot, because a listing of
+    # everything quoted on a session is a different set from the contracts a
+    # request bounded by max_dte and strike_range was owed. See OD-11.
+    assert (
+        frozenset({Endpoint.OPTION_CONTRACT_LIST_QUOTE.value})
+        == DEDICATED_CONTRACT_LIST_ENDPOINTS
+    )
     assert Endpoint.OPTION_QUOTE_SNAPSHOT.value not in (
         DEDICATED_CONTRACT_LIST_ENDPOINTS
     )
+    assert not any(
+        capability.enumerates_request_universe
+        for capability in RESPONSE_CAPABILITIES.values()
+    ), "no ThetaData response has been shown to enumerate our requested universe"
 
 
 def test_completeness_independence_is_not_inferred_from_a_string() -> None:

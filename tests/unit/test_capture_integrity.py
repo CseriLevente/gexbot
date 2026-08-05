@@ -756,7 +756,8 @@ def test_a_run_directory_verifies_after_it_has_been_moved(tmp_path):
 
     integrity = FileRawStore(archive / "raw").verify_integrity()
     assert integrity.ok, integrity.counts()
-    assert HttpAttemptLog(archive / "attempts").verify_bodies() == ()
+    moved_attempts = HttpAttemptLog.open_existing(archive / "attempts")
+    assert moved_attempts.ok, moved_attempts.findings
 
     # And the summary still describes a directory, once told where it now is.
     moved = dict(

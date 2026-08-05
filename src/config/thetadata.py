@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from src.adapters.errors import ThetaDataError
+from src.adapters.thetadata.instruments import InstrumentMapping
 from src.config.compatibility import (
     AttestationError,
     EvidenceSource,
@@ -1223,6 +1224,25 @@ class ThetaDataRuntime:
     iv_source: IVSource
     duplicate_policy: str
     config: ThetaDataConfig
+    #: Which option root, and which index its options are written on. Carried
+    #: as a pair because they are two facts: v2.1.15 held one symbol and sent
+    #: ``SPXW`` to ``/v3/index/snapshot/price``, which asks for the price of an
+    #: instrument that does not exist.
+    instruments: InstrumentMapping = field(
+        default_factory=lambda: InstrumentMapping(
+            option_symbol="SPXW", underlying_index_symbol="SPX"
+        )
+    )
+
+    @property
+    def index_symbol(self) -> str:
+        """The symbol the index snapshot must be asked with."""
+        return self.instruments.underlying_index_symbol
+
+    @property
+    def option_symbol(self) -> str:
+        """The root every option-market request must be asked with."""
+        return self.instruments.option_symbol
 
     @classmethod
     def from_config(
@@ -1237,6 +1257,12 @@ class ThetaDataRuntime:
     ) -> ThetaDataRuntime:
         """The one sanctioned entry point. Nothing else assembles a session."""
         from src.adapters.thetadata.client import ChainRequest
+        from src.adapters.thetadata.instruments import mapping_for
+
+        # Refuses a root with no declared underlying rather than defaulting to
+        # the root itself, which is precisely how ``SPXW`` reached the index
+        # endpoint.
+        instruments = mapping_for(symbol)
 
         return cls(
             client=build_thetadata_client(
@@ -1255,6 +1281,7 @@ class ThetaDataRuntime:
             iv_source=config.iv_source,
             duplicate_policy=config.duplicate_policy,
             config=config,
+            instruments=instruments,
         )
 
     def effective_limits(self) -> dict[str, Any]:
@@ -1283,7 +1310,12 @@ class ThetaDataRuntime:
         from src.adapters.validation import AdapterValidator
 
         record = self.client.fetch_index_snapshot(
-            symbol=self.default_chain_request.symbol, as_of=as_of, capture=capture
+            # **The index symbol, not the option root.** The whole point of
+            # the mapping: this request is about SPX, and the chain around it
+            # is about SPXW.
+            symbol=self.index_symbol,
+            as_of=as_of,
+            capture=capture,
         )
         if record is None:
             return None

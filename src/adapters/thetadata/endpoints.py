@@ -64,6 +64,24 @@ class Endpoint(str, Enum):
     OPTION_QUOTE_HISTORY = "/v3/option/history/quote"
     OPTION_OPEN_INTEREST_HISTORY = "/v3/option/history/open_interest"
     INDEX_PRICE_HISTORY = "/v3/index/history/price"
+    #: The vendor's dedicated listing of contracts that have a quote for a
+    #: session. Added in v2.1.16 and captured as *evidence*, not as authority:
+    #: see :data:`RESPONSE_CAPABILITIES` for why documentation saying an
+    #: endpoint lists contracts does not make it a proof of our universe.
+    OPTION_CONTRACT_LIST_QUOTE = "/v3/option/list/contracts/quote"
+
+
+#: Endpoints that take the **underlying index** symbol rather than the option
+#: root. The list is short and explicit because getting it wrong is silent: an
+#: index request carrying an option root returns whatever the vendor makes of a
+#: symbol that is not an index, and the result becomes the spot every gamma in
+#: the chain is computed against.
+INDEX_ENDPOINTS: Final[frozenset[str]] = frozenset(
+    {
+        Endpoint.INDEX_PRICE_SNAPSHOT.value,
+        Endpoint.INDEX_PRICE_HISTORY.value,
+    }
+)
 
 
 MINIMUM_TIER: Final[dict[Endpoint, Tier]] = {
@@ -78,6 +96,12 @@ MINIMUM_TIER: Final[dict[Endpoint, Tier]] = {
     Endpoint.OPTION_QUOTE_HISTORY: Tier.VALUE,
     Endpoint.OPTION_OPEN_INTEREST_HISTORY: Tier.VALUE,
     Endpoint.INDEX_PRICE_HISTORY: Tier.VALUE,
+    # Listing contracts is a Value-tier capability at the documented tiers, so
+    # the shipped Standard profile can request it. Modelled at the minimum the
+    # vendor documents rather than at the tier we happen to hold: a tier check
+    # that passes because our subscription is generous would stop catching the
+    # case it exists for.
+    Endpoint.OPTION_CONTRACT_LIST_QUOTE: Tier.VALUE,
 }
 
 
@@ -136,12 +160,31 @@ RESPONSE_CAPABILITIES: Final[dict[Endpoint, ResponseCapabilities]] = {
     # An index print names one instrument. It enumerates nothing.
     Endpoint.INDEX_PRICE_SNAPSHOT: ResponseCapabilities(),
     Endpoint.INDEX_PRICE_HISTORY: ResponseCapabilities(),
+    # **A dedicated listing, and deliberately not yet an authority.**
+    #
+    # ``is_dedicated_contract_list`` says what the endpoint is *for*. It does
+    # not say that its scope is the scope of our snapshot request, and that is
+    # the whole question: a listing of every contract quoted on a session is a
+    # different set from the contracts a request filtered by ``max_dte`` and
+    # ``strike_range`` was owed. Until a real response has been compared
+    # against a real snapshot, treating the two as the same set would be the
+    # v2.1.9 defect with a better-named endpoint.
+    #
+    # So: it enumerates rows, it is a dedicated list, and
+    # ``enumerates_request_universe`` stays False. See OPEN_DECISIONS OD-11.
+    Endpoint.OPTION_CONTRACT_LIST_QUOTE: ResponseCapabilities(
+        enumerates_rows=True,
+        is_dedicated_contract_list=True,
+    ),
 }
 
-#: Convenience for the resolver and the architecture test. Deliberately empty,
-#: and the emptiness is the claim: no verified ThetaData contract-list endpoint
-#: exists, so nothing in this repository can establish a complete universe from
-#: vendor bytes today.
+#: Convenience for the resolver and the architecture test.
+#:
+#: Non-empty since v2.1.16: ``/v3/option/list/contracts/quote`` exists and the
+#: first session captures it. What has *not* changed is what it authorizes.
+#: Membership here means "this endpoint's purpose is to list contracts"; it does
+#: not mean the list it returns is the set our filtered snapshot request was
+#: owed. That comparison needs a real response and has never been made.
 DEDICATED_CONTRACT_LIST_ENDPOINTS: Final[frozenset[str]] = frozenset(
     endpoint.value
     for endpoint, capability in RESPONSE_CAPABILITIES.items()
@@ -186,6 +229,17 @@ RESPONSE_FIELDS: Final[dict[Endpoint, tuple[str, ...]]] = {
         "strike",
         "right",
         "open_interest",
+    ),
+    # **Modelled, not verified.** The four columns that identify a contract are
+    # what a listing must carry to be a listing at all, and they are what the
+    # first session will check the real response against. If the vendor sends
+    # more, the extra columns are captured in the bytes and reported by the
+    # parser; if it sends fewer, that is the finding.
+    Endpoint.OPTION_CONTRACT_LIST_QUOTE: (
+        "symbol",
+        "expiration",
+        "strike",
+        "right",
     ),
     Endpoint.OPTION_GREEKS_FIRST_ORDER: (
         "symbol",

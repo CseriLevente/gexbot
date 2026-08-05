@@ -31,7 +31,6 @@ from typing import Any
 __all__ = [
     "PARSER_REPORT_SCHEMA_VERSION",
     "RAW_ACQUISITION_SCHEMA_VERSION",
-    "STOP_REASON_FOR",
     "SYSTEMIC_STOP_REASONS",
     "ParserStatus",
     "RawAcquisitionOutcome",
@@ -44,12 +43,12 @@ __all__ = [
 ]
 
 #: Bumped when the shape of an acquisition report changes.
-RAW_ACQUISITION_SCHEMA_VERSION = "raw-acquisition/2.1.15"
+RAW_ACQUISITION_SCHEMA_VERSION = "raw-acquisition/2.1.16"
 
 #: Bumped when what a parser report *claims* changes. Separate from the
 #: acquisition schema on purpose: the two documents answer different questions
 #: and a reader must be able to accept one and refuse the other.
-PARSER_REPORT_SCHEMA_VERSION = "parser-report/2.1.15"
+PARSER_REPORT_SCHEMA_VERSION = "parser-report/2.1.16"
 
 
 class RawEndpointAcquisitionStatus(str, Enum):
@@ -197,6 +196,9 @@ class RawAcquisitionOutcome:
     #: without the plan next to it.
     planned_endpoints: tuple[str, ...] = ()
     schema_version: str = RAW_ACQUISITION_SCHEMA_VERSION
+    #: The plan every request in this sweep was authorised against, so a
+    #: capture can be compared with the document its operator approved.
+    request_plan_hash: str = ""
     #: Named so a reader can tell "we chose not to continue" from "there was
     #: nothing left to do".
     stop_policy: tuple[str, ...] = field(
@@ -249,6 +251,7 @@ class RawAcquisitionOutcome:
             "stop_reason": self.stop_reason.value,
             "stop_detail": self.stop_detail,
             "stop_policy": list(self.stop_policy),
+            "request_plan_hash": self.request_plan_hash,
             "results": [result.as_dict() for result in self.results],
         }
 
@@ -257,18 +260,6 @@ class RawAcquisitionOutcome:
 
         payload = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-#: Which adapter failures are systemic. Consulted by name so the policy is one
-#: table rather than a chain of ``isinstance`` checks spread over the loop.
-STOP_REASON_FOR: dict[str, RawAcquisitionStopReason] = {
-    "ThetaDataAuthenticationError": RawAcquisitionStopReason.AUTHENTICATION_REJECTED,
-    "ThetaDataRateLimitError": RawAcquisitionStopReason.RATE_LIMIT_EXHAUSTED,
-    "ThetaDataRetryExhaustedError": RawAcquisitionStopReason.RATE_LIMIT_EXHAUSTED,
-    "RetryBudgetExhaustedError": RawAcquisitionStopReason.RATE_LIMIT_EXHAUSTED,
-    "ThetaDataRawStoreError": RawAcquisitionStopReason.STORAGE_FAILURE,
-    "KeyboardInterrupt": RawAcquisitionStopReason.OPERATOR_CANCELLED,
-}
 
 
 #: Adapter failure -> the operator's typed error code. Ordered most specific

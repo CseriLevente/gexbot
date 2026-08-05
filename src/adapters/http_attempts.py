@@ -48,7 +48,7 @@ __all__ = [
 ATTEMPT_BODY_SUFFIX = ".bin"
 
 #: Bumped when the *meaning* of an attempt record changes.
-HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.15"
+HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.16"
 
 #: Response headers worth keeping. Everything else is dropped rather than
 #: filtered: an allow-list cannot leak a header nobody thought about, and a
@@ -96,7 +96,7 @@ def safe_headers(headers: Any) -> dict[str, str]:
 
 
 #: Bumped when what an attempt-evidence report checks changes.
-ATTEMPT_EVIDENCE_SCHEMA_VERSION = "attempt-evidence/2.1.15"
+ATTEMPT_EVIDENCE_SCHEMA_VERSION = "attempt-evidence/2.1.16"
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +267,36 @@ class HttpAttemptLog:
     def __init__(self, root: pathlib.Path | str | None = None) -> None:
         self.root = pathlib.Path(root) if root is not None else None
         self.records: list[HttpAttemptRecord] = []
+        #: Whether the records in memory came from a persisted index. False for
+        #: a fresh log, and :meth:`verify_bodies` refuses rather than reporting
+        #: no failures -- see the method for why that distinction is the whole
+        #: point.
+        self._loaded_from_disk = False
+
+    @classmethod
+    def create_new(cls, root: pathlib.Path | str) -> HttpAttemptLog:
+        """A log for a run that is about to start. Refuses an existing index.
+
+        Explicit since v2.1.16. ``HttpAttemptLog(root)`` was used for both
+        "start a log here" and "there is a log here", and the two need opposite
+        behaviour: the first must refuse a directory that already has evidence
+        in it, the second must load it.
+        """
+        held = pathlib.Path(root)
+        index = held / "index.jsonl"
+        if index.exists():
+            raise ThetaDataRawStoreError(
+                f"{index} already exists, so this directory holds an earlier "
+                "run's attempt evidence. An append-only log is not resumed: "
+                "open it with open_existing() to read it, or give this run its "
+                "own directory."
+            )
+        return cls(held)
+
+    @classmethod
+    def for_reporting(cls) -> HttpAttemptLog:
+        """A log that collects records and writes nothing. No root, no files."""
+        return cls(None)
 
     def observe(self, record: HttpAttemptRecord, body: bytes | None = None) -> None:
         """Record one attempt, storing its body bytes when there are any.
@@ -453,7 +483,26 @@ class HttpAttemptLog:
         return self.root / candidate
 
     def verify_bodies(self) -> tuple[str, ...]:
-        """Which stored attempt bodies no longer hash to their own filenames."""
+        """Which stored attempt bodies no longer hash to their own filenames.
+
+        **Refuses a log it did not write and did not load.** This iterated over
+        ``self.records``, which is empty on a freshly constructed log -- so
+        ``HttpAttemptLog(archived_root).verify_bodies() == ()`` reported no
+        failures for a directory it had never read. Every attempt body in an
+        archived capture could have been replaced and the check that exists to
+        notice said it was fine.
+
+        An empty answer now means "nothing is wrong", never "I looked at
+        nothing". To check a persisted log, use :meth:`open_existing`.
+        """
+        if self.root is not None and not self.records and not self._loaded_from_disk:
+            index = self.root / "index.jsonl"
+            if index.exists():
+                raise ThetaDataRawStoreError(
+                    f"{index} exists but this log has not loaded it, so there is "
+                    "nothing here to verify and an empty result would be false "
+                    "reassurance. Use HttpAttemptLog.open_existing(root)."
+                )
         failures: list[str] = []
         for record in self.records:
             location = record.response_body_location

@@ -176,6 +176,28 @@ No live request was made. **No test in this repository makes a network
 request** -- `test_no_test_in_this_file_reaches_the_network` checks the new file
 for it as a rule rather than a promise.
 
+## Artifact
+
+| | |
+|---|---|
+| File | `gex-bot-v2.1.15.zip` |
+| SHA-256 | `0ad7adfd05061bc7145098e3201e1024a72792318f12c44ff7429e9acad57772` |
+| Bytes | 979,187 |
+| Entries | 246 |
+| Files | 204 |
+| Commit | `2627b49ecf06522e57fc392b9b599d8f7c3fb97c` |
+
+Built with `git archive --format=zip --output=gex-bot-v2.1.15.zip HEAD` from a
+clean tree (`git status --porcelain` empty). The digest applies to that exact
+file; it is not wrapped inside the development checkout. The archive contains no
+`artifacts/`, no `.venv`, no nested archive and no scratch file.
+
+`src/broker/`, `src/strategy/`, `src/risk/`, `src/backtest/` and
+`src/adapters/ibkr/` are present as zero-byte `__init__.py` scaffolding and
+nothing else. The only occurrences of order-shaped identifiers in the archive
+are a docstring saying no `place_order` exists, a numerical root-finding
+bracket, and `"would_place_orders": False`.
+
 ## Scope
 
 No futures data, no strategy logic, no backtesting, no feature storage, no

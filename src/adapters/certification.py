@@ -514,6 +514,56 @@ def _render_parameter(value: Any) -> str:
     return str(value)
 
 
+def _request_plan_problems(entry: Any, *, plan: Any) -> list[str]:
+    """Whether a record was produced by the plan it names.
+
+    Three separate claims, checked separately: that the record names a plan at
+    all, that it is *this* plan, and that the individual request inside the plan
+    is the one this endpoint was authorised to make. A record that names the
+    right plan and the wrong request within it is a request nobody approved.
+
+    Read off the manifest descriptor, whose plan fields are copied from the
+    record and covered by the manifest hash -- so editing either side to agree
+    with the other changes the manifest's identity.
+    """
+    found: list[str] = []
+    where = entry.record_id
+    record = entry
+
+    stated_plan = str(getattr(record, "request_plan_hash", "") or "")
+    if not stated_plan:
+        found.append(
+            f"REQUEST_PLAN_UNBOUND:{where}: the record names no request plan, so "
+            "nothing connects these bytes to a document anybody approved"
+        )
+        return found
+    if stated_plan != plan.request_plan_hash:
+        found.append(
+            f"REQUEST_PLAN_MISMATCH:{where}: captured under plan "
+            f"{stated_plan[:12]}..., verified against {plan.request_plan_hash[:12]}..."
+        )
+
+    planned = plan.for_endpoint(record.endpoint)
+    if planned is None:
+        found.append(
+            f"REQUEST_NOT_PLANNED:{where}: {record.endpoint} is not in the plan "
+            f"this capture is being verified against"
+        )
+    elif str(getattr(record, "planned_request_hash", "") or "") != (
+        planned.request_spec_hash
+    ):
+        # This is what refuses a contract-list record captured under another
+        # session date or a different DTE scope: the date is a parameter, the
+        # parameters are in the hash.
+        found.append(
+            f"PLANNED_REQUEST_MISMATCH:{where}: the record names request "
+            f"{str(getattr(record, 'planned_request_hash', ''))[:12]}..., the plan "
+            f"authorises {planned.request_spec_hash[:12]}... for {record.endpoint}"
+        )
+
+    return found
+
+
 def verify_capture(
     manifest: RawCaptureManifest,
     store: Any,
@@ -522,6 +572,7 @@ def verify_capture(
     expected_pipeline_fingerprint: str = "",
     expected_identity: Any = None,
     expected_request_spec: Any = None,
+    expected_request_plan: Any = None,
 ) -> CaptureVerification:
     """Check that a manifest describes the capture it claims to describe.
 
@@ -589,6 +640,14 @@ def verify_capture(
         # somewhere else changes the manifest's identity as well as failing
         # here -- which is the point: evidence should not be able to move
         # without saying so.
+        # **The plan the operator approved, against the bytes it produced.**
+        # v2.1.16 printed a plan and refused a mismatched request, and then
+        # stored the result with nothing tying the two together -- so a record
+        # and a plan could be presented side by side with no way to tell
+        # whether they belonged to each other.
+        if expected_request_plan is not None:
+            failures.extend(_request_plan_problems(entry, plan=expected_request_plan))
+
         canonical = getattr(store, "canonical_location", None)
         if callable(canonical) and entry.payload_location:
             expected = canonical(entry.record_id)

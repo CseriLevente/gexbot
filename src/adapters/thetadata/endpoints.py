@@ -92,7 +92,11 @@ MINIMUM_TIER: Final[dict[Endpoint, Tier]] = {
     # gamma/vanna/charm/vomma/veta live here.
     Endpoint.OPTION_GREEKS_SECOND_ORDER: Tier.PRO,
     Endpoint.OPTION_GREEKS_ALL: Tier.PRO,
-    Endpoint.INDEX_PRICE_SNAPSHOT: Tier.VALUE,
+    # **Standard, per the current documented subscription table.** v2.1.16
+    # modelled this at Value, so a Value-tier profile configured for
+    # ``vendor_index_snapshot`` passed its tier check and would have been
+    # refused by the vendor at the one endpoint the spot comes from.
+    Endpoint.INDEX_PRICE_SNAPSHOT: Tier.STANDARD,
     Endpoint.OPTION_QUOTE_HISTORY: Tier.VALUE,
     Endpoint.OPTION_OPEN_INTEREST_HISTORY: Tier.VALUE,
     Endpoint.INDEX_PRICE_HISTORY: Tier.VALUE,
@@ -240,6 +244,14 @@ RESPONSE_FIELDS: Final[dict[Endpoint, tuple[str, ...]]] = {
         "expiration",
         "strike",
         "right",
+    ),
+    # The documented v3 index response. ``price``, not ``index_price``: the
+    # v2.1.16 adapter read a column the vendor does not send, so a correct
+    # response produced no snapshot at all.
+    Endpoint.INDEX_PRICE_SNAPSHOT: (
+        "timestamp",
+        "symbol",
+        "price",
     ),
     Endpoint.OPTION_GREEKS_FIRST_ORDER: (
         "symbol",

@@ -1335,12 +1335,12 @@ class ThetaDataRuntime:
             # attribution.
             store=capture.store,
             endpoint=Endpoint.INDEX_PRICE_SNAPSHOT,
-            field_path="index_price",
+            field_path="price",
         )
         price = observation.observed_value
         if isinstance(price, bool) or not isinstance(price, int | float):
             raise ThetaDataConfigError(
-                f"the index snapshot returned {price!r} for index_price, which "
+                f"the index snapshot returned {price!r} for price, which "
                 "is not a number. Every gamma in the chain is computed against "
                 "this value."
             )

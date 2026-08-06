@@ -48,6 +48,7 @@ from enum import Enum
 from typing import Any
 
 from src.adapters.thetadata.raw_acquisition import ParserStatus
+from src.gex.capture_window import assess_capture_window
 
 __all__ = [
     "RAW_CAPTURE_RUN_SCHEMA_VERSION",
@@ -64,21 +65,77 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.16"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.17"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.16"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.17"
 
-#: What a captured contract listing establishes today: that it was captured.
-#:
-#: Not ``FULL_REQUEST_ENUMERATED``, not ``MEASURED_COMPLETE``, and nothing that
-#: leads to ``READY_FOR_ANALYTICAL_DATASET``. The endpoint's documentation says
-#: it lists contracts quoted for a session; it does not say that set is the set
-#: our ``max_dte``/``strike_range``-filtered snapshot was owed, and nobody has
-#: compared the two. Promoting it on the strength of its name would be the
-#: v2.1.9 defect with better vocabulary.
-CONTRACT_LIST_EVIDENCE_STATE = "DEDICATED_CONTRACT_LIST_OBSERVED_UNVERIFIED"
+
+class ContractListEvidenceState(str, Enum):
+    """What the contract listing actually established on this run.
+
+    **Derived, never asserted.** v2.1.16 reported a constant, so a run whose
+    listing request came back 400 -- or was never attempted -- still said
+    ``OBSERVED``. Only bytes that arrived can be described as observed, and the
+    word was doing the opposite of its job.
+
+    Even the best of these stops short of authority: an acquired, parsed
+    listing is still ``UNVERIFIED``, because a list of everything quoted on a
+    session is a different set from the contracts a filtered request was owed
+    and nobody has compared the two.
+    """
+
+    #: The plan does not include the listing -- a tier that cannot serve it.
+    NOT_PLANNED = "NOT_PLANNED"
+    #: Planned, and the sweep stopped before reaching it.
+    NOT_ATTEMPTED = "NOT_ATTEMPTED"
+    #: Requested, and nothing answered.
+    NO_RESPONSE = "NO_RESPONSE"
+    #: The vendor answered with a status the transport will not hand on as data.
+    VENDOR_REFUSED = "VENDOR_REFUSED"
+    #: Bytes are on disk and the parser could not read them. Still evidence,
+    #: and a finding worth the request.
+    ACQUIRED_UNPARSED = "ACQUIRED_UNPARSED"
+    #: Bytes are on disk and they parse. The strongest state available, and it
+    #: still authorises nothing about coverage.
+    ACQUIRED_PARSED_UNVERIFIED = "ACQUIRED_PARSED_UNVERIFIED"
+
+
+def _contract_list_state(run: _Run) -> ContractListEvidenceState:
+    """Read the listing's state off what the sweep and the parser recorded."""
+    from src.adapters.thetadata.endpoints import Endpoint
+    from src.adapters.thetadata.raw_acquisition import RawEndpointAcquisitionStatus
+
+    endpoint = Endpoint.OPTION_CONTRACT_LIST_QUOTE.value
+    outcome = run.acquisition
+    if outcome is None or endpoint not in outcome.planned_endpoints:
+        return ContractListEvidenceState.NOT_PLANNED
+
+    result = next((r for r in outcome.results if r.endpoint == endpoint), None)
+    if result is None:
+        return ContractListEvidenceState.NOT_ATTEMPTED
+
+    status = result.acquisition_status
+    if status is RawEndpointAcquisitionStatus.NOT_ATTEMPTED:
+        return ContractListEvidenceState.NOT_ATTEMPTED
+    if status is RawEndpointAcquisitionStatus.VENDOR_REFUSED:
+        return ContractListEvidenceState.VENDOR_REFUSED
+    if not status.has_bytes:
+        return ContractListEvidenceState.NO_RESPONSE
+
+    parsed = next(
+        (
+            entry
+            for entry in run.parser_report.get("endpoints", ())
+            if entry.get("endpoint") == endpoint
+        ),
+        None,
+    )
+    if parsed is None or parsed.get("parser_status") != ParserStatus.PARSER_VALID.value:
+        return ContractListEvidenceState.ACQUIRED_UNPARSED
+    return ContractListEvidenceState.ACQUIRED_PARSED_UNVERIFIED
+
 
 _RULE = "-" * 76
 
@@ -385,7 +442,13 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         # What the contract listing is allowed to establish. Printed with the
         # plan because an operator reading "we now request a contract list"
         # should see, in the same breath, that it settles nothing yet.
-        "contract_list_evidence_state": CONTRACT_LIST_EVIDENCE_STATE,
+        # Nothing has been requested, so nothing has been observed. The dry
+        # run says which state a *successful* listing would reach, not that it
+        # has reached it.
+        "contract_list_evidence_state": ContractListEvidenceState.NOT_ATTEMPTED.value,
+        "contract_list_best_available_state": (
+            ContractListEvidenceState.ACQUIRED_PARSED_UNVERIFIED.value
+        ),
         "pipeline_fingerprint": pipeline.fingerprint(),
         "capture_plan_fingerprint": pipeline.capture_plan.fingerprint,
         "required_endpoints": sorted(
@@ -401,6 +464,9 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         # it, and what is actually free. Printed so an operator sees the
         # requirement *before* the session rather than as an OSError during it.
         "disk_space": planned_disk,
+        # The market's own clock. An operator reading "READY" at 03:00 on a
+        # Sunday should see, in the same report, that nothing is trading.
+        **assess_capture_window(as_of).as_dict(),
         "capture_readiness": readiness.state.value,
         "capture_ready": readiness.ready,
         "capture_blockers": list(readiness.blockers),
@@ -479,10 +545,21 @@ class _Preflight:
     #: The worst case this configuration could write, the arithmetic behind it,
     #: and what was actually free. Printed by the dry run.
     disk: dict[str, Any] = field(default_factory=dict)
+    #: Where this instant falls in the options market's own day.
+    window: Any = None
+    #: Whether the operator deliberately asked for an out-of-session capture.
+    #: Recorded rather than inferred: a diagnostic capture must say so for as
+    #: long as it exists.
+    out_of_session_allowed: bool = False
 
 
 def _preflight(
-    config_path: str, *, output: str, moment: datetime, live: bool
+    config_path: str,
+    *,
+    output: str,
+    moment: datetime,
+    live: bool,
+    allow_out_of_session: bool = False,
 ) -> _Preflight:
     """Phase A. Every way this run can be refused, checked before it claims.
 
@@ -543,6 +620,15 @@ def _preflight(
             f"capture worth paying for: {list(readiness.blockers)}"
         )
 
+    # **Is this a moment worth paying for?** A snapshot taken at 03:00 on a
+    # Sunday is stale quotes against open interest from another session, and it
+    # produces a capture indistinguishable from a good one: same manifest, same
+    # integrity scan, same verified state. Refused by default; the override is a
+    # flag whose name says what it does, and the capture records that it was used.
+    window = assess_capture_window(moment)
+    if live and not window.inside_capture_window and not allow_out_of_session:
+        raise CaptureRunError(window.refusal)
+
     disk = _refuse_without_room(
         destination,
         disk_requirement(
@@ -563,6 +649,8 @@ def _preflight(
         expected_origin=str(_live_capture_origin(settings["base_url"]).value),
         readiness_state=readiness.state.value,
         disk=disk,
+        window=window,
+        out_of_session_allowed=allow_out_of_session,
     )
 
 
@@ -706,6 +794,7 @@ def run_capture(
     output: str,
     transport: Any = None,
     as_of: datetime | None = None,
+    allow_out_of_session: bool = False,
 ) -> dict[str, Any]:
     """One capture operation, preserved, finalized and verified.
 
@@ -735,7 +824,11 @@ def run_capture(
 
     moment = as_of if as_of is not None else datetime.now(UTC)
     checked = _preflight(
-        config_path, output=output, moment=moment, live=transport is None
+        config_path,
+        output=output,
+        moment=moment,
+        live=transport is None,
+        allow_out_of_session=allow_out_of_session,
     )
     destination = checked.destination
     loaded = checked.loaded
@@ -788,6 +881,22 @@ def run_capture(
         attempts=_NoAttempts(),
     )
     run.extra["effective_transport"] = checked.settings
+    run.extra["market_session"] = checked.window.as_dict()
+    run.extra["out_of_session_capture"] = bool(
+        checked.out_of_session_allowed and not checked.window.inside_capture_window
+    )
+    if run.extra["out_of_session_capture"]:
+        # Loud, and in the evidence. A diagnostic capture that stops looking
+        # like one the moment the console scrolls is a diagnostic capture
+        # somebody will later mistake for a session.
+        print(
+            "WARNING: --allow-out-of-session. This capture is being taken "
+            f"{checked.window.status.value} for the "
+            f"{checked.window.market_session_date.isoformat()} session. The "
+            "quotes are not live, the open interest belongs to another "
+            "session, and the result must not be read as a market snapshot.",
+            file=sys.stderr,
+        )
     run.extra["effective_raw_store_path"] = str(raw_root)
 
     pipeline: Any = None
@@ -845,7 +954,17 @@ def run_capture(
             capture=run.session, as_of=moment
         )
         run.acquisition = outcome
-        first = outcome.first_failure
+        # The first failure that matters to a chain. An evidence endpoint that
+        # did not answer is reported, but it is not the run's error.
+        required_values = {e.value for e in pipeline.capture_plan.required_endpoints}
+        first = next(
+            (
+                result
+                for result in outcome.results
+                if not result.acquired and result.endpoint in required_values
+            ),
+            outcome.first_failure,
+        )
         if first is not None:
             # The *specific* failure, not "one endpoint did not work". An
             # operator scripts against the exit code, and a 401 and a 400 send
@@ -872,14 +991,25 @@ def run_capture(
 
 
 def _acquisition_state(run: _Run, outcome: Any) -> RawCaptureRunState:
-    """The raw run state. About bytes, never about whether they parse."""
+    """The raw run state. About bytes, never about whether they parse.
+
+    **Measured against the required endpoints only.** v2.1.16 measured it
+    against every planned endpoint, so a failed contract listing -- which a
+    chain does not need -- produced ``FAILED_PARTIAL_ACQUISITION`` beside a
+    summary saying ``partial: false`` with no missing endpoints. Three fields,
+    one capture, three different stories.
+
+    A missing evidence endpoint is still visible: it is in
+    ``missing_evidence_endpoints`` and it moves ``evidence_capture_state``.
+    """
     if not outcome.any_response:
         return (
             RawCaptureRunState.FAILED_NO_RESPONSE
             if run.attempts.records
             else RawCaptureRunState.FAILED_BEFORE_REQUEST
         )
-    if outcome.missing_endpoints:
+    required = {e.value for e in run.pipeline.capture_plan.required_endpoints}
+    if required - set(outcome.acquired_endpoints):
         return RawCaptureRunState.FAILED_PARTIAL_ACQUISITION
     return RawCaptureRunState.IN_PROGRESS
 
@@ -1116,10 +1246,21 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         run.store,
         plan=run.pipeline.capture_plan,
         expected_pipeline_fingerprint=run.pipeline.fingerprint(),
+        expected_request_plan=run.request_plan,
     )
     required = {e.value for e in run.pipeline.capture_plan.required_endpoints}
     captured_endpoints = set(manifest.endpoints)
-    partial = bool(required - captured_endpoints)
+
+    # **Two questions, two answers.** ``required`` is what a chain is built
+    # from; the listing is evidence a chain does not need. v2.1.16 measured
+    # ``partial`` against the required set while the run state was derived from
+    # *every* planned endpoint, so a failed listing produced
+    # ``FAILED_PARTIAL_ACQUISITION`` beside ``partial: false`` and an empty
+    # ``missing_endpoints`` -- three fields disagreeing about one capture.
+    evidence = {e.value for e in run.pipeline.capture_plan.evidence_endpoints}
+    missing_required = sorted(required - captured_endpoints)
+    missing_evidence = sorted(evidence - captured_endpoints)
+    partial = bool(missing_required)
 
     # ---- Bind the attempt evidence to this capture -------------------------
     #
@@ -1194,11 +1335,29 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
             run.acquisition.as_dict() if run.acquisition is not None else {}
         ),
         "access_mode": "THETA_TERMINAL_REST_V3",
+        "market_session": run.extra.get("market_session", {}),
+        "out_of_session_capture": run.extra.get("out_of_session_capture", False),
         "request_plan": (
             run.request_plan.as_dict() if run.request_plan is not None else {}
         ),
-        "contract_list_evidence_state": CONTRACT_LIST_EVIDENCE_STATE,
+        "contract_list_evidence_state": _contract_list_state(run).value,
         "parser_report_path": "parser-report.json",
+        # Explicit fields rather than one overloaded Boolean, so a reader does
+        # not have to infer which layer a "False" is about.
+        "required_manifest_verified": bool(verification.verified and not partial),
+        "planned_acquisition_complete": not (missing_required or missing_evidence),
+        "attempt_evidence_verified": bool(receipt.get("ok", False)),
+        "parser_semantics_valid": (
+            run.parser_report.get("parser_status") == ParserStatus.PARSER_VALID.value
+        ),
+        "core_capture_state": (
+            "CORE_ACQUIRED" if not missing_required else "CORE_INCOMPLETE"
+        ),
+        "evidence_capture_state": (
+            "EVIDENCE_ACQUIRED" if not missing_evidence else "EVIDENCE_INCOMPLETE"
+        ),
+        "missing_required_endpoints": missing_required,
+        "missing_evidence_endpoints": missing_evidence,
         "captured_at": run.started_at.isoformat(),
         "finalized_at": datetime.now(UTC).isoformat(),
         "session_id": run.session.session_id,
@@ -1377,6 +1536,8 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
             "request_plan": (
                 run.request_plan.as_dict() if run.request_plan is not None else {}
             ),
+            "market_session": run.extra.get("market_session", {}),
+            "out_of_session_capture": run.extra.get("out_of_session_capture", False),
             "capture_origin": (
                 run.capture_origin.value if run.capture_origin is not None else ""
             ),
@@ -1452,6 +1613,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-out-of-session",
+        action="store_true",
+        help=(
+            "take the capture even though the US options market is closed. The "
+            "result is a diagnostic, not a market snapshot: stale quotes "
+            "against another session's open interest. Recorded in the run "
+            "intent and the summary, and warned about on stderr."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="print a traceback for an unexpected internal error",
@@ -1512,7 +1683,11 @@ def main(argv: list[str] | None = None) -> int:
         return int(ExitCode.OK)
 
     try:
-        report = run_capture(args.config, output=args.output)
+        report = run_capture(
+            args.config,
+            output=args.output,
+            allow_out_of_session=args.allow_out_of_session,
+        )
     except CaptureRunError as error:
         return _fail(str(error), ExitCode.REFUSED)
     except Exception as error:  # turned into a documented exit code

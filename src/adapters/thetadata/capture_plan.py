@@ -47,7 +47,7 @@ __all__ = [
 #: Bumped when what a plan *says* changes. v2.1.16 splits endpoints a chain
 #: needs from endpoints captured as evidence, and carries both the option root
 #: and the underlying index symbol.
-CAPTURE_PLAN_SCHEMA_VERSION = "capture-plan/2.1.16"
+CAPTURE_PLAN_SCHEMA_VERSION = "capture-plan/2.1.17"
 
 #: Underlying sources that mean "read the vendor's index print". Anything else
 #: is either synthetic or supplied from outside, and needs no index request.

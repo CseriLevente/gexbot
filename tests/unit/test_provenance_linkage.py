@@ -239,7 +239,7 @@ def test_human_prose_alone_does_not_change_the_hash():
 
 
 def test_the_parser_version_is_2_1_10():
-    assert PARSER_VERSION == "thetadata-v3-parser/2.1.16"
+    assert PARSER_VERSION == "thetadata-v3-parser/2.1.17"
 
 
 def test_the_engine_version_is_2_1_10():

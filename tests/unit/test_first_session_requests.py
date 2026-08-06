@@ -296,9 +296,10 @@ def test_a_good_contract_list_response_grants_no_coverage(tmp_path):
         as_of=AS_OF,
     )
     assert CONTRACT_LIST in report["raw_acquisition"]["acquired_endpoints"]
-    assert report["contract_list_evidence_state"] == (
-        "DEDICATED_CONTRACT_LIST_OBSERVED_UNVERIFIED"
-    )
+    # Derived since v2.1.17: bytes arrived and they parsed, which is the
+    # strongest state available -- and it is still UNVERIFIED, because being a
+    # list is not being *our* list.
+    assert report["contract_list_evidence_state"] == "ACQUIRED_PARSED_UNVERIFIED"
     # A capture that answered every request is still raw-only. Coverage is an
     # open question and the report does not pretend otherwise.
     assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value

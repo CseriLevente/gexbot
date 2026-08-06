@@ -33,7 +33,7 @@ __all__ = [
 ]
 
 #: Bumped when the shape of a request plan changes.
-REQUEST_PLAN_SCHEMA_VERSION = "raw-request-plan/2.1.16"
+REQUEST_PLAN_SCHEMA_VERSION = "raw-request-plan/2.1.17"
 
 
 class RequestPlanViolation(RuntimeError):

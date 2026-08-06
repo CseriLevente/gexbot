@@ -60,26 +60,29 @@ from src.adapters.errors import ThetaDataRawStoreError
 #: to US Eastern, so the same bytes produced instants four hours apart depending
 #: on which module read them. A replay across that boundary has to be able to
 #: see that the reading changed.
-# Moved in v2.1.16 because the parser reads a response shape it did not read
-# before: ``/v3/option/list/contracts/quote``. Moved in v2.1.15 because *how a
+# Moved in v2.1.17 because the index response is read under its documented
+# columns -- ``price``, not ``index_price`` -- and because parser validity now
+# means the endpoint can supply its domain value rather than that the CSV
+# parsed. Moved in v2.1.16 because the parser reads a response shape it did not
+# read before: ``/v3/option/list/contracts/quote``. Moved in v2.1.15 because *how a
 # stored payload becomes text* changed:
 # replay consumes the exact bytes under the captured content type and charset
 # rather than a UTF-8-with-replacement reading of them. Nothing about how rows
 # become a gamma changed -- that is the engine version, and it has not moved.
-PARSER_VERSION = "thetadata-v3-parser/2.1.16"
+PARSER_VERSION = "thetadata-v3-parser/2.1.17"
 
 #: The manifest's own schema. Bumped when the *shape* of the evidence changes,
 #: independently of how a payload is read: v2.1.6 replaced parallel arrays of
 #: ids, hashes and request ids with per-record descriptors, so an older manifest
 #: cannot be verified by this code and is refused rather than reinterpreted.
-MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.16"
+MANIFEST_SCHEMA_VERSION = "raw-capture-manifest/2.1.17"
 
 #: What a stored raw payload *is*. Bumped when that changes, which it did in
 #: v2.1.13 -- the store holds the response's entity bytes rather than a UTF-8
 #: re-encoding of a lossily decoded string -- and again in v2.1.14, when the
 #: statement stopped being an unused constant and started being written onto
 #: every record, checked by the scanner, and covered by the manifest hash.
-RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.15"
+RAW_RESPONSE_SCHEMA_VERSION = "raw-response/2.1.17"
 
 #: Which bytes those are: the HTTP entity body **after transfer- and
 #: content-decoding**, so a gzip response is stored decompressed. That is the
@@ -320,6 +323,16 @@ class RawResponseRecord:
     #: The allow-listed response headers, kept because several of them decide
     #: what the bytes mean and the rest are what an audit asks for.
     response_headers: Mapping[str, str] = field(default_factory=dict)
+    #: **The plan this request was authorised under.** v2.1.16 printed the plan
+    #: and refused a mismatched request, but nothing tied the resulting bytes
+    #: back to the document an operator approved -- so a record and a plan could
+    #: be presented together with no way to tell whether they belonged to each
+    #: other.
+    request_plan_schema_version: str = ""
+    request_plan_hash: str = ""
+    #: This one request's identity within that plan: endpoint, canonical
+    #: parameters, required tier, stop policy.
+    planned_request_hash: str = ""
     #: How the *parser* read those bytes. Descriptive only: the bytes and their
     #: digest stay authoritative, and this says what one reading of them was.
     content_type: str = ""
@@ -357,6 +370,9 @@ class RawResponseRecord:
             "decode_status": self.decode_status,
             "decoded_text_hash": self.decoded_text_hash,
             "response_headers": dict(sorted(self.response_headers.items())),
+            "request_plan_schema_version": self.request_plan_schema_version,
+            "request_plan_hash": self.request_plan_hash,
+            "planned_request_hash": self.planned_request_hash,
         }
 
     @property
@@ -482,6 +498,21 @@ def is_portable_location(location: str) -> bool:
         or pathlib.PurePosixPath(location).is_absolute()
         or pathlib.PureWindowsPath(location).is_absolute()
     )
+
+
+def _plan_fields(planned: Mapping[str, str] | None) -> dict[str, str]:
+    """The approved-plan identity, as record fields.
+
+    Empty strings when a caller supplied nothing, which reads as "this record
+    is not bound to a plan" -- an honest state for a capture taken by something
+    other than the operator command, and one verification can refuse.
+    """
+    held = dict(planned or {})
+    return {
+        "request_plan_schema_version": str(held.get("schema_version", "")),
+        "request_plan_hash": str(held.get("request_plan_hash", "")),
+        "planned_request_hash": str(held.get("planned_request_hash", "")),
+    }
 
 
 def _safe_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
@@ -963,6 +994,7 @@ class RawResponseStore(Protocol):
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
         response_headers: Mapping[str, str] | None = None,
+        planned_request: Mapping[str, str] | None = None,
     ) -> RawResponseRecord: ...
 
     def get_payload(self, record_id: str) -> str: ...
@@ -1005,6 +1037,7 @@ class InMemoryRawStore:
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
         response_headers: Mapping[str, str] | None = None,
+        planned_request: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         if record_id in self._records:
             raise RawStoreError(
@@ -1061,6 +1094,11 @@ class InMemoryRawStore:
             ),
             **_decode_fields(decode),
             response_headers=_safe_headers(response_headers),
+            request_plan_schema_version=_plan_fields(planned_request)[
+                "request_plan_schema_version"
+            ],
+            request_plan_hash=_plan_fields(planned_request)["request_plan_hash"],
+            planned_request_hash=_plan_fields(planned_request)["planned_request_hash"],
         )
         self._records[record_id] = record
         self._payloads[record_id] = _as_body(payload)
@@ -1160,6 +1198,7 @@ class FileRawStore:
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
         response_headers: Mapping[str, str] | None = None,
+        planned_request: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         path = self.payload_path(record_id)
         if path.exists():
@@ -1221,6 +1260,11 @@ class FileRawStore:
             ),
             **_decode_fields(decode),
             response_headers=_safe_headers(response_headers),
+            request_plan_schema_version=_plan_fields(planned_request)[
+                "request_plan_schema_version"
+            ],
+            request_plan_hash=_plan_fields(planned_request)["request_plan_hash"],
+            planned_request_hash=_plan_fields(planned_request)["planned_request_hash"],
         )
         # Atomic write: temp file -> flush -> fsync -> rename. A crash midway
         # leaves either nothing or a complete file, never a truncated payload
@@ -1538,6 +1582,11 @@ class FileRawStore:
                     payload_hash=data["payload_hash"],
                     payload_location=data["payload_location"],
                     response_headers=dict(data.get("response_headers", {})),
+                    request_plan_schema_version=data.get(
+                        "request_plan_schema_version", ""
+                    ),
+                    request_plan_hash=data.get("request_plan_hash", ""),
+                    planned_request_hash=data.get("planned_request_hash", ""),
                     parser_version=data["parser_version"],
                     vendor_schema_version=data.get("vendor_schema_version"),
                     byte_length=data.get("byte_length", 0),
@@ -1600,6 +1649,7 @@ class NullRawStore:
         identity: CaptureIdentity | None = None,
         decode: Mapping[str, Any] | None = None,
         response_headers: Mapping[str, str] | None = None,
+        planned_request: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         return RawResponseRecord(
             record_id=record_id,
@@ -1651,6 +1701,11 @@ class NullRawStore:
             ),
             **_decode_fields(decode),
             response_headers=_safe_headers(response_headers),
+            request_plan_schema_version=_plan_fields(planned_request)[
+                "request_plan_schema_version"
+            ],
+            request_plan_hash=_plan_fields(planned_request)["request_plan_hash"],
+            planned_request_hash=_plan_fields(planned_request)["planned_request_hash"],
         )
 
     def get_payload(self, record_id: str) -> str:
@@ -1957,6 +2012,7 @@ class CaptureSession:
         capture_origin: CaptureOrigin | None = None,
         decode: Mapping[str, Any] | None = None,
         response_headers: Mapping[str, str] | None = None,
+        planned_request: Mapping[str, str] | None = None,
     ) -> RawResponseRecord:
         sequence = self.next_sequence()
         record = self.store.put(
@@ -1982,6 +2038,7 @@ class CaptureSession:
             ),
             decode=decode,
             response_headers=response_headers,
+            planned_request=planned_request,
         )
         self.captured.append(record)
         return record
@@ -2063,6 +2120,16 @@ class ManifestRecord:
     #: The allow-listed response headers, kept because several of them decide
     #: what the bytes mean and the rest are what an audit asks for.
     response_headers: Mapping[str, str] = field(default_factory=dict)
+    #: **The plan this request was authorised under.** v2.1.16 printed the plan
+    #: and refused a mismatched request, but nothing tied the resulting bytes
+    #: back to the document an operator approved -- so a record and a plan could
+    #: be presented together with no way to tell whether they belonged to each
+    #: other.
+    request_plan_schema_version: str = ""
+    request_plan_hash: str = ""
+    #: This one request's identity within that plan: endpoint, canonical
+    #: parameters, required tier, stop policy.
+    planned_request_hash: str = ""
     #: How the *parser* read those bytes. Descriptive only: the bytes and their
     #: digest stay authoritative, and this says what one reading of them was.
     content_type: str = ""
@@ -2100,6 +2167,9 @@ class ManifestRecord:
             "decode_status": self.decode_status,
             "decoded_text_hash": self.decoded_text_hash,
             "response_headers": dict(sorted(self.response_headers.items())),
+            "request_plan_schema_version": self.request_plan_schema_version,
+            "request_plan_hash": self.request_plan_hash,
+            "planned_request_hash": self.planned_request_hash,
         }
 
     @property
@@ -2131,6 +2201,9 @@ class ManifestRecord:
         return cls(
             record_id=record.record_id,
             payload_location=record.payload_location,
+            request_plan_schema_version=record.request_plan_schema_version,
+            request_plan_hash=record.request_plan_hash,
+            planned_request_hash=record.planned_request_hash,
             endpoint=record.endpoint,
             payload_hash=record.payload_hash,
             parameter_hash=canonical_parameter_hash(record.query_params),
@@ -2444,6 +2517,11 @@ class RawCaptureManifest:
                             response_headers=dict(
                                 entry.get("response_headers", {}) or {}
                             ),
+                            request_plan_schema_version=entry.get(
+                                "request_plan_schema_version", ""
+                            ),
+                            request_plan_hash=entry.get("request_plan_hash", ""),
+                            planned_request_hash=entry.get("planned_request_hash", ""),
                         )
                         for entry in payload.get("records", ())
                     ),

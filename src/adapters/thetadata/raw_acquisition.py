@@ -43,12 +43,12 @@ __all__ = [
 ]
 
 #: Bumped when the shape of an acquisition report changes.
-RAW_ACQUISITION_SCHEMA_VERSION = "raw-acquisition/2.1.16"
+RAW_ACQUISITION_SCHEMA_VERSION = "raw-acquisition/2.1.17"
 
 #: Bumped when what a parser report *claims* changes. Separate from the
 #: acquisition schema on purpose: the two documents answer different questions
 #: and a reader must be able to accept one and refuse the other.
-PARSER_REPORT_SCHEMA_VERSION = "parser-report/2.1.16"
+PARSER_REPORT_SCHEMA_VERSION = "parser-report/2.1.17"
 
 
 class RawEndpointAcquisitionStatus(str, Enum):

@@ -301,19 +301,19 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.16"
+    assert package["project"]["version"] == "2.1.17"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
     # changed since, and a version bumped because a release happened says
     # nothing about what changed.
     assert "gex-engine/2.1.10" in text
-    # The parser moved in v2.1.16 because it reads a response shape it did not
+    # The parser moved in v2.1.17 because it reads a response shape it did not
     # read before -- the contract listing. (It moved in v2.1.15 for a different
     # reason: replay began consuming the exact stored bytes under the captured
     # content type and charset.)
-    assert "thetadata-v3-parser/2.1.16" in text
-    assert "parser-report/2.1.16" in text
+    assert "thetadata-v3-parser/2.1.17" in text
+    assert "parser-report/2.1.17" in text
     # A version table that stops being exhaustive stops being the thing a reader
     # consults, so every schema this release touched is in it.
     assert "settlement-evidence/2.1.10" in text
@@ -326,14 +326,14 @@ def test_all_three_versions_are_documented():
         "universe-resolver/2.1.12",
         "adapter-certification/2.1.13",
         "universe-documentation/2.1.12",
-        "raw-capture-run/2.1.16",
-        "raw-capture-intent/2.1.16",
-        "http-attempt/2.1.16",
+        "raw-capture-run/2.1.17",
+        "raw-capture-intent/2.1.17",
+        "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",
-        # Unmoved: what a stored payload *is* did not change in v2.1.16.
-        "raw-response/2.1.15",
-        "raw-capture-manifest/2.1.16",
-        "capture-plan/2.1.16",
-        "raw-request-plan/2.1.16",
+        # Unmoved: what a stored payload *is* did not change in v2.1.17.
+        "raw-response/2.1.17",
+        "raw-capture-manifest/2.1.17",
+        "capture-plan/2.1.17",
+        "raw-request-plan/2.1.17",
     ):
         assert version in text, version

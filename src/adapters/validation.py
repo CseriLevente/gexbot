@@ -72,7 +72,7 @@ KNOWN_PARSER_VERSIONS = frozenset({PARSER_VERSION})
 
 #: Fields the index snapshot returns. Not in ``RESPONSE_FIELDS``, which covers
 #: the option endpoints only.
-INDEX_RESPONSE_FIELDS = ("timestamp", "symbol", "index_price")
+INDEX_RESPONSE_FIELDS = ("timestamp", "symbol", "price")
 
 
 def _fields_for(endpoint: Endpoint) -> tuple[str, ...]:
@@ -466,7 +466,7 @@ class AdapterValidationReport:
 #: it for one is a category error, not a missing value.
 FIELD_ENDPOINTS: dict[str, Endpoint] = {
     "open_interest": Endpoint.OPTION_OPEN_INTEREST_SNAPSHOT,
-    "index_price": Endpoint.INDEX_PRICE_SNAPSHOT,
+    "price": Endpoint.INDEX_PRICE_SNAPSHOT,
     "implied_vol": Endpoint.OPTION_GREEKS_FIRST_ORDER,
     "underlying_price": Endpoint.OPTION_GREEKS_FIRST_ORDER,
     "underlying_timestamp": Endpoint.OPTION_GREEKS_FIRST_ORDER,
@@ -632,9 +632,7 @@ class AdapterValidator:
         checks: list[ValidationCheck] = []
         required: list[str] = []
 
-        spot = _try_observe(
-            manifest, store, Endpoint.INDEX_PRICE_SNAPSHOT, "index_price"
-        )
+        spot = _try_observe(manifest, store, Endpoint.INDEX_PRICE_SNAPSHOT, "price")
         required.extend(("spot_source", "spot_timestamp"))
         checks.append(
             ValidationCheck(
@@ -836,7 +834,7 @@ def _observe_underlying_source(
     one row answers the question for one strike and no others.
     """
     records = tuple(sorted({*index, *greeks}))
-    spot = _try_observe(manifest, store, Endpoint.INDEX_PRICE_SNAPSHOT, "index_price")
+    spot = _try_observe(manifest, store, Endpoint.INDEX_PRICE_SNAPSHOT, "price")
     scanned = _rows_of(manifest, store, Endpoint.OPTION_GREEKS_FIRST_ORDER)
     if spot is None or not scanned:
         return (

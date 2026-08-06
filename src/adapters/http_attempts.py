@@ -48,7 +48,7 @@ __all__ = [
 ATTEMPT_BODY_SUFFIX = ".bin"
 
 #: Bumped when the *meaning* of an attempt record changes.
-HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.16"
+HTTP_ATTEMPT_SCHEMA_VERSION = "http-attempt/2.1.17"
 
 #: Response headers worth keeping. Everything else is dropped rather than
 #: filtered: an allow-list cannot leak a header nobody thought about, and a
@@ -96,7 +96,7 @@ def safe_headers(headers: Any) -> dict[str, str]:
 
 
 #: Bumped when what an attempt-evidence report checks changes.
-ATTEMPT_EVIDENCE_SCHEMA_VERSION = "attempt-evidence/2.1.16"
+ATTEMPT_EVIDENCE_SCHEMA_VERSION = "attempt-evidence/2.1.17"
 
 
 @dataclass(frozen=True, slots=True)

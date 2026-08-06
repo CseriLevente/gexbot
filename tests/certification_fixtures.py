@@ -135,8 +135,7 @@ def payloads(
         # echoed the option root here would have kept the v2.1.15 defect
         # invisible to every test that reads it back.
         Endpoint.INDEX_PRICE_SNAPSHOT: (
-            "timestamp,symbol,index_price\n"
-            f"{VENDOR_INSTANT},SPX,{FIXTURE_INDEX_PRICE}\n"
+            f"timestamp,symbol,price\n{VENDOR_INSTANT},SPX,{FIXTURE_INDEX_PRICE}\n"
         ),
         Endpoint.OPTION_CONTRACT_LIST_QUOTE: (
             "symbol,expiration,strike,right\n" + contract_list_rows
@@ -651,7 +650,7 @@ def verified_spot(store: Any = None, manifest: RawCaptureManifest | None = None)
     from src.adapters.certification import SpotProvenance, SpotSource
 
     observation = (
-        _observation(store, manifest, Endpoint.INDEX_PRICE_SNAPSHOT, "index_price")
+        _observation(store, manifest, Endpoint.INDEX_PRICE_SNAPSHOT, "price")
         if store is not None and manifest is not None
         else None
     )

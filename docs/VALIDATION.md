@@ -228,10 +228,10 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.16` | `pyproject.toml` | anything ships |
-| Parser version | `thetadata-v3-parser/2.1.16` | `src/adapters/raw_store.py` | vendor-payload interpretation changes -- v2.1.15 replays the exact stored bytes under the captured content type and charset rather than a UTF-8-with-replacement reading of them |
+| Package version | `2.1.17` | `pyproject.toml` | anything ships |
+| Parser version | `thetadata-v3-parser/2.1.17` | `src/adapters/raw_store.py` | vendor-payload interpretation changes -- v2.1.15 replays the exact stored bytes under the captured content type and charset rather than a UTF-8-with-replacement reading of them |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
-| Manifest schema | `raw-capture-manifest/2.1.16` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
+| Manifest schema | `raw-capture-manifest/2.1.17` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
 | Certification schema | `adapter-certification/2.1.13` | `src/adapters/certification.py` | what a readiness verdict means changes |
 | Validation schema | `adapter-validation/2.1.10` | `src/adapters/validation.py` | what a validation report means changes |
 | Normalization schema | `normalized-chain/2.1.10` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
@@ -245,19 +245,20 @@ They move independently, and conflating them is how a change hides.
 | Universe-documentation schema | `universe-documentation/2.1.12` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
 | Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
 | Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
-| Operator-report schema | `raw-capture-run/2.1.16` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
-| Run-intent schema | `raw-capture-intent/2.1.16` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
-| HTTP-attempt schema | `http-attempt/2.1.16` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
+| Operator-report schema | `raw-capture-run/2.1.17` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
+| Run-intent schema | `raw-capture-intent/2.1.17` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
+| HTTP-attempt schema | `http-attempt/2.1.17` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
 | Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
-| Raw-response schema | `raw-response/2.1.15` | `src/adapters/raw_store.py` | what a stored payload *is* changes -- v2.1.13 stores entity bytes rather than a re-encoding of a lossily decoded string, and v2.1.14 records the content type, the declared and selected charset, the decode status and the decoded-text hash alongside them |
+| Raw-response schema | `raw-response/2.1.17` | `src/adapters/raw_store.py` | what a stored payload *is* changes -- v2.1.13 stores entity bytes rather than a re-encoding of a lossily decoded string, and v2.1.14 records the content type, the declared and selected charset, the decode status and the decoded-text hash alongside them |
 
-| Raw-acquisition schema | `raw-acquisition/2.1.16` | `src/adapters/thetadata/raw_acquisition.py` | what an endpoint-by-endpoint acquisition report records changes |
-| Parser-report schema | `parser-report/2.1.16` | `src/adapters/thetadata/raw_acquisition.py` | what a parser claims about already-stored bytes changes |
-| Attempt-evidence schema | `attempt-evidence/2.1.16` | `src/adapters/http_attempts.py` | what reopening a persisted attempt log checks changes |
+| Raw-acquisition schema | `raw-acquisition/2.1.17` | `src/adapters/thetadata/raw_acquisition.py` | what an endpoint-by-endpoint acquisition report records changes |
+| Parser-report schema | `parser-report/2.1.17` | `src/adapters/thetadata/raw_acquisition.py` | what a parser claims about already-stored bytes changes |
+| Attempt-evidence schema | `attempt-evidence/2.1.17` | `src/adapters/http_attempts.py` | what reopening a persisted attempt log checks changes |
 
-| Parser-report schema | `parser-report/2.1.16` | `src/adapters/thetadata/raw_acquisition.py` | what a parser claims about already-stored bytes changes |
-| Capture-plan schema | `capture-plan/2.1.16` | `src/adapters/thetadata/capture_plan.py` | what a plan says changes -- v2.1.16 splits endpoints a chain needs from endpoints captured as evidence, and carries both the option root and the underlying index |
-| Request-plan schema | `raw-request-plan/2.1.16` | `src/adapters/thetadata/request_plan.py` | what an authorised request looks like changes |
+| Capture-plan schema | `capture-plan/2.1.17` | `src/adapters/thetadata/capture_plan.py` | what a plan says changes -- v2.1.16 splits endpoints a chain needs from endpoints captured as evidence, and carries both the option root and the underlying index |
+| Request-plan schema | `raw-request-plan/2.1.17` | `src/adapters/thetadata/request_plan.py` | what an authorised request looks like changes |
+
+| Vendor-documentation schema | `vendor-documentation/2.1.17` | `src/adapters/thetadata/vendor_documentation.py` | what pinning a vendor document must record changes. **The production registry is empty**: the reachable ThetaData documentation is the v2 operation set, and no path available here can hash the official source bytes rather than a rendering of them |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

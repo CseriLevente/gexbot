@@ -85,7 +85,7 @@ def observed_spot(store, manifest):
             manifest=manifest,
             store=store,
             endpoint=Endpoint.INDEX_PRICE_SNAPSHOT,
-            field_path="index_price",
+            field_path="price",
         ),
     )
 

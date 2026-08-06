@@ -1917,8 +1917,17 @@ class ThetaDataResearchPipeline:
             try:
                 # Refused here, before the transport, if it is not the request
                 # the operator approved.
-                plan.authorize(endpoint.value, params)
-                acquired = client.acquire(endpoint, params, capture=capture)
+                authorised = plan.authorize(endpoint.value, params)
+                acquired = client.acquire(
+                    endpoint,
+                    params,
+                    capture=capture,
+                    planned_request={
+                        "schema_version": plan.schema_version,
+                        "request_plan_hash": plan.request_plan_hash,
+                        "planned_request_hash": authorised.request_spec_hash,
+                    },
+                )
             except BaseException as error:  # classified, never swallowed silently
                 stop = stop_reason_for(error)
                 http_status = _error_status(error)
@@ -2008,6 +2017,7 @@ class ThetaDataResearchPipeline:
             PARSER_REPORT_SCHEMA_VERSION,
             ParserStatus,
         )
+        from src.adapters.thetadata.semantics import validate_endpoint_semantics
 
         client = self.runtime.client
         findings: list[dict[str, Any]] = []
@@ -2020,6 +2030,7 @@ class ThetaDataResearchPipeline:
                         "endpoint": result.endpoint,
                         "record_id": result.record_id,
                         "parser_status": ParserStatus.PARSER_NOT_RUN.value,
+                        "semantic_status": "SYNTAX_INVALID",
                         "detail": "no stored bytes to read",
                         "row_count": None,
                     }
@@ -2040,19 +2051,34 @@ class ThetaDataResearchPipeline:
                         "endpoint": result.endpoint,
                         "record_id": result.record_id,
                         "parser_status": ParserStatus.PARSER_FAILED.value,
+                        "semantic_status": "SYNTAX_INVALID",
                         "detail": redact_secrets(str(error))[:400],
                         "error_type": type(error).__name__,
                         "row_count": None,
                     }
                 )
                 continue
+            # **Syntax is not semantics.** The rows parsed; whether the
+            # endpoint can supply what it owes is a second question, and
+            # v2.1.16 answered only the first -- so an index response the
+            # adapter could get no price out of was reported PARSER_VALID.
+            semantics = validate_endpoint_semantics(
+                endpoint=result.endpoint,
+                rows=rows,
+                expected_symbol=self.runtime.instruments.symbol_for(result.endpoint),
+            )
             findings.append(
                 {
                     "endpoint": result.endpoint,
                     "record_id": result.record_id,
-                    "parser_status": ParserStatus.PARSER_VALID.value,
-                    "detail": "",
+                    "parser_status": (
+                        ParserStatus.PARSER_VALID.value
+                        if semantics.status.usable
+                        else ParserStatus.PARSER_FAILED.value
+                    ),
+                    "detail": "; ".join(semantics.findings)[:400],
                     "row_count": len(rows),
+                    **semantics.as_dict(),
                 }
             )
 
@@ -2993,7 +3019,11 @@ class ThetaDataResearchPipeline:
         from datetime import datetime as _datetime
 
         record = replay.client.fetch_index_snapshot(
-            symbol=replay.default_chain_request.symbol,
+            # The underlying index, not the option root. Two more copies of the
+            # v2.1.16 defect lived on the replay paths: a rebuild that asked
+            # the index endpoint for ``SPXW`` would have failed to find the
+            # record the capture actually holds.
+            symbol=replay.index_symbol,
             # Only a freshness reference for the fetch. The instant this method
             # returns is the one the *payload* carried.
             as_of=_datetime.now(_UTC),
@@ -3194,7 +3224,7 @@ class ThetaDataResearchPipeline:
                 "captured bytes, so re-deriving it would prove nothing"
             )
         record = runtime.client.fetch_index_snapshot(
-            symbol=runtime.default_chain_request.symbol, as_of=recipe.as_of
+            symbol=runtime.index_symbol, as_of=recipe.as_of
         )
         if record is None:
             raise PipelineConsistencyError(
@@ -3744,7 +3774,7 @@ class ThetaDataResearchPipeline:
             manifest=manifest,
             store=store,
             endpoint=Endpoint.INDEX_PRICE_SNAPSHOT,
-            field_path="index_price",
+            field_path="price",
         )
         return SpotProvenance(
             source=SpotSource.VENDOR_INDEX_SNAPSHOT,

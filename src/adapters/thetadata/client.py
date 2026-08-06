@@ -52,6 +52,7 @@ from src.adapters.errors import (
 #: that the raw store can share it without importing this module, and re-exported
 #: here because this is where callers already look for it.
 __all__ = [
+    "INDEX_PRICE_FIELD",
     "AcquiredResponse",
     "ChainAssemblyInputs",
     "ChainCompleteness",
@@ -75,6 +76,7 @@ __all__ = [
     "ThetaDataVendorError",
     "TimestampSource",
     "assemble_chain",
+    "index_snapshot_from",
     "normalize_response_body",
     "parse_float_field",
     "parse_int_field",
@@ -91,6 +93,7 @@ from src.adapters.raw_store import (
 from src.adapters.thetadata.endpoints import (
     DEFAULT_BASE_URL,
     MINIMUM_TIER,
+    RESPONSE_FIELDS,
     Endpoint,
     Tier,
     build_url,
@@ -529,6 +532,84 @@ class IndexSnapshot:
     symbol: str = ""
 
 
+def index_snapshot_from(
+    rows: list[dict[str, str]], *, expected_symbol: str
+) -> IndexSnapshot:
+    """One index print, validated, from the documented v3 columns.
+
+    The documented response is ``timestamp,symbol,price``. Every check here is
+    about the *one* thing this endpoint exists to supply: the number every
+    gamma in the chain is divided by. A row that cannot supply it is refused
+    rather than returned as an absence.
+
+    **The selection rule, stated.** A response may carry more than one row --
+    ThetaData has never been observed to do so for a single index symbol, and
+    this code does not assume it will not. Rows are filtered to the requested
+    symbol; exactly one must remain. Two prints for one index at one instant is
+    not a case with an obvious right answer, and picking the first would be
+    choosing silently.
+    """
+    wanted = str(expected_symbol).strip().upper()
+    matching = [
+        row for row in rows if str(row.get("symbol", "")).strip().upper() == wanted
+    ]
+    if not matching:
+        seen = sorted({str(row.get("symbol", "")) for row in rows})
+        raise ThetaDataSchemaError(
+            f"{Endpoint.INDEX_PRICE_SNAPSHOT.value} returned {len(rows)} row(s) "
+            f"for {seen}, none of them {wanted!r}. The index snapshot is the "
+            "underlying every gamma is computed against; a print of something "
+            "else is not a substitute.",
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT.value,
+        )
+    if len(matching) > 1:
+        raise ThetaDataSchemaError(
+            f"{Endpoint.INDEX_PRICE_SNAPSHOT.value} returned {len(matching)} "
+            f"rows for {wanted!r}. Which one is the spot is not a question this "
+            "code will answer by taking the first: every gamma in the chain is "
+            "divided by it.",
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT.value,
+        )
+
+    row = matching[0]
+    if INDEX_PRICE_FIELD not in row:
+        raise ThetaDataSchemaError(
+            f"{Endpoint.INDEX_PRICE_SNAPSHOT.value} has no {INDEX_PRICE_FIELD!r} "
+            f"column; it carries {sorted(row)}. The documented v3 response is "
+            f"{RESPONSE_FIELDS[Endpoint.INDEX_PRICE_SNAPSHOT]}. A row without "
+            "it cannot supply a spot, whatever else it contains.",
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT.value,
+        )
+
+    issues: list[tuple[str, str]] = []
+    price = _to_float_recorded(
+        row.get(INDEX_PRICE_FIELD), field=INDEX_PRICE_FIELD, sink=issues
+    )
+    if price is None or not math.isfinite(price) or price <= 0.0:
+        raise ThetaDataSchemaError(
+            f"{Endpoint.INDEX_PRICE_SNAPSHOT.value} returned "
+            f"{row.get(INDEX_PRICE_FIELD)!r} for {INDEX_PRICE_FIELD!r}, which is "
+            "not a finite positive price. Every gamma in the chain is divided "
+            "by this number.",
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT.value,
+        )
+
+    # Through the shared parser, so an index clock and a contract clock are read
+    # under one set of rules. A print with no readable timestamp is a print
+    # nobody can place in time, and the spot-synchronisation check needs it.
+    stamp = _to_datetime(row.get("timestamp"))
+    if stamp is None:
+        raise ThetaDataSchemaError(
+            f"{Endpoint.INDEX_PRICE_SNAPSHOT.value} returned "
+            f"{row.get('timestamp')!r} for 'timestamp', which this parser "
+            "cannot read. A spot nobody can place in time cannot be checked "
+            "against the quotes it prices.",
+            endpoint=Endpoint.INDEX_PRICE_SNAPSHOT.value,
+        )
+
+    return IndexSnapshot(spot=price, timestamp=stamp, symbol=wanted)
+
+
 @dataclass(frozen=True, slots=True)
 class ChainRequest:
     """Server-side filters. Sent only to endpoints that accept them."""
@@ -615,7 +696,15 @@ class ThetaDataSettings:
 
 # --- Parsing ----------------------------------------------------------------
 
+#: The documented v3 index price column. Named once, because reading the wrong
+#: one is the v2.1.16 defect and a literal in two places is how it survived.
+INDEX_PRICE_FIELD = "price"
+
 REQUIRED_COLUMNS: dict[Endpoint, frozenset[str]] = {
+    # The documented v3 response, all three columns. Required rather than
+    # optional: an index response missing any of them cannot supply a spot that
+    # can be placed in time and attributed to an instrument.
+    Endpoint.INDEX_PRICE_SNAPSHOT: frozenset({"timestamp", "symbol", "price"}),
     Endpoint.OPTION_QUOTE_SNAPSHOT: frozenset(
         {"symbol", "expiration", "strike", "right", "bid", "ask"}
     ),
@@ -1523,6 +1612,7 @@ class ThetaDataClient:
         params: dict[str, Any],
         *,
         capture: CaptureSession | None = None,
+        planned_request: Mapping[str, str] | None = None,
     ) -> AcquiredResponse:
         """Request one endpoint and store whatever comes back. No parsing.
 
@@ -1594,6 +1684,9 @@ class ThetaDataClient:
                 request_id=response.request_id,
                 decode=decoded.as_dict(),
                 response_headers=response.safe_headers(),
+                # The document that authorised this request, carried onto the
+                # bytes it produced.
+                planned_request=planned_request,
             )
         return AcquiredResponse(
             endpoint=endpoint,
@@ -1732,19 +1825,23 @@ class ThetaDataClient:
         its clock rather than raw rows -- the pipeline needs a number and a
         timestamp, and reaching into rows at the call site is how the two came
         to be threaded by hand.
+
+        **The v2.1.17 correction.** This read ``row["index_price"]``. The
+        documented v3 response is ``timestamp,symbol,price``, so against a
+        correct vendor response the lookup returned ``None``, the ``None``
+        became "no snapshot", and the whole thing was reported ``PARSER_VALID``
+        -- a parser that says a response is fine while being unable to get the
+        one value the response exists to supply.
+
+        Returns ``None`` only for an empty response, which is a real vendor
+        outcome. A non-empty response that cannot yield a usable price raises:
+        the caller asked for the number every gamma is divided by, and silence
+        is the one answer that cannot be checked.
         """
         rows = self.index_price(symbol, capture=capture)
         if not rows:
             return None
-        row = rows[0]
-        price = _to_float_recorded(row.get("index_price"), field="index_price", sink=[])
-        if price is None:
-            return None
-        return IndexSnapshot(
-            spot=price,
-            timestamp=_to_datetime(row.get("timestamp")),
-            symbol=str(row.get("symbol", symbol)),
-        )
+        return index_snapshot_from(rows, expected_symbol=symbol)
 
     def fetch_chain(
         self,

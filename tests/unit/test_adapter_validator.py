@@ -311,7 +311,7 @@ def test_a_greeks_record_cannot_prove_the_index_price():
             manifest=manifest,
             store=store,
             endpoint=Endpoint.OPTION_GREEKS_FIRST_ORDER,
-            field_path="index_price",
+            field_path="price",
         )
 
 

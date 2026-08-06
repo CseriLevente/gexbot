@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.1.17 - the documented schema, and the market's own clock
+
+    ThetaData index response:  timestamp,symbol,price
+    repository adapter:        row.get("index_price")
+
+Two true statements about the same bytes: the parser reported `PARSER_VALID`,
+and `fetch_index_snapshot()` returned `None`. The first was about punctuation.
+The second was about the number every gamma in the chain is divided by.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+### Defects fixed
+
+| S | Defect in v2.1.16 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | The adapter read `index_price` | The documented v3 column is `price`, so a *correct* vendor response produced no snapshot | `row["price"]`, validated into a typed `IndexSnapshot`: one row for the requested symbol, a finite positive price, a timestamp through the shared vendor parser. A non-empty response that cannot supply a spot **raises** rather than returning `None` |
+| 1 | The selection rule was "take the first row" | Two prints for one index at one instant is not a case with an obvious answer | Rows are filtered to the requested symbol and exactly one must remain |
+| 2 | The index endpoint was modelled at Value tier | A Value profile configured for `vendor_index_snapshot` passed its tier check and would have been refused by the vendor at the one endpoint the spot comes from | `STANDARD`, per the documented table. Plan derivation refuses a Value profile that needs it; the shipped Standard profile is unaffected |
+| 9 | `PARSER_VALID` meant "the CSV parsed" | Exactly the gap the index defect fell through | Per-endpoint semantic validators. `SYNTAX_INVALID` / `SYNTAX_VALID` / `SEMANTIC_VALID` / `SEMANTIC_INVALID`, and raw acquisition is unaffected by any of them |
+| 5 | A live capture ran at any hour | A snapshot taken at 03:00 on a Sunday is stale quotes against another session's open interest, and it looks identical to a good capture afterwards | Market-session preflight from the existing Eastern helpers and trading calendar. Refused by default; `--allow-out-of-session` is recorded in the intent, the summary, and a stderr warning |
+| 6 | The contract-list evidence state was a constant | A run whose listing came back 400 still said `OBSERVED` | Derived from the acquisition result: `NOT_PLANNED` / `NOT_ATTEMPTED` / `NO_RESPONSE` / `VENDOR_REFUSED` / `ACQUIRED_UNPARSED` / `ACQUIRED_PARSED_UNVERIFIED`. Only an acquired body is observed |
+| 7 | `run_state` and `partial` measured different sets | `FAILED_PARTIAL_ACQUISITION` beside `partial: false` and no missing endpoints -- three fields, one capture, three stories | The run state is measured against required endpoints; evidence gaps surface in `evidence_capture_state` and `missing_evidence_endpoints` |
+| 8 | Nothing tied the approved plan to the bytes | v2.1.16 printed a plan and refused a mismatched request, then stored the result with no link back | `request_plan_schema_version`, `request_plan_hash` and `planned_request_hash` on every raw record and manifest entry, inside the manifest hash, checked at verification |
+
+### Vendor documentation
+
+§3 asked for the official v3 documentation to be pinned content-addressed.
+**It is not, and the registry is empty.** What is reachable at
+`http-docs.thetadata.us` is the **v2** operation set; the v3 operation URLs
+return 404; and a markdown-converting reader returns a *rendering*, so hashing
+it would pin our own paraphrase and call it the vendor's.
+
+The mechanism exists and is tested. Open-interest settlement, rate units and the
+`latest` one-hour floor stay `UNKNOWN` -- which is what they are, and which the
+first session is partly for.
+
+### Frozen values
+
+No change. `gex-engine/2.1.10` is untouched. The **parser** moves to
+`thetadata-v3-parser/2.1.17` because the index response is read under its
+documented columns and parser validity now means the endpoint can supply its
+domain value.
+
 ## 2.1.16 - the option root is not its underlying index
 
     option chain symbol: SPXW

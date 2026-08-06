@@ -967,19 +967,29 @@ The value's provenance and the date's evidence must also agree: an
 `OpenInterestProvenance` saying 2026-03-16 alongside evidence resolving to
 2026-03-13 is refused rather than silently preferring one.
 
-**`DOCUMENTATION_RULES` is empty in production.** This repository has read no
-ThetaData document establishing an open-interest settlement convention.
-Pre-populating the registry with a plausible-looking entry would be exactly the
-defect being closed, and
-`test_the_production_registry_holds_no_thetadata_settlement_rule` fails if one
-appears.
+**The settlement convention is now read out of the vendor's own document.**
+v2.1.17 recorded that the exact ThetaData v3 documentation bytes could not be
+obtained and left this unresolved on that basis. The conclusion was wrong: the
+OpenAPI description is served publicly at `https://docs.thetadata.us/openapiv3.yaml`,
+and `paths./option/snapshot/open_interest.get.description` states that open
+interest "reflects the open interest at the of the previous trading day" (the
+vendor's typo, matched verbatim -- correcting it would be matching our own
+edit). That normalizes to `PRIOR_TRADING_SESSION`.
 
-**So the shipped configuration cannot produce a trusted number today**, and that
-is the honest position rather than a regression. See OD-26 for the vendor-side
-question this depends on.
+The mutable `DOCUMENTATION_RULES` global stays empty, and that is deliberate:
+the rule a capture opens under is built from the verified bundle at capture
+time, into a fresh registry, so there is no process-wide mutable state for an
+importer to pre-populate.
 
-**What would settle it.** A documented ThetaData settlement convention, or a
-field in the response, or a verified settlement schedule to derive from.
+**The rule is in force from the moment the document was retrieved, not
+earlier.** The document describes what the vendor does now and says nothing about
+when the convention started, so a capture of an earlier session gets no
+documentary settlement authority and must pass `--allow-unsettled-raw-only`.
+Backdating it would be inventing coverage the source does not provide.
+
+**What is still open.** Whether the vendor's stated convention matches what the
+responses actually carry. A document is a claim; the first raw session is how it
+gets compared against bytes.
 
 ---
 

@@ -113,7 +113,7 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Capture-operation identity on every record | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; both timestamps, the rule that chose one, the spot policy, the settlement rule and the expected universe, hashed whole |
 | Valuation instant derived from the verified index print | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES`; the chain under test no longer chooses the timestamp it is checked against |
 | Spot timestamp and skew tolerance derived, never supplied | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES`; `max_spot_skew_seconds` is configuration and enters the pipeline fingerprint |
-| Settlement-date evidence resolved rather than declared | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; the kind selects which check runs, and the production documentation registry is empty (OD-26) |
+| Settlement-date evidence resolved rather than declared | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES`; the kind selects which check runs, and the open-interest convention is derived from the pinned ThetaData OpenAPI document (OD-26) |
 | Content-bound documentation evidence | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES`; a rewritten page moves the pipeline fingerprint |
 | Chain completeness as a typed field | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; an architecture test fails the build when GEX code reads calculation-affecting data from `meta` |
 | Capture-bound expected contract universe | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; declared on the session, checked at replay, never adopted from the caller |

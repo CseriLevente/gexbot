@@ -65,11 +65,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.17"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.18"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.17"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.18"
 
 
 class ContractListEvidenceState(str, Enum):
@@ -718,9 +718,7 @@ def _preflight(
     # turns that sentence into a date. A run that cannot produce one is still
     # allowed to collect bytes -- but only if the operator says so, because
     # the resulting capture can never become a trusted GEX.
-    settlement, drift, settlement_failure = _settlement_for_run(
-        pipeline, moment=moment
-    )
+    settlement, drift, settlement_failure = _settlement_for_run(pipeline, moment=moment)
     if drift:
         raise CaptureRunError(
             "the pinned vendor documentation and this repository disagree "
@@ -766,7 +764,7 @@ def _preflight(
 
 def _settlement_for_run(
     pipeline: Any, *, moment: datetime
-) -> tuple[Any, tuple, str]:
+) -> tuple[Any, tuple[Any, ...], str]:
     """The settlement artifact this session opens under, and any endpoint drift.
 
     Returns ``(artifact_or_None, drift_findings, failure)``. A bundle that
@@ -781,20 +779,24 @@ def _settlement_for_run(
     pinned rule" send an operator to different places, and an operator told the
     wrong one debugs the wrong thing.
     """
+    from src.adapters.errors import ThetaDataProvenanceError
     from src.adapters.thetadata.openapi_evidence import (
         OpenApiExtractionError,
         verified_settlement_artifact,
     )
-    from src.adapters.errors import ThetaDataProvenanceError
     from src.adapters.thetadata.vendor_documentation import VendorDocumentationError
     from src.domain.settlement import SettlementRuleError
     from src.gex.sessions import market_session_date
 
     bundle = pipeline.documentation_bundle
     if bundle is None:
-        return None, (), (
-            pipeline.documentation_failure
-            or "this session holds no vendor documentation bundle"
+        return (
+            None,
+            (),
+            (
+                pipeline.documentation_failure
+                or "this session holds no vendor documentation bundle"
+            ),
         )
     # Re-verified here rather than trusted from construction: the bundle was
     # loaded when the pipeline was built, and a capture decides what it opens
@@ -1063,6 +1065,20 @@ def run_capture(
             file=sys.stderr,
         )
     run.extra["effective_raw_store_path"] = str(raw_root)
+    run.extra["vendor_documentation"] = checked.documentation
+    run.extra["unsettled_raw_only_override"] = bool(
+        checked.unsettled_allowed and checked.settlement_rule is None
+    )
+    if run.extra["unsettled_raw_only_override"]:
+        # Loud, for the same reason the out-of-session override is: a capture
+        # whose open interest belongs to no stated session is one somebody will
+        # later feed to a calculation that assumes it does.
+        print(
+            "WARNING: no settlement authority was derived from the pinned "
+            "vendor documentation, and --allow-unsettled-raw-only was given. "
+            "This capture can never become a trusted GEX.",
+            file=sys.stderr,
+        )
 
     pipeline: Any = None
     try:
@@ -1509,6 +1525,14 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         "access_mode": "THETA_TERMINAL_REST_V3",
         "market_session": run.extra.get("market_session", {}),
         "out_of_session_capture": run.extra.get("out_of_session_capture", False),
+        # The documented conventions this capture was taken under, so a reader
+        # who finds the directory years later can tell which reading of the
+        # vendor's API it was collected against -- and re-fetch the URL to see
+        # whether the ground has moved.
+        "vendor_documentation": run.extra.get("vendor_documentation", {}),
+        "unsettled_raw_only_override": run.extra.get(
+            "unsettled_raw_only_override", False
+        ),
         "request_plan": (
             run.request_plan.as_dict() if run.request_plan is not None else {}
         ),
@@ -1710,6 +1734,14 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
             ),
             "market_session": run.extra.get("market_session", {}),
             "out_of_session_capture": run.extra.get("out_of_session_capture", False),
+            # **What the vendor documented, recorded before the first request.**
+            # A capture is opened under a specific set of documented
+            # conventions, and which set it was is not recoverable afterwards
+            # from the bytes -- the document can be rewritten at any time.
+            "vendor_documentation": run.extra.get("vendor_documentation", {}),
+            "unsettled_raw_only_override": run.extra.get(
+                "unsettled_raw_only_override", False
+            ),
             "capture_origin": (
                 run.capture_origin.value if run.capture_origin is not None else ""
             ),

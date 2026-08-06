@@ -234,7 +234,7 @@ They move independently, and conflating them is how a change hides.
 | Manifest schema | `raw-capture-manifest/2.1.17` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
 | Certification schema | `adapter-certification/2.1.13` | `src/adapters/certification.py` | what a readiness verdict means changes |
 | Validation schema | `adapter-validation/2.1.10` | `src/adapters/validation.py` | what a validation report means changes |
-| Normalization schema | `normalized-chain/2.1.10` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
+| Normalization schema | `normalized-chain/2.1.18` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
 | Request-spec schema | `thetadata-request-spec/2.1.10` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
 | Capture-operation schema | `capture-operation/2.1.10` | `src/adapters/capture_operation.py` | what one capture operation fixes changes |
 | Expected-universe schema | `expected-universe/2.1.11` | `src/domain/expected_universe.py` | what a universe hash covers changes |
@@ -245,8 +245,8 @@ They move independently, and conflating them is how a change hides.
 | Universe-documentation schema | `universe-documentation/2.1.12` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
 | Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
 | Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
-| Operator-report schema | `raw-capture-run/2.1.17` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
-| Run-intent schema | `raw-capture-intent/2.1.17` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
+| Operator-report schema | `raw-capture-run/2.1.18` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
+| Run-intent schema | `raw-capture-intent/2.1.18` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
 | HTTP-attempt schema | `http-attempt/2.1.17` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
 | Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
 | Raw-response schema | `raw-response/2.1.17` | `src/adapters/raw_store.py` | what a stored payload *is* changes -- v2.1.13 stores entity bytes rather than a re-encoding of a lossily decoded string, and v2.1.14 records the content type, the declared and selected charset, the decode status and the decoded-text hash alongside them |
@@ -258,7 +258,11 @@ They move independently, and conflating them is how a change hides.
 | Capture-plan schema | `capture-plan/2.1.17` | `src/adapters/thetadata/capture_plan.py` | what a plan says changes -- v2.1.16 splits endpoints a chain needs from endpoints captured as evidence, and carries both the option root and the underlying index |
 | Request-plan schema | `raw-request-plan/2.1.17` | `src/adapters/thetadata/request_plan.py` | what an authorised request looks like changes |
 
-| Vendor-documentation schema | `vendor-documentation/2.1.17` | `src/adapters/thetadata/vendor_documentation.py` | what pinning a vendor document must record changes. **The production registry is empty**: the reachable ThetaData documentation is the v2 operation set, and no path available here can hash the official source bytes rather than a rendering of them |
+| Vendor-documentation schema | `vendor-documentation/2.1.18` | `src/adapters/thetadata/vendor_documentation.py` | what a rule a document may settle changes |
+
+| Documentation-bundle schema | `vendor-documentation-bundle/2.1.18` | `src/adapters/thetadata/openapi_evidence.py` | what a verified bundle must carry changes. **The official OpenAPI document is pinned**: `https://docs.thetadata.us/openapiv3.yaml`, 812,792 bytes, SHA-256 `1b65f93c879a5ca4477a0ff9177235138e0c81840e0c7dddfbd9e34164b40b50`, stored content-addressed under `vendor_documentation/`. The digest is over the exact response body bytes -- not a markdown rendering, not a reserialization of the parsed YAML, not a summary |
+
+| Documentation-extractor version | `openapi-evidence-extractor/2.1.18` | `src/adapters/thetadata/openapi_evidence.py` | *how* a value is read out of the document changes. Separate from the schema: the same bytes read under different normalizers yield different claims |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.

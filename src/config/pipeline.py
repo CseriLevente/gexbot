@@ -29,7 +29,7 @@ import json
 from dataclasses import dataclass, field
 from dataclasses import replace as _replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from src.adapters.raw_store import PARSER_VERSION
 from src.config.compatibility import (
@@ -3386,6 +3386,7 @@ class ThetaDataResearchPipeline:
             spot_source=self.config.underlying_price_source,
             open_interest_as_of=open_interest_as_of,
             expected_universe_fingerprint=expected_universe_fingerprint,
+            documentation_bundle_fingerprint=self.documentation_fingerprint,
         )
 
     def rebuild_from_capture(
@@ -4452,6 +4453,16 @@ class ThetaDataResearchPipeline:
                 # hashes travel on the observations -- named separately because
                 # a requirement nobody can find is one that gets refactored away.
                 "documentation_evidence": self.documentation_evidence_fingerprints,
+                # **The pinned vendor document, as one value.** Covers the
+                # bytes, every extraction path, every expected fragment and the
+                # extractor version, because the bundle hash covers all four.
+                #
+                # Here rather than only on the settlement artifact: the document
+                # now settles the rate units and the time floor as well, and
+                # both change gamma. A capture taken under one bundle must not
+                # verify under another, and this is what makes the two
+                # different.
+                "documentation_bundle": self.documentation_fingerprint,
                 "spot_synchronization_policy": self.spot_synchronization_policy,
             },
             sort_keys=True,
@@ -4463,6 +4474,17 @@ class ThetaDataResearchPipeline:
     def as_dict(self) -> dict[str, Any]:
         return {
             "pipeline_fingerprint": self.fingerprint(),
+            # Printed alongside the fingerprint it is inside, so a reader
+            # comparing two reports can see *which* input differs rather than
+            # only that the digests do.
+            "vendor_documentation": (
+                self.documentation_bundle.as_dict()
+                if self.documentation_bundle is not None
+                else {
+                    "documentation_available": False,
+                    "failure": self.documentation_failure,
+                }
+            ),
             "engine_fingerprint": (
                 self.engine_config.fingerprint()
                 if hasattr(self.engine_config, "fingerprint")

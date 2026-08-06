@@ -61,7 +61,7 @@ __all__ = [
 #: Bumped when the *meaning* of a normalized-chain hash changes -- a new field
 #: covered, a different rendering. A receipt taken under older rules must not be
 #: compared against one taken under newer ones and read as a mismatch of data.
-NORMALIZATION_SCHEMA_VERSION = "normalized-chain/2.1.10"
+NORMALIZATION_SCHEMA_VERSION = "normalized-chain/2.1.18"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +91,15 @@ class NormalizationRecipe:
     #: ``None`` where no independent source exists, which is the honest state
     #: today -- see OPEN_DECISIONS OD-11.
     expected_universe_fingerprint: str | None = None
+    #: Digest of the pinned vendor documentation this capture was taken under,
+    #: or ``""`` where the session held none.
+    #:
+    #: A recipe *is* the set of rules normalization ran by, and since v2.1.18
+    #: two of those rules -- how ``rate_value`` is read, and where time to
+    #: expiry is floored -- come out of a vendor document. Rebuilding under a
+    #: different document is rebuilding under different rules, so the digest
+    #: belongs here and not only on the settlement artifact.
+    documentation_bundle_fingerprint: str = ""
     schema_version: str = NORMALIZATION_SCHEMA_VERSION
 
     def semantic_payload(self) -> dict[str, Any]:
@@ -113,6 +122,7 @@ class NormalizationRecipe:
                 else None
             ),
             "expected_universe_fingerprint": self.expected_universe_fingerprint,
+            "documentation_bundle_fingerprint": self.documentation_bundle_fingerprint,
         }
 
     @property

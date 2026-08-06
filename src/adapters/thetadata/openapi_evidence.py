@@ -32,10 +32,11 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Final
+from typing import Any, Final
 
 from src.adapters.thetadata.vendor_documentation import (
     DocumentedRule,
@@ -274,9 +275,7 @@ def _normalize_time_floor(text: str) -> Any:
     """The floor the vendor applies to time-to-expiry, in minutes."""
     match = _FLOOR_PATTERN.search(" ".join(text.split()))
     if match is None:
-        raise OpenApiExtractionError(
-            f"no minimum time to expiry is stated in {text!r}"
-        )
+        raise OpenApiExtractionError(f"no minimum time to expiry is stated in {text!r}")
     quantity = float(match.group("value") or 1)
     minutes = quantity * (60.0 if match.group("unit").lower().startswith("hour") else 1)
     if minutes <= 0:
@@ -361,7 +360,9 @@ class ExtractionSpec:
             )
         return cursor
 
-    def extract(self, document: Any, *, document_sha256: str) -> OpenApiEvidenceExtraction:
+    def extract(
+        self, document: Any, *, document_sha256: str
+    ) -> OpenApiEvidenceExtraction:
         """Read this rule out of a parsed document, or refuse to.
 
         The order matters. The fragment is checked *before* the normalizer runs,
@@ -564,9 +565,7 @@ class VendorDocumentationBundle:
                     "document it came from."
                 )
 
-    def extraction_for(
-        self, rule: DocumentedRule
-    ) -> OpenApiEvidenceExtraction | None:
+    def extraction_for(self, rule: DocumentedRule) -> OpenApiEvidenceExtraction | None:
         """The reading for a rule, or ``None`` when the document settles none.
 
         ``None`` means *unresolved* and every caller must treat it that way. It
@@ -781,10 +780,10 @@ def verified_settlement_artifact(
     """
     from src.adapters.evidence_resolvers import (
         DocumentationRuleRegistry,
-        EvidenceKind,
         resolve_settlement_date,
         settlement_artifact_from,
     )
+    from src.adapters.open_interest import EvidenceKind
 
     rule = settlement_documentation_rule(bundle)
     registry = DocumentationRuleRegistry()

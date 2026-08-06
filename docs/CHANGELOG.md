@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.1.18 - the document was there all along
+
+    v2.1.17 concluded:  "the exact official documentation bytes are unavailable"
+    actually served at:  https://docs.thetadata.us/openapiv3.yaml
+
+The conclusion was wrong, and everything downstream of it was wrong with it. The
+pages v2.1.17 checked were under `http-docs.thetadata.us`, where the v3
+operations really do 404. The OpenAPI description was, and is, a static file on
+the documentation host. 812,792 bytes. It is now in this repository.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order.
+
+**Only `docs.thetadata.us` was contacted.** Not the Theta Terminal, not
+`127.0.0.1`, not an authenticated API, not a market-data endpoint. No paid data
+was requested. Fetching a public OpenAPI description is not a market-data
+request, and the three stay distinguished everywhere in the code and the prose.
+
+### Defects fixed
+
+| S | Defect in v2.1.17 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | The official documentation was treated as unobtainable | Every convention it settles stayed `UNKNOWN` on a false premise | The exact response body is pinned: `1b65f93c...b40b50`, content-addressed under `vendor_documentation/`, with the source URL, retrieval instant, HTTP status, content type, byte length and declared OpenAPI version. Fetched twice minutes apart, byte-identical both times |
+| 2 | A binding carried a caller-supplied `extracted_statement` and `resolved_value` | **A genuine hash of the real document would have supported a fabricated sentence.** Nothing opened the file | An extraction is a `yaml_path` into the parsed document plus an `expected_source_fragment` it must contain, with the value produced by a named normalizer that reads the text. There is no argument through which a sentence can be supplied |
+| 3 | `PRODUCTION_VENDOR_DOCUMENTATION` was a module-level `dict` | Authority with no gate -- any importer could write to it -- and nothing in the pipeline read it, so an entry would have changed no behaviour | An immutable `VendorDocumentationBundle`, produced only by a loader that rereads the bytes, rehashes them, rewalks every path and reruns every normalizer. Consumed by the capture path |
+| 4 | The operator passed `settlement_rule=None` unconditionally | Every capture it took was permanently ineligible for a trusted GEX no matter what any document said | A real `SettlementDateRuleArtifact`, derived from the open-interest description and resolved against the repo trading calendar. Refused before the destination is claimed; `--allow-unsettled-raw-only` collects the bytes anyway and is recorded |
+| 5 | Eight load-bearing pricing dimensions were unknown | Two of them are things the vendor documents | Six. `RATE_UNITS` and `MINIMUM_TIME_FLOOR` are settled from the document; `DAY_COUNT`, `DIVIDEND_CONVENTION`, `EXPIRATION_TIMESTAMP`, `IV_PRICE_BASIS`, `UNDERLYING_SOURCE` and `UNDERLYING_TIMESTAMP` stay unresolved because it is silent about them |
+| 6 | The rate comparator compared unit *tokens* | `PERCENT_ANNUAL_RATE` against `DECIMAL_ANNUAL_RATE` read as `MISMATCHED`, but different units are a conversion | Six modelled quantities: vendor input unit, configured input, normalization factor, normalized vendor rate, local unit, local rate. `4.2 x 0.01 = 0.042` is `MATCHED`. A config claiming decimal while sending `4.2` to an API documented to read percents is `MISMATCHED` -- it is sending 420% |
+| 7 | Nothing bound a capture to the document it was taken under | A capture taken under one reading would verify under another | The bundle hash -- over the bytes, every path, every fragment and the extractor version -- is in the pipeline fingerprint, the normalization recipe, the run intent and the capture summary. The settlement artifact already carried the document digest |
+| 8 | The five first-session endpoints were never checked against the vendor's description | A tier modelled too low is refused at the vendor; a column list that has moved is the v2.1.16 index defect again | Tier and CSV fields drift-checked against the pinned document before anything is requested. All five agree today. `x-min-subscription` is read from the document; `/v3` comes from its own `servers` entry; the templated `/option/list/contracts/{request_type}` is mapped rather than compared literally |
+
+### What the document actually says
+
+Three readings, each from a declared path:
+
+| Rule | Path | Value |
+|---|---|---|
+| `OPEN_INTEREST_SETTLEMENT` | `paths` / `/option/snapshot/open_interest` / `get` / `description` | `PRIOR_TRADING_SESSION` |
+| `RATE_UNITS` | `components` / `parameters` / `rate_value` / `description` | `PERCENT_ANNUAL_RATE` |
+| `MINIMUM_TIME_FLOOR` | `components` / `parameters` / `greeks_version` / `description` | 60 minutes |
+
+The open-interest sentence reads "reflects the open interest at the of the
+previous trading day". The typo is the vendor's, and the expected fragment
+matches it verbatim: matching a corrected version would be matching our own
+edit.
+
+### The rule is not backdated
+
+The pinned rule is in force **from the moment the document was retrieved**, not
+earlier. The document describes what the vendor does now and carries no
+statement about when the convention began. So a capture of an earlier session
+gets no documentary settlement authority and has to say so -- the offline
+fixtures, which replay a March session, now pass `--allow-unsettled-raw-only`.
+
+Backdating it would have made those fixtures resolve and would have been
+inventing coverage the source does not provide. That is the shape of the defect
+this release exists to close, so it was not done.
+
+### What has still not happened
+
+No ThetaData request. The document is a *claim* about vendor behaviour; whether
+the responses match it is what the first raw session is for. `RATE_UNITS` and
+`MINIMUM_TIME_FLOOR` rest on `VENDOR_DOCUMENTATION` evidence, which records what
+the vendor says rather than what it did -- the distinction the certification
+layer has drawn since v2.1.5, and it still blocks
+`CALCULATION_VALIDATED`.
+
 ## 2.1.17 - the documented schema, and the market's own clock
 
     ThetaData index response:  timestamp,symbol,price

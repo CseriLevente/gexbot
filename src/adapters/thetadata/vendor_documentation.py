@@ -75,7 +75,9 @@ class DocumentedRule(str, Enum):
     MINIMUM_TIME_FLOOR = "MINIMUM_TIME_FLOOR"
 
 
-def store_document(body: bytes, *, root: pathlib.Path, suffix: str = ".bin") -> tuple[str, str]:
+def store_document(
+    body: bytes, *, root: pathlib.Path, suffix: str = ".bin"
+) -> tuple[str, str]:
     """Write a document content-addressed and return ``(digest, location)``.
 
     Content-addressed so the location *is* the digest: a file that no longer

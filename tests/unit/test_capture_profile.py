@@ -183,12 +183,16 @@ def test_the_capture_profile_settles_what_it_can():
         for d in report.dimensions
         if d.status is CompatibilityStatus.MATCHED
     }
-    # The two numbers this adapter sends. ``rate_units`` and
-    # ``dividend_convention`` are not sent, so they are the vendor's conventions
-    # and no configuration entry settles them (v2.1.5 §11).
+    # The two numbers this adapter sends.
     assert PricingDimension.RISK_FREE_RATE in matched
     assert PricingDimension.DIVIDEND_VALUE in matched
-    assert PricingDimension.RATE_UNITS not in matched
+    # ``rate_units`` is still not something a *configuration entry* settles --
+    # v2.1.5 §11 stands. What settles it since v2.1.18 is the vendor's own
+    # pinned OpenAPI description, which is evidence of a different kind.
+    assert PricingDimension.RATE_UNITS in matched
+    # ``dividend_convention`` remains unsettled: the document does not say
+    # whether ``annual_dividend`` is a cash amount or a continuous yield, and
+    # having *a* document does not answer questions it is silent about.
     assert PricingDimension.DIVIDEND_CONVENTION not in matched
 
 

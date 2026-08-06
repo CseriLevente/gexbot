@@ -43,11 +43,19 @@ def config(**overrides):
     return parse_thetadata_config(overrides)
 
 
-def pipeline(**overrides) -> ThetaDataResearchPipeline:
+_UNSET = object()
+
+
+def pipeline(*, documentation_bundle=_UNSET, **overrides) -> ThetaDataResearchPipeline:
     from src.adapters.transport import FakeTransport
 
+    extra = (
+        {}
+        if documentation_bundle is _UNSET
+        else {"documentation_bundle": documentation_bundle}
+    )
     return ThetaDataResearchPipeline.from_config(
-        config(**overrides), transport=FakeTransport()
+        config(**overrides), transport=FakeTransport(), **extra
     )
 
 
@@ -170,12 +178,42 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
         for d in report.dimensions
         if d.status is CompatibilityStatus.MATCHED
     }
-    # Only the two numbers we actually send are settleable from configuration.
-    # ``rate_units`` and ``dividend_convention`` are not parameters this adapter
-    # sends, so since v2.1.5 they are the vendor's conventions and stay unknown.
+    # The two numbers we send are settleable from configuration.
     assert PricingDimension.RISK_FREE_RATE in settled
     assert PricingDimension.DIVIDEND_VALUE in settled
+    # And since v2.1.18 the two the *pinned document* settles. Both are still
+    # the vendor's conventions rather than ours -- what changed is that the
+    # vendor's own OpenAPI description is now in the repository and says what
+    # they are. ``rate_units`` in particular: 4.2 sent as a documented percent
+    # is 0.042, which is what the model prices with. Different units, one rate.
+    assert PricingDimension.RATE_UNITS in settled
+    assert PricingDimension.MINIMUM_TIME_FLOOR in settled
+    # **Six, not eight.** ``dividend_convention`` stays unknown because the
+    # document does not say whether ``annual_dividend`` is cash or a yield.
     assert set(report.load_bearing_unknowns) == {
+        PricingDimension.DAY_COUNT,
+        PricingDimension.DIVIDEND_CONVENTION,
+        PricingDimension.EXPIRATION_TIMESTAMP,
+        PricingDimension.IV_PRICE_BASIS,
+        PricingDimension.UNDERLYING_SOURCE,
+        PricingDimension.UNDERLYING_TIMESTAMP,
+    }
+
+
+def test_a_session_without_documentation_keeps_all_eight_unknowns():
+    """Evidence is per session, not a property of the process.
+
+    A pipeline built with ``documentation_bundle=None`` has no document, and
+    must not inherit the answers of one that does. This is the state every
+    session was in before v2.1.18.
+    """
+    built = pipeline(
+        rate_value=4.2,
+        rate_units="PERCENT_ANNUAL_RATE",
+        dividend_convention="ZERO_DIVIDEND",
+        documentation_bundle=None,
+    )
+    assert set(built.pricing_compatibility.load_bearing_unknowns) == {
         PricingDimension.DAY_COUNT,
         PricingDimension.DIVIDEND_CONVENTION,
         PricingDimension.EXPIRATION_TIMESTAMP,
@@ -185,6 +223,10 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
         PricingDimension.UNDERLYING_SOURCE,
         PricingDimension.UNDERLYING_TIMESTAMP,
     }
+    assert built.documentation_fingerprint == ""
+    # And it still validates: the integrity check recomputes under this
+    # session's evidence, not under the production bundle's.
+    built.validate_integrity()
 
 
 def test_vendor_iv_with_unknown_dividend_convention_is_not_compatible():

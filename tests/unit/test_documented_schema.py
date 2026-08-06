@@ -195,100 +195,89 @@ def test_the_shipped_profile_is_still_ready_for_raw_capture(tmp_path):
 # =============================================================================
 
 
-def test_the_production_documentation_registry_is_empty_and_says_why():
-    """The honest state, checked rather than asserted in prose.
+def test_the_production_documentation_bundle_is_loaded_and_verified():
+    """**Changed in v2.1.18, and the change is the point.**
 
-    v2.1.17 tried to pin the official v3 documentation. What is reachable is
-    the v2 operation set; the v3 operation URLs 404; and a markdown-converting
-    reader returns a *rendering*, so hashing it would pin our own paraphrase and
-    call it the vendor's.
+    v2.1.17 asserted the production registry was empty and gave a reason: the
+    v3 operation URLs 404, and no path available could produce a hash of the
+    source bytes rather than of a rendering. The first half was about pages
+    under ``http-docs.thetadata.us``; the OpenAPI description is served at
+    ``docs.thetadata.us/openapiv3.yaml`` and always was. So the conclusion was
+    wrong, the registry should not have been empty, and the test that asserted
+    it was empty is the one that had to fail.
 
-    So the mechanism exists and nothing is registered -- and every dimension it
-    would have settled stays UNKNOWN, which is what it is.
+    There is no mutable registry now. There is an immutable bundle, rederived
+    from the pinned bytes on every load.
     """
-    from src.adapters.thetadata.vendor_documentation import (
-        PRODUCTION_VENDOR_DOCUMENTATION,
-        DocumentedRule,
-        resolve_documented_rule,
-    )
+    from src.adapters.thetadata.openapi_evidence import production_bundle
+    from src.adapters.thetadata.vendor_documentation import DocumentedRule
 
-    assert PRODUCTION_VENDOR_DOCUMENTATION == {}
+    bundle = production_bundle()
+    assert bundle.verify_against(bundle.verified_root) == ()
     for rule in DocumentedRule:
-        assert resolve_documented_rule(rule) is None, rule
+        assert bundle.extraction_for(rule) is not None, rule
+
+
+def test_the_mutable_documentation_registry_is_gone():
+    """Authority with no gate is not authority anyone checked.
+
+    A module-level ``dict`` could be written to by any importer, and nothing in
+    the pipeline read it -- so an entry changed no behaviour, and adding one
+    looked like progress.
+    """
+    from src.adapters.thetadata import vendor_documentation
+
+    for name in (
+        "PRODUCTION_VENDOR_DOCUMENTATION",
+        "register_vendor_documentation",
+        "resolve_documented_rule",
+        "VendorDocumentationArtifact",
+    ):
+        assert not hasattr(vendor_documentation, name), name
 
 
 @pytest.mark.parametrize(
     "dimension",
-    ["RATE_UNITS", "MINIMUM_TIME_FLOOR", "DAY_COUNT", "DIVIDEND_CONVENTION"],
+    ["DAY_COUNT", "DIVIDEND_CONVENTION"],
 )
 def test_undocumented_pricing_dimensions_remain_unknown(tmp_path, dimension):
-    """Nothing is bound that no pinned document establishes."""
+    """Nothing is bound that no pinned document establishes.
+
+    ``RATE_UNITS`` and ``MINIMUM_TIME_FLOOR`` left this list in v2.1.18 because
+    the pinned document settles both. These two are still here because it does
+    not settle them, and no amount of having *a* document changes that.
+    """
     report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
     blockers = " ".join(report["calculation_blockers"])
     assert dimension in blockers, blockers
 
 
-def test_open_interest_settlement_remains_unresolved(tmp_path):
-    """The production registry pins nothing, so the rule is not established.
-
-    A capture is still permitted -- raw bytes are worth having -- and it is
-    permanently settlement-unusable until a real document or a real response
-    settles it.
-    """
+@pytest.mark.parametrize("dimension", ["RATE_UNITS", "MINIMUM_TIME_FLOOR"])
+def test_documented_pricing_dimensions_no_longer_block(tmp_path, dimension):
+    """The two the document settles stop blocking a trusted calculation."""
     report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
-    assert any(
-        "settlement" in blocker.lower() for blocker in report["analytical_blockers"]
-    ), report["analytical_blockers"]
+    blockers = " ".join(report["calculation_blockers"])
+    assert dimension not in blockers, blockers
 
 
-def test_an_artifact_without_a_real_digest_is_refused():
-    """No invented hashes. A digest that cannot be checked is a sentence."""
-    from src.adapters.thetadata.vendor_documentation import (
-        DocumentedRule,
-        VendorDocumentationArtifact,
-        VendorDocumentationError,
+def test_a_pinned_document_verifies_against_its_bytes(tmp_path):
+    """Content addressing, checked: swap the bytes and the pin stops holding."""
+    import shutil
+
+    from src.adapters.thetadata.openapi_evidence import (
+        production_bundle,
+        repository_documentation_root,
     )
 
-    with pytest.raises(VendorDocumentationError, match=r"(?i)full sha-256"):
-        VendorDocumentationArtifact(
-            rule=DocumentedRule.RATE_UNITS,
-            source_url="https://example.invalid/docs",
-            retrieved_at=datetime(2026, 8, 6, tzinfo=UTC),
-            document_sha256="not-a-digest",
-            content_location="ab/cd.bin",
-            extracted_statement="rate_value is expressed as a percent",
-            resolved_value="PERCENT_ANNUAL_RATE",
-        )
+    bundle = production_bundle()
+    held = repository_documentation_root() / bundle.document.content_location
+    copy = tmp_path / bundle.document.content_location
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(held, copy)
+    assert bundle.verify_against(tmp_path) == ()
 
-
-def test_a_pinned_artifact_verifies_against_its_bytes(tmp_path):
-    """The mechanism works; only the production entries are missing."""
-    from src.adapters.thetadata.vendor_documentation import (
-        DocumentedRule,
-        VendorDocumentationArtifact,
-        register_vendor_documentation,
-        resolve_documented_rule,
-        store_document,
-    )
-
-    body = b"rate_value is expressed as a percent.\n"
-    digest, location = store_document(body, root=tmp_path)
-    artifact = VendorDocumentationArtifact(
-        rule=DocumentedRule.RATE_UNITS,
-        source_url="https://example.invalid/docs/greeks",
-        retrieved_at=datetime(2026, 8, 6, tzinfo=UTC),
-        document_sha256=digest,
-        content_location=location,
-        extracted_statement="rate_value is expressed as a percent.",
-        resolved_value="PERCENT_ANNUAL_RATE",
-    )
-    registry: dict = {}
-    register_vendor_documentation(artifact, root=tmp_path, registry=registry)
-    assert resolve_documented_rule(DocumentedRule.RATE_UNITS, registry=registry)
-
-    # And the moment the bytes change, the binding stops holding.
-    (tmp_path / location).write_bytes(b"rate_value is a decimal fraction.\n")
-    assert artifact.verify_against(tmp_path)
+    copy.write_bytes(b"openapi: 3.1.0\npaths: {}\n")
+    assert bundle.verify_against(tmp_path)
 
 
 # =============================================================================
@@ -319,6 +308,7 @@ def test_a_live_capture_outside_the_session_is_refused(tmp_path, moment, status)
             output=str(tmp_path / "capture"),
             transport=None,
             as_of=moment,
+            allow_unsettled_raw_only=True,
         )
     assert not (tmp_path / "capture").exists()
 
@@ -333,6 +323,7 @@ def test_the_override_is_recorded_everywhere_it_matters(tmp_path, capsys):
         output=str(tmp_path / "capture"),
         transport=vendor_transport(),
         as_of=sunday,
+        allow_unsettled_raw_only=True,
         allow_out_of_session=True,
     )
     assert report["out_of_session_capture"] is True
@@ -395,6 +386,7 @@ def test_a_refused_contract_list_is_not_reported_as_observed(tmp_path):
         output=str(tmp_path / "capture"),
         transport=transport,
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
         allow_out_of_session=True,
     )
     assert report["contract_list_evidence_state"] == "VENDOR_REFUSED"
@@ -426,6 +418,7 @@ def test_a_failed_evidence_endpoint_does_not_contradict_itself(tmp_path):
         output=str(tmp_path / "capture"),
         transport=transport,
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
         allow_out_of_session=True,
     )
 
@@ -449,6 +442,7 @@ def test_the_summary_exposes_each_layer_separately(tmp_path):
         output=str(tmp_path / "capture"),
         transport=vendor_transport(),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
         allow_out_of_session=True,
     )
     for key in (
@@ -477,6 +471,7 @@ def test_every_raw_record_names_the_plan_it_was_captured_under(tmp_path):
         output=str(tmp_path / "capture"),
         transport=vendor_transport(),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
         allow_out_of_session=True,
     )
     plan_hash = report["request_plan"]["request_plan_hash"]
@@ -509,6 +504,7 @@ def test_a_record_captured_under_another_plan_does_not_verify(tmp_path):
         output=str(tmp_path / "capture"),
         transport=vendor_transport(),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
         allow_out_of_session=True,
     )
     store = FileRawStore(run_path(report, "raw_store_path"))

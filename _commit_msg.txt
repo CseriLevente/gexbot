@@ -1,0 +1,52 @@
+Pin the official OpenAPI bytes and derive evidence from them
+
+v2.1.17 concluded the exact ThetaData v3 documentation bytes could not be
+obtained and left its registry empty on that basis. The conclusion was wrong:
+the OpenAPI description is served publicly at docs.thetadata.us/openapiv3.yaml.
+It is now in the repository, content-addressed, and the pipeline reads it.
+
+The document (812,792 bytes, sha256 1b65f93c...) was fetched twice minutes
+apart and was byte-identical both times. Only docs.thetadata.us was contacted:
+no Theta Terminal, no authenticated API, no market-data endpoint, nothing paid.
+
+What changed, and why it is not just "add a document":
+
+* An extraction is now a *path into the parsed document* plus the fragment that
+  path must contain, with the value derived by a named normalizer. v2.1.17 took
+  a caller-supplied `extracted_statement` and `resolved_value`, so a genuine
+  hash of the real document would have carried a fabricated sentence just as
+  happily. There is no argument through which a sentence can be supplied.
+
+* `PRODUCTION_VENDOR_DOCUMENTATION` is gone. It was a module-level dict any
+  importer could write to, and nothing in the pipeline read it -- so an entry
+  would have changed no behaviour. `VendorDocumentationBundle` replaces it:
+  immutable, rederived from the bytes on every load, consumed by the capture.
+
+* The rate comparator no longer compares unit *tokens*. PERCENT_ANNUAL_RATE
+  against DECIMAL_ANNUAL_RATE was reported MISMATCHED, but different units are
+  a conversion, not a disagreement. 4.2 x 0.01 = 0.042 is what the model prices
+  with, so RATE_UNITS and RISK_FREE_RATE are both MATCHED -- and a config
+  claiming decimal while sending 4.2 to an API documented to read percents is
+  MISMATCHED, because it is sending 420%.
+
+* The operator no longer passes `settlement_rule=None` unconditionally. The
+  document says open interest "reflects the open interest at the of the
+  previous trading day" (the vendor's typo, matched verbatim), which resolves
+  to a real SettlementDateRuleArtifact. `--allow-unsettled-raw-only` covers the
+  case where no authority can be derived.
+
+The pinned rule is in force from the moment it was retrieved, not earlier. The
+document describes what the vendor does now and says nothing about when the
+convention started, so the fixture sessions -- which replay a March day -- have
+no documentary settlement authority and now say so. Backdating it to make them
+resolve would be inventing coverage the source does not provide.
+
+Load-bearing unknowns drop from eight to six. DAY_COUNT,
+DIVIDEND_CONVENTION, EXPIRATION_TIMESTAMP, IV_PRICE_BASIS, UNDERLYING_SOURCE
+and UNDERLYING_TIMESTAMP stay unresolved: having a document does not answer
+questions it is silent about.
+
+All five first-session endpoints agree with the document on both minimum
+subscription tier and CSV response fields, checked rather than asserted.
+
+Co-Authored-By: Claude <noreply@anthropic.com>

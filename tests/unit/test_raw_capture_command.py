@@ -563,6 +563,9 @@ def live_run(tmp_path, *, transport=None, **overrides):
         output=str(tmp_path / "capture"),
         transport=transport if transport is not None else vendor_transport(),
         as_of=overrides.pop("as_of", AS_OF),
+        # The fixture session predates the pinned vendor document, so no
+        # documentary settlement authority covers it and the run must say so.
+        allow_unsettled_raw_only=overrides.pop("allow_unsettled_raw_only", True),
         **overrides,
     )
 
@@ -677,6 +680,7 @@ def failing_run(tmp_path):
             output=str(tmp_path / "capture"),
             transport=transport,
             as_of=AS_OF,
+            allow_unsettled_raw_only=True,
         ),
         transport,
     )

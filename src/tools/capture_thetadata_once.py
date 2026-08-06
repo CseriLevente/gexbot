@@ -439,6 +439,18 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         # which base URL happens to be configured.
         "access_mode": "THETA_TERMINAL_REST_V3",
         "expected_capture_origin": live_origin.value,
+        # **What the vendor's own documentation establishes, and what it does
+        # not.** v2.1.17 had nothing to print here: it concluded the source
+        # bytes were unobtainable. They are served publicly, they are in this
+        # repository, and every value below was read out of them by a declared
+        # path rather than typed in beside a hash.
+        #
+        # Fetching this document contacted ``docs.thetadata.us`` and nothing
+        # else. It is not a market-data request and it is not a Theta Terminal
+        # request; no paid data was involved in producing it.
+        "vendor_documentation": _documentation_section(
+            pipeline, _settlement_for_run(pipeline, moment=as_of)[0]
+        ),
         # What the contract listing is allowed to establish. Printed with the
         # plan because an operator reading "we now request a contract list"
         # should see, in the same breath, that it settles nothing yet.
@@ -551,6 +563,75 @@ class _Preflight:
     #: Recorded rather than inferred: a diagnostic capture must say so for as
     #: long as it exists.
     out_of_session_allowed: bool = False
+    #: The settlement authority this run will open under, derived from the
+    #: pinned vendor documentation. ``None`` only when the operator explicitly
+    #: asked for an unsettled capture.
+    settlement_rule: Any = None
+    #: What the pinned document establishes, for the dry run to print.
+    documentation: dict[str, Any] = field(default_factory=dict)
+    #: Whether the operator deliberately asked to capture with no settlement
+    #: authority. Recorded, like the session override, because a capture taken
+    #: this way is permanently unable to become a trusted GEX.
+    unsettled_allowed: bool = False
+
+
+def _documentation_section(pipeline: Any, settlement: Any) -> dict[str, Any]:
+    """What the pinned document settles, as one block of the report.
+
+    Every field is derived from the loaded bundle. A dry run that printed a
+    source URL and a digest it had not verified would be reporting a citation.
+    """
+    bundle = pipeline.documentation_bundle
+    if bundle is None:
+        return {
+            "documentation_available": False,
+            "failure": pipeline.documentation_failure
+            or "this session was built without a documentation bundle",
+            "settlement_evidence": "UNESTABLISHED",
+            "remaining_documentation_unknowns": [
+                d.value for d in pipeline.pricing_compatibility.load_bearing_unknowns
+            ],
+        }
+    conventions = pipeline.documented_conventions
+    return {
+        "documentation_available": True,
+        "source_url": bundle.document.source_url,
+        "document_sha256": bundle.document.document_sha256,
+        "byte_length": bundle.document.byte_length,
+        "retrieved_at": bundle.document.retrieved_at.isoformat(),
+        "document_schema_version": bundle.document.document_schema_version,
+        "bundle_fingerprint": bundle.bundle_hash,
+        "extractor_version": bundle.extractor_version,
+        "extractions": [e.as_dict() for e in bundle.extractions],
+        "settlement_rule": (
+            settlement.normalized_rule.kind.value if settlement is not None else None
+        ),
+        "resolved_open_interest_settlement_date": (
+            settlement.resolved_settlement_date.isoformat()
+            if settlement is not None
+            else None
+        ),
+        "settlement_evidence": (
+            "ESTABLISHED" if settlement is not None else "UNESTABLISHED"
+        ),
+        "rate_input_units": (
+            conventions.rate_units.value if conventions.rate_units else None
+        ),
+        "minimum_time_floor_minutes": conventions.minimum_time_floor_minutes,
+        # What the document does **not** settle. Named individually so the list
+        # shortening is visible rather than being a number that went down.
+        "remaining_documentation_unknowns": [
+            d.value for d in pipeline.pricing_compatibility.load_bearing_unknowns
+        ],
+        "endpoint_drift": [f.as_dict() for f in _endpoint_drift(bundle)],
+    }
+
+
+def _endpoint_drift(bundle: Any) -> tuple[Any, ...]:
+    """The five first-session endpoints, checked against the pinned document."""
+    from src.adapters.thetadata.openapi_evidence import endpoint_drift
+
+    return endpoint_drift(root=bundle.verified_root, document=bundle.document)
 
 
 def _preflight(
@@ -560,6 +641,7 @@ def _preflight(
     moment: datetime,
     live: bool,
     allow_out_of_session: bool = False,
+    allow_unsettled_raw_only: bool = False,
 ) -> _Preflight:
     """Phase A. Every way this run can be refused, checked before it claims.
 
@@ -629,6 +711,31 @@ def _preflight(
     if live and not window.inside_capture_window and not allow_out_of_session:
         raise CaptureRunError(window.refusal)
 
+    # **Does this run know what its open interest will mean?** Checked before
+    # the destination is claimed, like every other refusal: the vendor's own
+    # OpenAPI description says open interest "reflects the open interest at the
+    # of the previous trading day", and the artifact derived from it is what
+    # turns that sentence into a date. A run that cannot produce one is still
+    # allowed to collect bytes -- but only if the operator says so, because
+    # the resulting capture can never become a trusted GEX.
+    settlement, drift, settlement_failure = _settlement_for_run(
+        pipeline, moment=moment
+    )
+    if drift:
+        raise CaptureRunError(
+            "the pinned vendor documentation and this repository disagree "
+            f"about the first-session endpoints: {[f.detail for f in drift]}. "
+            "Requesting them would be paying to find out which is right."
+        )
+    if settlement is None and not allow_unsettled_raw_only:
+        raise CaptureRunError(
+            "no settlement authority could be derived from the pinned vendor "
+            f"documentation: {settlement_failure}. Open interest is the linear "
+            "weight on every GEX term, so a capture taken without it can never "
+            "become a trusted GEX. Pass --allow-unsettled-raw-only to collect "
+            "the bytes anyway."
+        )
+
     disk = _refuse_without_room(
         destination,
         disk_requirement(
@@ -651,7 +758,63 @@ def _preflight(
         disk=disk,
         window=window,
         out_of_session_allowed=allow_out_of_session,
+        settlement_rule=settlement,
+        documentation=_documentation_section(pipeline, settlement),
+        unsettled_allowed=allow_unsettled_raw_only,
     )
+
+
+def _settlement_for_run(
+    pipeline: Any, *, moment: datetime
+) -> tuple[Any, tuple, str]:
+    """The settlement artifact this session opens under, and any endpoint drift.
+
+    Returns ``(artifact_or_None, drift_findings, failure)``. A bundle that
+    cannot be loaded, cannot be re-verified, or does not settle the
+    open-interest convention yields ``None`` -- never a guess. v2.1.17's
+    operator passed ``settlement_rule=None`` unconditionally, so every capture
+    it took was permanently ineligible for a trusted GEX regardless of what any
+    document said.
+
+    The ``failure`` string is carried out rather than reconstructed by the
+    caller. "The pinned rule does not cover this session" and "there is no
+    pinned rule" send an operator to different places, and an operator told the
+    wrong one debugs the wrong thing.
+    """
+    from src.adapters.thetadata.openapi_evidence import (
+        OpenApiExtractionError,
+        verified_settlement_artifact,
+    )
+    from src.adapters.errors import ThetaDataProvenanceError
+    from src.adapters.thetadata.vendor_documentation import VendorDocumentationError
+    from src.domain.settlement import SettlementRuleError
+    from src.gex.sessions import market_session_date
+
+    bundle = pipeline.documentation_bundle
+    if bundle is None:
+        return None, (), (
+            pipeline.documentation_failure
+            or "this session holds no vendor documentation bundle"
+        )
+    # Re-verified here rather than trusted from construction: the bundle was
+    # loaded when the pipeline was built, and a capture decides what it opens
+    # under at the moment it opens.
+    problems = bundle.verify_against(bundle.verified_root)
+    if problems:
+        return None, (), f"the pinned document no longer verifies: {list(problems)}"
+    drift = tuple(f for f in _endpoint_drift(bundle) if f.blocks_capture)
+    try:
+        artifact = verified_settlement_artifact(
+            bundle, chain_session_date=market_session_date(moment)
+        )
+    except (
+        OpenApiExtractionError,
+        VendorDocumentationError,
+        SettlementRuleError,
+        ThetaDataProvenanceError,
+    ) as error:
+        return None, drift, str(error)
+    return artifact, drift, ""
 
 
 #: Room for the documents beside the payloads: the manifest, the summary, the
@@ -795,6 +958,7 @@ def run_capture(
     transport: Any = None,
     as_of: datetime | None = None,
     allow_out_of_session: bool = False,
+    allow_unsettled_raw_only: bool = False,
 ) -> dict[str, Any]:
     """One capture operation, preserved, finalized and verified.
 
@@ -829,6 +993,7 @@ def run_capture(
         moment=moment,
         live=transport is None,
         allow_out_of_session=allow_out_of_session,
+        allow_unsettled_raw_only=allow_unsettled_raw_only,
     )
     destination = checked.destination
     loaded = checked.loaded
@@ -935,11 +1100,18 @@ def run_capture(
             session_id=run.run_id,
             as_of=moment,
             artifact_store=artifacts,
-            # No settlement rule and no universe. Both are choices about what the
-            # numbers *mean*, and this run exists to collect bytes -- the
-            # resulting capture is permanently raw-only, which is the honest
-            # state until the vendor's conventions have been compared against
-            # these responses.
+            # **The settlement rule the vendor's own document establishes.**
+            # v2.1.17 passed ``None`` here unconditionally and explained that a
+            # raw run makes no claims about meaning. But the settlement
+            # convention is not this run's claim to make or withhold -- it is
+            # something ThetaData documents, and the document is now in the
+            # repository. Passing ``None`` while holding it would be discarding
+            # evidence and calling the result modesty.
+            #
+            # Still no universe: which contracts the request was *owed* is not
+            # documented anywhere, and remains the open question a real
+            # response has to settle.
+            settlement_rule=checked.settlement_rule,
         )
         run.mark = run.session.mark()
         # Derived before the intent is written, so the document that says what
@@ -1623,6 +1795,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-unsettled-raw-only",
+        action="store_true",
+        help=(
+            "take the capture even though no settlement authority could be "
+            "derived from the pinned vendor documentation. The bytes are still "
+            "worth having; the resulting capture can never become a trusted "
+            "GEX, because open interest with no session attached is a weight "
+            "on every strike whose meaning nobody can state."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="print a traceback for an unexpected internal error",
@@ -1687,6 +1870,7 @@ def main(argv: list[str] | None = None) -> int:
             args.config,
             output=args.output,
             allow_out_of_session=args.allow_out_of_session,
+            allow_unsettled_raw_only=args.allow_unsettled_raw_only,
         )
     except CaptureRunError as error:
         return _fail(str(error), ExitCode.REFUSED)

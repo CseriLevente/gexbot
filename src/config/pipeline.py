@@ -260,23 +260,174 @@ class RateAssumption:
     vendor_default: bool = False
 
     @property
+    def normalization_factor(self) -> float | None:
+        """What this unit must be multiplied by to become a decimal rate.
+
+        Named rather than inlined because it is the quantity the whole
+        percent-versus-decimal question turns on. v2.1.17 compared the two unit
+        *tokens* -- ``PERCENT_ANNUAL_RATE`` against ``DECIMAL_ANNUAL_RATE`` --
+        found them unequal and reported a mismatch. But different units are not
+        a disagreement; they are a conversion. The disagreement would be
+        ``4.2`` and ``0.042`` meaning different rates, and they do not.
+        """
+        if self.unit is RateUnit.PERCENT_ANNUAL_RATE:
+            return 0.01
+        if self.unit is RateUnit.DECIMAL_ANNUAL_RATE:
+            return 1.0
+        return None
+
+    @property
     def normalized(self) -> float | None:
         """The rate as a decimal, or ``None`` when that is not determinable."""
-        if self.raw_value is None or self.unit is RateUnit.UNKNOWN:
+        factor = self.normalization_factor
+        if self.raw_value is None or factor is None:
             return None
-        if self.unit is RateUnit.PERCENT_ANNUAL_RATE:
-            return self.raw_value / 100.0
-        return self.raw_value
+        return self.raw_value * factor
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "source": self.source,
             "raw_value": self.raw_value,
             "unit": self.unit.value,
+            "normalization_factor": self.normalization_factor,
             "normalized": self.normalized,
             "effective_date": self.effective_date,
             "vendor_default": self.vendor_default,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RateUnitReconciliation:
+    """The six quantities the rate question actually involves.
+
+    v2.1.17 modelled two: a vendor unit token and a local unit token. Comparing
+    them answered "are these the same word", which is not the question. The
+    question is whether the number we send, read the way the vendor documents
+    reading it, is the rate the local model prices with -- and that needs the
+    input, the factor and both values as well as both units.
+
+    ``4.2`` sent as ``PERCENT_ANNUAL_RATE``, times ``0.01``, is ``0.042``, which
+    is what the local model uses. The units differ and the rates agree.
+    """
+
+    #: What the vendor's own documentation says ``rate_value`` means.
+    vendor_input_unit: RateUnit
+    #: The number this configuration sends as ``rate_value``.
+    configured_vendor_input: float | None
+    #: ``vendor_input_unit`` expressed as a multiplier.
+    normalization_factor: float | None
+    #: ``configured_vendor_input * normalization_factor``.
+    normalized_vendor_rate: float | None
+    #: The local model always states a decimal. Carried anyway: a unit that is
+    #: implied rather than recorded is a unit nobody can check.
+    local_model_rate_unit: RateUnit
+    local_model_rate: float | None
+    #: What the configuration *claims* the vendor unit is. Separate from
+    #: ``vendor_input_unit`` because a configuration can be wrong about the
+    #: vendor, and that is precisely the case that has to be refused.
+    configured_vendor_unit: RateUnit = RateUnit.UNKNOWN
+
+    @property
+    def units_reconcile(self) -> bool:
+        """Whether the configured unit matches what the vendor documents.
+
+        Not "whether the two unit tokens are equal". A configuration claiming
+        ``DECIMAL_ANNUAL_RATE`` while sending ``4.2`` to an API documented to
+        read percents is sending 420%, and no amount of agreement between the
+        local model and itself makes that right.
+        """
+        return (
+            self.vendor_input_unit is not RateUnit.UNKNOWN
+            and self.configured_vendor_unit is self.vendor_input_unit
+        )
+
+    def rates_reconcile(self, tolerance: float) -> bool:
+        if self.normalized_vendor_rate is None or self.local_model_rate is None:
+            return False
+        return abs(self.normalized_vendor_rate - self.local_model_rate) <= tolerance
+
+    def describe(self) -> str:
+        return (
+            f"{self.configured_vendor_input} "
+            f"{self.vendor_input_unit.value} x {self.normalization_factor} = "
+            f"{self.normalized_vendor_rate}; local model "
+            f"{self.local_model_rate} {self.local_model_rate_unit.value}"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "vendor_input_unit": self.vendor_input_unit.value,
+            "configured_vendor_unit": self.configured_vendor_unit.value,
+            "configured_vendor_input": self.configured_vendor_input,
+            "normalization_factor": self.normalization_factor,
+            "normalized_vendor_rate": self.normalized_vendor_rate,
+            "local_model_rate_unit": self.local_model_rate_unit.value,
+            "local_model_rate": self.local_model_rate,
+            "units_reconcile": self.units_reconcile,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentedVendorConventions:
+    """What the pinned vendor document settles, as typed values.
+
+    A plain value object so the compatibility layer does not have to know how a
+    documentation bundle is loaded or verified -- only what it established.
+    Every field defaults to ``None``, meaning *the document does not say*, which
+    is the state every dimension is in until a reading proves otherwise.
+
+    The hashes travel with the values because a dimension marked ``MATCHED`` on
+    documentary evidence has to name the document. A report saying "the vendor
+    documents percents" without saying which bytes said so is the v2.1.17
+    ``extracted_statement`` field again.
+    """
+
+    rate_units: RateUnit | None = None
+    minimum_time_floor_minutes: int | None = None
+    source_url: str = ""
+    document_sha256: str = ""
+    bundle_hash: str = ""
+    extractor_version: str = ""
+
+    @classmethod
+    def from_bundle(cls, bundle: Any) -> DocumentedVendorConventions:
+        """Read a verified bundle into the values the comparators need.
+
+        Takes only what the bundle *proved*. A rule the bundle does not carry
+        leaves its field ``None``; nothing here supplies a fallback, because a
+        fallback would be this layer deciding a vendor convention.
+        """
+        from src.adapters.thetadata.vendor_documentation import DocumentedRule
+
+        rate = bundle.value_for(DocumentedRule.RATE_UNITS)
+        floor = bundle.value_for(DocumentedRule.MINIMUM_TIME_FLOOR)
+        return cls(
+            rate_units=rate if isinstance(rate, RateUnit) else None,
+            minimum_time_floor_minutes=floor if isinstance(floor, int) else None,
+            source_url=bundle.document.source_url,
+            document_sha256=bundle.document.document_sha256,
+            bundle_hash=bundle.bundle_hash,
+            extractor_version=bundle.extractor_version,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "rate_units": self.rate_units.value if self.rate_units else None,
+            "minimum_time_floor_minutes": self.minimum_time_floor_minutes,
+            "source_url": self.source_url,
+            "document_sha256": self.document_sha256,
+            "bundle_hash": self.bundle_hash,
+            "extractor_version": self.extractor_version,
+        }
+
+
+#: Sentinel meaning "load and verify the pinned production bundle".
+#:
+#: Distinct from ``None``, which means "this session has no documentary
+#: evidence". Collapsing the two would make a caller who forgot to pass a bundle
+#: indistinguishable from one who deliberately has none, and the second is a
+#: legitimate state that must stay expressible.
+_LOAD_PRODUCTION_DOCUMENTATION: Final = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,13 +566,33 @@ def _result(
     )
 
 
+def _documented_reading(raw: float | None, unit: RateUnit) -> float | None:
+    """What the vendor would make of ``raw`` under its documented unit.
+
+    The number that makes a units disagreement concrete. Saying "the units
+    differ" invites a shrug; saying "you are sending 420%" does not.
+    """
+    if raw is None:
+        return None
+    return raw * (0.01 if unit is RateUnit.PERCENT_ANNUAL_RATE else 1.0)
+
+
 def check_rate_compatibility(
-    *, vendor: RateAssumption, local: RateAssumption
+    *,
+    vendor: RateAssumption,
+    local: RateAssumption,
+    documented_unit: RateUnit | None = None,
 ) -> PricingCompatibilityReport:
     """Do the two sides mean the same rate?
 
     Two dimensions decided together: the units have to be known before the
     values can be compared at all.
+
+    ``documented_unit`` is what the vendor's **own pinned documentation** says
+    ``rate_value`` means, extracted from the OpenAPI description rather than
+    read off the local configuration. ``None`` means nothing has established it
+    and the units stay ``UNKNOWN`` -- which was the only available answer until
+    v2.1.18, because until then the document had not been obtained.
     """
     if vendor.vendor_default or (vendor.raw_value is None and vendor.source):
         return PricingCompatibilityReport(
@@ -465,30 +636,112 @@ def check_rate_compatibility(
             )
         )
 
-    # The units stay UNKNOWN however confidently the configuration states them.
-    #
     # We send ``rate_value``. We do not send ``rate_units`` -- there is no such
     # query parameter -- so how ThetaData reads the number is a fact about its
     # API, not about our YAML. v2.1.4 marked this MATCHED from the local setting
-    # and thereby let a local declaration settle a remote semantic. Everything
-    # below is computed *under* the stated units, and says so.
-    units = _result(
-        PricingDimension.RATE_UNITS,
-        CompatibilityStatus.UNKNOWN,
-        "VENDOR_RATE_UNITS_UNVERIFIED",
-        vendor=None,
-        local=local.unit.value,
-        detail=(
-            f"the configuration states the vendor reads rate_value as "
-            f"{vendor.unit.value}, but rate_units is not a parameter this "
-            "adapter sends; nothing has confirmed how the API reads it. 4.2 is "
-            "either 4.2% or 420%, and the difference is a factor of a hundred "
-            "in every gamma"
-        ),
+    # and thereby let a local declaration settle a remote semantic.
+    #
+    # A *document* can settle it, and now one does: the pinned OpenAPI
+    # description says ``rate_value`` is "The interest rate, as a percent". So
+    # there are three cases, not one.
+    reconciliation = RateUnitReconciliation(
+        vendor_input_unit=documented_unit or RateUnit.UNKNOWN,
+        configured_vendor_unit=vendor.unit,
+        configured_vendor_input=vendor.raw_value,
+        normalization_factor=vendor.normalization_factor,
+        normalized_vendor_rate=vendor.normalized,
+        local_model_rate_unit=local.unit,
+        local_model_rate=local.normalized,
     )
-    conditional = (
-        " -- conditional on the unverified rate units, which are the vendor's to define"
-    )
+    conditional = ""
+
+    if documented_unit is None:
+        # Nothing has established how the API reads the number.
+        units = _result(
+            PricingDimension.RATE_UNITS,
+            CompatibilityStatus.UNKNOWN,
+            "VENDOR_RATE_UNITS_UNVERIFIED",
+            vendor=None,
+            local=local.unit.value,
+            detail=(
+                f"the configuration states the vendor reads rate_value as "
+                f"{vendor.unit.value}, but rate_units is not a parameter this "
+                "adapter sends and no pinned document establishes it. 4.2 is "
+                "either 4.2% or 420%, and the difference is a factor of a "
+                "hundred in every gamma"
+            ),
+        )
+        conditional = (
+            " -- conditional on the unverified rate units, which are the "
+            "vendor's to define"
+        )
+    elif not reconciliation.units_reconcile:
+        # The document and the configuration disagree about what we are
+        # sending. Refused: a config claiming DECIMAL_ANNUAL_RATE while sending
+        # 4.2 to an API documented to read percents is sending 420%, and it is
+        # the local model's agreement with itself that makes it look fine.
+        units = _result(
+            PricingDimension.RATE_UNITS,
+            CompatibilityStatus.MISMATCHED,
+            "VENDOR_RATE_UNITS_CONTRADICT_DOCUMENTATION",
+            vendor=documented_unit.value,
+            local=vendor.unit.value,
+            evidence=CompatibilityEvidence(
+                source=EvidenceSource.VENDOR_DOCUMENTATION,
+                reference="components/parameters/rate_value/description",
+            ),
+            detail=(
+                f"the pinned vendor documentation reads rate_value as "
+                f"{documented_unit.value}; this configuration declares "
+                f"{vendor.unit.value} and sends {vendor.raw_value}. Under the "
+                f"documented reading that is "
+                f"{_documented_reading(vendor.raw_value, documented_unit)}, not "
+                f"{vendor.normalized}"
+            ),
+        )
+        # The rate itself is wrong too, and saying so here rather than letting
+        # the value comparison run means the report does not carry a MATCHED
+        # rate underneath a MISMATCHED unit. Under the documented reading the
+        # vendor receives a different rate from the one the model prices with;
+        # that the configuration agrees with itself is not reassurance.
+        return PricingCompatibilityReport(
+            dimensions=(
+                units,
+                _result(
+                    PricingDimension.RISK_FREE_RATE,
+                    CompatibilityStatus.MISMATCHED,
+                    "RATE_VALUE_DIFFERS_UNDER_DOCUMENTED_UNITS",
+                    vendor=_documented_reading(vendor.raw_value, documented_unit),
+                    local=local.normalized,
+                    evidence=CompatibilityEvidence(
+                        source=EvidenceSource.VENDOR_DOCUMENTATION,
+                        reference="components/parameters/rate_value/description",
+                    ),
+                    detail=(
+                        f"read as the document says, {vendor.raw_value} is "
+                        f"{_documented_reading(vendor.raw_value, documented_unit)}; "
+                        f"the local model prices with {local.normalized}"
+                    ),
+                ),
+            )
+        )
+    else:
+        units = _result(
+            PricingDimension.RATE_UNITS,
+            CompatibilityStatus.MATCHED,
+            "RATE_UNITS_AGREE",
+            vendor=documented_unit.value,
+            local=local.unit.value,
+            evidence=CompatibilityEvidence(
+                source=EvidenceSource.VENDOR_DOCUMENTATION,
+                reference="components/parameters/rate_value/description",
+            ),
+            detail=(
+                f"the pinned vendor documentation reads rate_value as "
+                f"{documented_unit.value} and this configuration sends it that "
+                f"way: {reconciliation.describe()}. Different units, one rate."
+            ),
+        )
 
     if local.normalized is None or vendor.normalized is None:
         return PricingCompatibilityReport(
@@ -1549,7 +1802,32 @@ class ThetaDataResearchPipeline:
     engine_config: Any = None
     #: Whether the subscription exposes what the mode and the policy need.
     subscription_capability: Any = None
+    #: The verified vendor documentation this session was opened under, or
+    #: ``None`` when it has none. Held on the session rather than looked up at
+    #: use so a capture cannot silently acquire evidence partway through.
+    documentation_bundle: Any = None
+    #: Why the bundle could not be loaded, when it could not. Empty otherwise.
+    documentation_failure: str = ""
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def documentation_fingerprint(self) -> str:
+        """The bundle hash this session is bound to, or ``""``.
+
+        What §7 binds everywhere. A capture created under one documentation
+        bundle must not verify under another, and this is the value that makes
+        the two distinguishable.
+        """
+        bundle = self.documentation_bundle
+        return "" if bundle is None else str(bundle.bundle_hash)
+
+    @property
+    def documented_conventions(self) -> DocumentedVendorConventions:
+        """What the session's document settles, or an empty set of answers."""
+        bundle = self.documentation_bundle
+        if bundle is None:
+            return DocumentedVendorConventions()
+        return DocumentedVendorConventions.from_bundle(bundle)
 
     @classmethod
     def from_loaded_config(
@@ -1594,12 +1872,18 @@ class ThetaDataResearchPipeline:
         engine_config: Any = None,
         attempt_observer: Any = None,
         default_raw_store: Any = None,
+        documentation_bundle: Any = _LOAD_PRODUCTION_DOCUMENTATION,
     ) -> ThetaDataResearchPipeline:
         """Build a coherent session, or refuse.
 
         ``model_spec`` exists so an existing spec can be *checked* against the
         config -- not so individual fields can be overridden. Every consistency
         rule below was a way two objects could disagree in v2.1.1.
+
+        ``documentation_bundle`` defaults to loading and verifying the pinned
+        production bundle. Pass ``None`` for a session that has no documentary
+        evidence -- which is what every session had before v2.1.18, and which
+        leaves ``RATE_UNITS`` and ``MINIMUM_TIME_FLOOR`` unresolved.
         """
         from src.adapters.thetadata.capabilities import assess_tier
         from src.adapters.thetadata.endpoints import Tier
@@ -1645,10 +1929,13 @@ class ThetaDataResearchPipeline:
             attempt_observer=attempt_observer,
             default_raw_store=default_raw_store,
         )
+        bundle, documentation, documentation_failure = _resolve_documentation(
+            documentation_bundle
+        )
         # Runs on the IV question alone. In v2.1.3 selecting the vendor-gamma
         # comparison moved the session into a different ``PricingMode`` and this
         # returned "compatible" without checking anything.
-        report = assess_pricing_compatibility(config, spec)
+        report = assess_pricing_compatibility(config, spec, documentation)
 
         if config.fail_on_incompatible_pricing and not report.compatible:
             raise PipelineConsistencyError(
@@ -1667,6 +1954,12 @@ class ThetaDataResearchPipeline:
                 f"{len(report.load_bearing_unknowns)} unknown, "
                 f"{len(report.hard_failures)} hard failures"
             )
+        if documentation_failure:
+            warnings.append(
+                f"VENDOR_DOCUMENTATION_UNVERIFIED: {documentation_failure}. The "
+                "session carries no documentary evidence, so every dimension a "
+                "document would settle stays unresolved."
+            )
 
         return cls(
             runtime=runtime,
@@ -1678,6 +1971,8 @@ class ThetaDataResearchPipeline:
             config=config,
             engine_config=engine,
             subscription_capability=capability,
+            documentation_bundle=bundle,
+            documentation_failure=documentation_failure,
             warnings=tuple(warnings),
         )
 
@@ -4083,7 +4378,13 @@ class ThetaDataResearchPipeline:
         from src.adapters.thetadata.capabilities import assess_tier
         from src.adapters.thetadata.endpoints import Tier
 
-        expected = assess_pricing_compatibility(self.config, self.model_spec)
+        # Recomputed under **this session's** documentation, not under whatever
+        # the production bundle happens to be. A session opened with no
+        # documentary evidence must not pass its integrity check by borrowing
+        # the evidence of a session that had some.
+        expected = assess_pricing_compatibility(
+            self.config, self.model_spec, self.documented_conventions
+        )
         if expected.semantic_payload() != self.pricing_compatibility.semantic_payload():
             raise PipelineConsistencyError(
                 "the pricing compatibility report does not follow from this "
@@ -4296,8 +4597,90 @@ def local_dividend_assumption(spec: ModelSpec) -> DividendAssumption:
     return DividendAssumption(convention=convention, value=spec.dividend_yield)
 
 
+def _resolve_documentation(
+    requested: Any,
+) -> tuple[Any, DocumentedVendorConventions | None, str]:
+    """Turn the ``documentation_bundle`` argument into what the session needs.
+
+    Returns ``(bundle, conventions, failure)``. A failure is *reported*, not
+    raised: a missing or tampered bundle must not stop raw bytes from being
+    stored, and it must stop them from being trusted. Which of those two applies
+    is the operator's decision to make with the flag, not this constructor's to
+    make by throwing.
+    """
+    if requested is None:
+        return None, None, ""
+    if requested is _LOAD_PRODUCTION_DOCUMENTATION:
+        from src.adapters.thetadata.vendor_documentation import (
+            VendorDocumentationError,
+        )
+
+        try:
+            from src.adapters.thetadata.openapi_evidence import production_bundle
+
+            requested = production_bundle()
+        except (VendorDocumentationError, OSError) as error:
+            return None, None, str(error)
+    return requested, DocumentedVendorConventions.from_bundle(requested), ""
+
+
+def _documented_time_floor(
+    documentation: DocumentedVendorConventions, spec: ModelSpec
+) -> tuple[PricingDimensionResult, ...]:
+    """The time-floor dimension, once the document has settled it.
+
+    Empty when the document says nothing, so the caller's ``UNKNOWN`` stands.
+    A number the document *does* state is compared against the local spec, and
+    a difference is a mismatch rather than an unknown: both sides have now said
+    what they do, and they have said different things.
+    """
+    documented = documentation.minimum_time_floor_minutes
+    if documented is None:
+        return ()
+    local = float(spec.minimum_time_to_expiry_minutes)
+    evidence = CompatibilityEvidence(
+        source=EvidenceSource.VENDOR_DOCUMENTATION,
+        reference="components/parameters/greeks_version/description",
+    )
+    from src.config.compatibility import FLOOR_TOLERANCE
+
+    if abs(float(documented) - local) > FLOOR_TOLERANCE:
+        return (
+            _result(
+                PricingDimension.MINIMUM_TIME_FLOOR,
+                CompatibilityStatus.MISMATCHED,
+                "TIME_FLOOR_DIFFERS",
+                vendor=documented,
+                local=local,
+                evidence=evidence,
+                detail=(
+                    f"the pinned documentation floors time to expiry at "
+                    f"{documented} minutes under greeks_version=latest; the "
+                    f"local model floors at {local}. On a 0DTE chain the floor "
+                    "is what the whole gamma depends on"
+                ),
+            ),
+        )
+    return (
+        _result(
+            PricingDimension.MINIMUM_TIME_FLOOR,
+            CompatibilityStatus.MATCHED,
+            "TIME_FLOOR_AGREES",
+            vendor=documented,
+            local=local,
+            evidence=evidence,
+            detail=(
+                f"the pinned documentation and the local model both floor time "
+                f"to expiry at {documented} minutes"
+            ),
+        ),
+    )
+
+
 def assess_pricing_compatibility(
-    config: ThetaDataConfig, spec: ModelSpec
+    config: ThetaDataConfig,
+    spec: ModelSpec,
+    documentation: DocumentedVendorConventions | None = None,
 ) -> PricingCompatibilityReport:
     """Whether vendor-derived numbers may enter a local calculation.
 
@@ -4305,7 +4688,13 @@ def assess_pricing_compatibility(
     policy**. v2.1.3 short-circuited on a mode enum that
     ``VENDOR_GAMMA_VALIDATION`` replaced, so asking for a gamma comparison
     switched off the IV checks that comparison had nothing to do with.
+
+    ``documentation`` is what the pinned vendor document settles. ``None`` keeps
+    every dimension exactly where v2.1.17 left it, which is the honest default:
+    a caller with no verified bundle has no documentary evidence, and should not
+    get the benefit of some other caller's.
     """
+    documentation = documentation or DocumentedVendorConventions()
     if not config.pricing_mode.mixes_vendor_and_local_inside_one_calculation:
         return PricingCompatibilityReport(
             dimensions=tuple(
@@ -4323,7 +4712,9 @@ def assess_pricing_compatibility(
         )
 
     report = check_rate_compatibility(
-        vendor=vendor_rate_assumption(config), local=local_rate_assumption(spec)
+        vendor=vendor_rate_assumption(config),
+        local=local_rate_assumption(spec),
+        documented_unit=documentation.rate_units,
     ).merged_with(
         check_dividend_compatibility(
             vendor=vendor_dividend_assumption(config),
@@ -4335,6 +4726,12 @@ def assess_pricing_compatibility(
     # we have not found a disagreement, we have found that the question is
     # unanswerable from here -- and load-bearing, so each one blocks a trusted
     # calculation until a live comparison or vendor documentation settles it.
+    #
+    # ``MINIMUM_TIME_FLOOR`` leaves this list when the pinned document settles
+    # it, and only then. The document says ``greeks_version=latest`` uses real
+    # time to expiry "down to a minimum of 1 hour"; a local spec configured to
+    # the same 60 minutes is agreement, and a local spec configured to anything
+    # else is a disagreement rather than an unknown.
     undocumented = tuple(
         _result(
             dimension,
@@ -4372,10 +4769,12 @@ def assess_pricing_compatibility(
                 "the vendor's IV solver version is not exposed",
             ),
         )
+        if dimension is not PricingDimension.MINIMUM_TIME_FLOOR
+        or documentation.minimum_time_floor_minutes is None
     )
     report = report.merged_with(
         PricingCompatibilityReport(
-            dimensions=undocumented,
+            dimensions=undocumented + _documented_time_floor(documentation, spec),
             warnings=(
                 "VENDOR_IV_LOCAL_GAMMA mixes a vendor-computed IV into a local "
                 "gamma; model consistency cannot be claimed until a live "

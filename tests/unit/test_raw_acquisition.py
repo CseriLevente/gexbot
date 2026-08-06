@@ -71,6 +71,7 @@ def test_an_index_schema_error_does_not_prevent_the_other_endpoints(tmp_path):
             body=b"<html><body>scheduled maintenance</body></html>",
         ),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
     )
 
     acquisition = report["raw_acquisition"]
@@ -113,6 +114,7 @@ def test_a_parser_failure_cannot_downgrade_a_complete_raw_acquisition(tmp_path):
             body=b"<html>not csv</html>",
         ),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
     )
 
     assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value
@@ -634,6 +636,7 @@ def _live_run(destination, *, expect_report=True):
         output=str(destination),
         transport=vendor_transport(),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
     )
 
 
@@ -659,6 +662,7 @@ def _capture_with_attempts(tmp_path, *, name="capture"):
         output=str(tmp_path / name),
         transport=vendor_transport(),
         as_of=AS_OF,
+        allow_unsettled_raw_only=True,
     )
     return report, run_path(report, "attempt_store_path")
 

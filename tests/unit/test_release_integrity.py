@@ -298,9 +298,7 @@ def test_no_scratch_file_reaches_a_release(in_git_repo, tmp_path):
     would take a ``_patch.py`` holding whatever was being debugged at the time.
     """
     scratch = [
-        path
-        for path in tracked_files()
-        if re.fullmatch(r"_[^/]*\.(py|txt|md)", path)
+        path for path in tracked_files() if re.fullmatch(r"_[^/]*\.(py|txt|md)", path)
     ]
     assert scratch == [], scratch
 

@@ -287,7 +287,18 @@ def test_the_dry_run_reports_an_established_settlement_date(tmp_path):
     # Still raw-only, and still not a dataset.
     assert report["capture_readiness"] == "READY_FOR_RAW_CAPTURE_ONLY"
     assert report["would_compute_trusted_gex"] is False
-    assert report["analytical_blockers"]
+    # The standing requirements, and what is missing right now. Two fields
+    # since v2.1.20: reporting the standing list under a name ending in
+    # "blockers" made the same report say settlement was both ESTABLISHED and
+    # a blocker.
+    assert report["analytical_requirements"]
+    assert report["actual_analytical_blockers"]
+    settlement_blockers = [
+        blocker
+        for blocker in report["actual_analytical_blockers"]
+        if "settlement" in blocker.lower()
+    ]
+    assert settlement_blockers == [], settlement_blockers
 
 
 # =============================================================================

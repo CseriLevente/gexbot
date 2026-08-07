@@ -1178,6 +1178,7 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
         headers: Mapping[str, str] | None = None,
         basic_auth: tuple[str, str] | None = None,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        trust_env: bool = False,
     ) -> None:
         try:
             import httpx
@@ -1195,13 +1196,36 @@ class HttpxTransport:  # pragma: no cover - exercised only against a live vendor
         # scalar replaces every dimension, so the configured five-second connect
         # timeout became thirty at the wire while the dry run reported five.
         self._timeout = self._timeout_for(read_timeout_seconds)
+        # **Where this transport is allowed to look for routing.** ``False``,
+        # and named rather than left to the library default.
+        #
+        # ``httpx.Client`` defaults to ``trust_env=True``, which reads
+        # ``HTTP_PROXY``, ``HTTPS_PROXY``, ``ALL_PROXY``, ``NO_PROXY`` and the
+        # SSL environment out of the process. The first-session profile targets
+        # a Theta Terminal at ``http://127.0.0.1:25503``, and a capture that
+        # records itself as ``LOCAL_TERMINAL_CAPTURE`` should have gone to that
+        # local address -- not through whatever an ambient ``ALL_PROXY`` names.
+        # The classification is derived from the URL, so it would have kept
+        # saying "local" while the bytes came from somewhere else entirely.
+        #
+        # The value travels: it is in ``effective_transport_settings``, the dry
+        # run, the approval's transport fingerprint, the run intent and the
+        # summary. Proxy support, if it is ever wanted, is configuration an
+        # operator approves -- not something a shell inherits.
+        self._trust_env = bool(trust_env)
         # Credentials go to httpx's auth handling, never into the URL: a URL ends
         # up in logs, tracebacks and the raw-response index.
         self._client = httpx.Client(
             timeout=self._timeout,
             headers=dict(headers or {}),
             auth=httpx.BasicAuth(*basic_auth) if basic_auth else None,
+            trust_env=self._trust_env,
         )
+
+    @property
+    def trust_env(self) -> bool:
+        """Whether this transport reads routing out of the environment."""
+        return self._trust_env
 
     def _timeout_for(self, read_timeout_seconds: float) -> Any:
         """A full timeout object. Every dimension named, none inherited."""

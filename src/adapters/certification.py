@@ -1196,6 +1196,12 @@ def build_verified_calculation_context(
             f"{type(manifest).__name__}"
         )
     pipeline.validate_integrity()
+    # This function's whole purpose is to package what a capture *authorizes*,
+    # so the documentation behind it is re-derived from the pinned bytes rather
+    # than read off the pipeline. A frozen dataclass can be replaced after
+    # construction, and the cheap byte-hash check cannot see a bundle whose
+    # values were never in the document.
+    pipeline.require_documentation_authority()
 
     plan = pipeline.capture_plan
     # What this pipeline *would* stamp and *would* send, recomputed now. The
@@ -1397,6 +1403,11 @@ class UniverseReadiness(str, Enum):
 ANALYTICAL_DATASET_REQUIREMENTS = (
     "trusted normalization: the chain re-derived from its raw records, and the "
     "two canonical hashes equal",
+    # Since v2.1.18 the shipped profile *does* establish this, from the pinned
+    # OpenAPI document. It stays on the list because the list is what the state
+    # requires, not what is currently missing -- and because "established by
+    # the vendor" is what it says: a documented convention, not a measured one
+    # (OD-26 is still open on whether the responses bear it out).
     "a settlement date for open interest established by the vendor rather than "
     "assumed by this repository (OPEN_DECISIONS OD-26)",
     "pricing compatibility resolved: no load-bearing dimension UNKNOWN or "
@@ -1641,6 +1652,10 @@ def assess_analytical_readiness(
     the *derivation report*; it is no longer an input, because a caller holding
     one is a caller who wrote one.
     """
+    # Analytical readiness is a verdict about what a dataset may be used for,
+    # and two of its six conditions rest on documented conventions. Re-derive
+    # them from the pinned bytes before answering.
+    pipeline.require_documentation_authority()
     context = build_analytical_evidence(
         pipeline=pipeline,
         chain=chain,
@@ -1819,6 +1834,13 @@ def assess_readiness(
     validate = getattr(pipeline, "validate_integrity", None)
     if callable(validate):
         validate()
+    # Certification is the strongest verdict this repository issues, so the
+    # documentation behind it is re-derived from the pinned bytes rather than
+    # read off the pipeline object. ``getattr`` because readiness is also asked
+    # of stand-ins in tests that carry no documentation at all.
+    authority = getattr(pipeline, "require_documentation_authority", None)
+    if callable(authority):
+        authority()
 
     blockers: list[str] = []
     calculation_blockers: list[str] = []

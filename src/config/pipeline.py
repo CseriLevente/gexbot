@@ -2125,8 +2125,22 @@ class ThetaDataResearchPipeline:
         *,
         capture: Any,
         as_of: datetime,
+        plan: Any = None,
     ) -> Any:
         """Request every planned endpoint and store whatever comes back.
+
+        ``plan`` is the **already-authorized** request plan. The operator
+        derives it once, proves it is the approved one, and hands the object
+        here. v2.1.19 let this method derive its own plan after the approval
+        had been checked against a different derivation, so the sweep
+        authorized every request against a document nobody had approved --
+        identical in practice, and identical by coincidence rather than by
+        construction.
+
+        A supplied plan is sanity-checked against what this pipeline would
+        derive and refused on a mismatch; it is never silently replaced.
+        ``None`` keeps the old behaviour for callers that are not executing an
+        approved capture -- replay, tests, diagnostics.
 
         **The v2.1.15 correction.** The operator used to reach the wire through
         ``fetch_chain()``, which parses each response in order to build the
@@ -2163,7 +2177,17 @@ class ThetaDataResearchPipeline:
         self.validate_integrity()
         # One derivation, and the sweep is bound to it: every request is
         # authorised against the same document the dry run printed.
-        plan = self.raw_request_plan(as_of=as_of)
+        derived = self.raw_request_plan(as_of=as_of)
+        if plan is None:
+            plan = derived
+        elif plan.request_plan_hash != derived.request_plan_hash:
+            raise PipelineConsistencyError(
+                f"the supplied request plan hashes to {plan.request_plan_hash} "
+                f"and this pipeline derives {derived.request_plan_hash}. The "
+                "sweep authorises every request against the plan it is given, "
+                "so a plan this pipeline would not produce is a plan for a "
+                "different session."
+            )
         planned = self.raw_request_parameters(as_of=as_of)
         client = self.runtime.client
         observer = getattr(getattr(client, "transport", None), "attempt_observer", None)
@@ -2605,6 +2629,22 @@ class ThetaDataResearchPipeline:
         from src.adapters.raw_store import CaptureOrigin, CaptureSession
         from src.adapters.thetadata.client import capture_origin_of
         from src.gex.sessions import market_session_date
+
+        # **The strong check, not the cheap one.** Opening a session stamps a
+        # settlement rule and a documentation fingerprint onto every record it
+        # will write, so this is where a forged bundle would acquire authority
+        # over bytes. Re-derived from the pinned document rather than trusted
+        # because ``from_config`` once produced this object -- a frozen
+        # dataclass can be replaced after construction.
+        self.require_documentation_authority()
+
+        # **The strong check, not the cheap one.** Opening a session stamps a
+        # settlement rule and a documentation fingerprint onto every record it
+        # will write, so this is where a forged bundle would acquire authority
+        # over bytes. Re-derived from the pinned document rather than trusted
+        # because ``from_config`` once produced this object -- a frozen
+        # dataclass can be replaced after construction.
+        self.require_documentation_authority()
 
         artifact = _settlement_artifact(settlement_rule)
         open_interest_as_of = (
@@ -3666,6 +3706,14 @@ class ThetaDataResearchPipeline:
         from src.adapters.certification import build_verified_calculation_context
 
         self.validate_integrity()
+        # A trusted number rests on the documented rate units, the
+        # documented time floor and the documented settlement session.
+        # Re-derive all three from the bytes before producing one.
+        self.require_documentation_authority()
+        # A trusted number rests on the documented rate units, the
+        # documented time floor and the documented settlement session.
+        # Re-derive all three from the bytes before producing one.
+        self.require_documentation_authority()
         _require_a_chain(chain, mode="trusted")
 
         # Recovered from the capture, before anything is computed. A capture
@@ -4377,6 +4425,74 @@ class ThetaDataResearchPipeline:
             blockers.append(f"the capture is missing required endpoints {missing}")
 
         return tuple(blockers)
+
+    def require_documentation_authority(self) -> None:
+        """Re-derive this session's readings from the document, in full.
+
+        **The expensive check, and the one that has to be right.** It rereads
+        the pinned bytes, rehashes them, reparses the YAML, rewalks every
+        extraction path, rechecks every expected fragment, reruns every
+        normalizer, rebuilds the bundle and requires the rebuilt hash to equal
+        the one this pipeline carries.
+
+        v2.1.19 argued that the cheap byte-hash check was sufficient because a
+        bundle could only reach a pipeline through the loader. That premise was
+        false. ``ThetaDataResearchPipeline`` is a frozen dataclass, so::
+
+            forged = dataclasses.replace(
+                genuine,
+                documentation_bundle=bundle_with_invented_values,
+                pricing_compatibility=report_recomputed_from_it,
+            )
+            forged.validate_integrity()      # passed
+
+        The document was untouched, so its hash still matched; the readings
+        attached to it were not the readings those bytes yield, and nothing
+        looked. ``PRIOR_TRADING_SESSION`` became ``SAME_SESSION``, the percent
+        rate became a decimal, and the one-hour floor became thirty minutes --
+        every one of which moves a gamma.
+
+        So the loader is the authority *again*, at every boundary that grants
+        something, rather than once at construction. Called before a capture
+        session opens, before a trusted calculation, before a verified
+        calculation context, before analytical readiness and before
+        certification. Not on ordinary diagnostic paths: those keep the cheap
+        check, because 326ms on every fetch buys nothing when nothing is being
+        authorized.
+
+        Local bytes only. No network access.
+        """
+        bundle = self.documentation_bundle
+        if bundle is None:
+            # No documentary evidence is a legitimate state. It authorizes
+            # nothing, which is precisely why it needs no re-derivation.
+            return
+
+        from src.adapters.thetadata.vendor_documentation import (
+            VendorDocumentationError,
+        )
+
+        root = str(getattr(bundle, "verified_root", "") or "").strip()
+        if not root:
+            raise PipelineConsistencyError(
+                "this session's documentation bundle names no verified root, "
+                "so the readings it carries cannot be re-derived from anything. "
+                "A bundle that cannot be re-derived cannot authorize."
+            )
+        try:
+            problems = bundle.verify_against(root)
+        except (VendorDocumentationError, OSError) as error:
+            raise PipelineConsistencyError(
+                f"the documentation this session was opened under cannot be "
+                f"re-derived from {root}: {error}"
+            ) from error
+        if problems:
+            raise PipelineConsistencyError(
+                f"the documentation this session was opened under does not "
+                f"follow from the bytes under {root}: {list(problems)}. The "
+                "values it carries are not the values those bytes yield, so "
+                "they are claims about the document rather than readings of it."
+            )
 
     def _require_documentation_still_follows_from_its_bytes(self) -> None:
         """Re-establish that this session's readings follow from its document.

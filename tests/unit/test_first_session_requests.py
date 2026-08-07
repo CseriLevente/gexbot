@@ -315,9 +315,10 @@ def test_a_good_contract_list_response_grants_no_coverage(tmp_path):
     # open question. Capturing a list is not proving a universe.
     planned = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "planned"))
     assert planned["capture_readiness"] == "READY_FOR_RAW_CAPTURE_ONLY"
-    assert planned["analytical_blockers"], "coverage is still an open question"
+    assert planned["actual_analytical_blockers"], "coverage is still an open question"
     assert any(
-        "universe" in blocker.lower() for blocker in planned["analytical_blockers"]
+        "universe" in blocker.lower()
+        for blocker in planned["actual_analytical_blockers"]
     )
 
     # And the capability table says the same thing structurally.

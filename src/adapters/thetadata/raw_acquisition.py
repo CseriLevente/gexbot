@@ -128,6 +128,34 @@ SYSTEMIC_STOP_REASONS = frozenset(
 )
 
 
+class RequestFailurePolicy(str, Enum):
+    """What the sweep does when one request fails.
+
+    One value today, and an enum rather than a bare string because the point is
+    that the plan and the executor stop describing this separately.
+
+    Through v2.1.19 every planned request printed ``CONTINUE_ON_FAILURE`` while
+    the loop stopped on five named conditions. Both statements were written by
+    hand, in different files, and the plan's was the one an operator read
+    before paying. A plan that overstates what the executor will attempt is a
+    plan somebody budgets requests against.
+    """
+
+    #: Continue past a failed endpoint. Stop only for a reason in
+    #: :data:`SYSTEMIC_STOP_REASONS`, where continuing would spend money on
+    #: requests that cannot succeed.
+    CONTINUE_UNLESS_SYSTEMIC = "CONTINUE_UNLESS_SYSTEMIC"
+
+
+def systemic_stop_reasons() -> tuple[str, ...]:
+    """The stop reasons, sorted, for a plan or a report to print.
+
+    Derived from the enum rather than listed, so a reason added to the executor
+    cannot fail to appear in the plan an operator approves.
+    """
+    return tuple(sorted(reason.value for reason in SYSTEMIC_STOP_REASONS))
+
+
 class ParserStatus(str, Enum):
     """What a parser made of bytes that are already safely stored."""
 

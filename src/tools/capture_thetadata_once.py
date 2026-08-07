@@ -68,7 +68,7 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.19"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.20"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
@@ -424,6 +424,11 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
     # direct vendor call, and the shipped profile is the local one.
     live_origin = _live_capture_origin(settings["base_url"])
     approval = approval_for(pipeline=pipeline, config=loaded.thetadata, moment=as_of)
+    # Derived once and used twice -- by the documentation section and by the
+    # actual-blockers list. Two derivations could disagree, and a report whose
+    # two halves disagree about the settlement rule is the defect this release
+    # corrects in its terminology.
+    settlement = _settlement_for_run(pipeline, moment=as_of)[0]
     return {
         "schema_version": RAW_CAPTURE_RUN_SCHEMA_VERSION,
         "mode": "DRY_RUN",
@@ -461,9 +466,7 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         # Fetching this document contacted ``docs.thetadata.us`` and nothing
         # else. It is not a market-data request and it is not a Theta Terminal
         # request; no paid data was involved in producing it.
-        "vendor_documentation": _documentation_section(
-            pipeline, _settlement_for_run(pipeline, moment=as_of)[0]
-        ),
+        "vendor_documentation": _documentation_section(pipeline, settlement),
         # What the contract listing is allowed to establish. Printed with the
         # plan because an operator reading "we now request a contract list"
         # should see, in the same breath, that it settles nothing yet.
@@ -496,7 +499,22 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         "capture_ready": readiness.ready,
         "capture_blockers": list(readiness.blockers),
         "calculation_blockers": list(readiness.calculation_blockers),
-        "analytical_blockers": list(ANALYTICAL_DATASET_REQUIREMENTS),
+        # **Two different things, named differently since v2.1.20.**
+        #
+        # ``analytical_requirements`` is the standing list of what
+        # ``READY_FOR_ANALYTICAL_DATASET`` needs. It does not change with the
+        # run and says nothing about this one.
+        #
+        # ``actual_analytical_blockers`` is what is missing *now*. Through
+        # v2.1.19 the standing list was reported as ``analytical_blockers``,
+        # so the same report said ``settlement_evidence: ESTABLISHED`` and
+        # listed the settlement date as a blocker -- a reader could not tell
+        # which was the current state, and the wrong one is the one that reads
+        # as news.
+        "analytical_requirements": list(ANALYTICAL_DATASET_REQUIREMENTS),
+        "actual_analytical_blockers": list(
+            _actual_analytical_blockers(pipeline, settlement)
+        ),
         "destination_refusals": list(_destination_refusals(destination)),
         "wrote_files": False,
         "would_place_orders": False,
@@ -504,6 +522,38 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         # Named so the dry-run output and the live-run output can be diffed.
         "unknown_origin": CaptureOrigin.UNKNOWN_ORIGIN.value,
     }
+
+
+def _actual_analytical_blockers(pipeline: Any, settlement: Any) -> tuple[str, ...]:
+    """What stands between *this* configuration and an analytical dataset.
+
+    Derived, so it cannot contradict the rest of the report. A dry run has no
+    capture to check, so the two conditions a capture would settle -- trusted
+    normalization and a verified universe -- are named as not-yet-attempted
+    rather than as failures.
+    """
+    blockers: list[str] = [
+        "no capture exists yet: trusted normalization cannot be checked until "
+        "one has been taken and re-derived from its own records",
+        "no verified expected universe: the contract listing is captured as "
+        "evidence and its scope has never been compared against a filtered "
+        "request (OPEN_DECISIONS OD-11)",
+    ]
+    if settlement is None:
+        blockers.append(
+            "no open-interest settlement date is established for this session"
+        )
+    unknowns = [d.value for d in pipeline.pricing_compatibility.load_bearing_unknowns]
+    if unknowns:
+        blockers.append(
+            f"{len(unknowns)} load-bearing pricing dimension(s) unresolved: {unknowns}"
+        )
+    mismatched = [
+        d.value for d in pipeline.pricing_compatibility.load_bearing_mismatches
+    ]
+    if mismatched:
+        blockers.append(f"pricing dimensions mismatched: {mismatched}")
+    return tuple(blockers)
 
 
 def _live_capture_origin(base_url: str) -> Any:
@@ -803,6 +853,68 @@ def _preflight(
         unsettled_allowed=allow_unsettled_raw_only,
         approval=approval,
     )
+
+
+def _require_execution_matches_approval(
+    *,
+    pipeline: Any,
+    config: Any,
+    moment: datetime,
+    approved: Any,
+    supplied: str,
+) -> Any:
+    """Prove the pipeline about to send is the one that was approved.
+
+    Returns the **approved request plan object**, which the caller passes to
+    the sweep. Returning it rather than letting the sweep derive its own is the
+    other half of the fix: a check that proves two derivations agree, followed
+    by a third derivation nobody checked, proves nothing about what gets sent.
+
+    Every comparison here is against a value recomputed from ``pipeline``. The
+    approval hash alone would be enough to refuse, and the individual fields
+    are compared as well so the refusal can say *which* thing moved -- a digest
+    mismatch tells an operator to rerun the dry run, and does not tell them
+    what they will see when they do.
+    """
+    execution_approval = approval_for(pipeline=pipeline, config=config, moment=moment)
+
+    if approved is None:
+        raise CaptureRunError(
+            "this run reached execution with no preflight approval to check "
+            "against, which should be unreachable. Refusing rather than "
+            "sending: an authorization nobody can name is not one."
+        )
+
+    pasted = str(supplied or "").strip().lower()
+    if execution_approval.approval_hash != approved.approval_hash:
+        changed = execution_approval.differences_from(approved)
+        raise CaptureRunError(
+            "the pipeline that would send these requests is not the pipeline "
+            f"that was approved: {changed[0] if changed else 'approval changed'}"
+            f".\n  approved at preflight: {approved.approval_hash}\n"
+            f"  about to execute:     {execution_approval.approval_hash}\n"
+            "No request has been sent. Rerun the dry run, read the plan, and "
+            "approve what it prints."
+        )
+    if pasted and not execution_approval.matches(pasted):
+        raise CaptureRunError(
+            f"--approve {pasted} does not match the pipeline about to execute "
+            f"({execution_approval.approval_hash}). No request has been sent."
+        )
+
+    execution_plan = pipeline.raw_request_plan(as_of=moment)
+    if execution_plan.request_plan_hash != approved.request_plan_hash:
+        # Belt and braces: the plan hash is inside the approval, so this cannot
+        # fire while the hashes above agree. Kept because it is the statement
+        # the sweep actually depends on, and a future field added to the
+        # approval must not be able to make this true without anyone noticing.
+        raise CaptureRunError(
+            "the request plan this pipeline derives is not the approved plan: "
+            f"approved {approved.request_plan_hash}, "
+            f"derived {execution_plan.request_plan_hash}. No request has been "
+            "sent."
+        )
+    return execution_plan
 
 
 #: How far back to look for the session an unmatched approval was taken in.
@@ -1234,6 +1346,26 @@ def run_capture(
             pipeline.runtime.client.transport, pipeline.runtime.client.settings.base_url
         )
 
+        # **Is the pipeline about to send requests the pipeline that was
+        # approved?** v2.1.19 checked the approval against the preflight
+        # pipeline and then built a *second* one here to do the work, with
+        # nothing comparing them. A reproduced case had preflight at
+        # 0872bb7245ec... and execution at 418fd521b915..., and the operator
+        # acquired every response: the run ended unverified, which is a report
+        # written after the money was spent.
+        #
+        # Re-derived from the object that will actually do it, and compared
+        # field by field. Before ``capture_session``, before the run intent,
+        # before the sweep, before any transport call -- an authorization that
+        # is checked after the first request is a receipt.
+        run.request_plan = _require_execution_matches_approval(
+            pipeline=pipeline,
+            config=loaded.thetadata,
+            moment=moment,
+            approved=checked.approval,
+            supplied=approved,
+        )
+
         run.session = pipeline.capture_session(
             store=store,
             session_id=run.run_id,
@@ -1259,16 +1391,17 @@ def run_capture(
             ),
         )
         run.mark = run.session.mark()
-        # Derived before the intent is written, so the document that says what
-        # this run was going to do carries the actual requests -- and before the
-        # sweep, which authorises every request against this same object.
-        run.request_plan = pipeline.raw_request_plan(as_of=moment)
+        # ``run.request_plan`` is already the approved plan object, returned by
+        # the check above rather than derived again here. v2.1.19 re-derived it
+        # at this point and the sweep re-derived it a third time; three
+        # derivations of the same thing are three chances for one of them to be
+        # something else.
         _write_intent(run, config_path=config_path)
 
         # ---- Acquire every planned endpoint. Parsing comes later. -----------
         run.state = RawCaptureRunState.IN_PROGRESS
         outcome = pipeline.capture_required_endpoints_raw(
-            capture=run.session, as_of=moment
+            capture=run.session, as_of=moment, plan=run.request_plan
         )
         run.acquisition = outcome
         # The first failure that matters to a chain. An evidence endpoint that

@@ -46,7 +46,7 @@ __all__ = [
 #: Bumped when what an approval covers changes. An approval computed under
 #: older rules must not match a live run checked under newer ones: the digest
 #: would agree while the two sides disagreed about what it promised.
-CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION = "capture-preflight-approval/2.1.19"
+CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION = "capture-preflight-approval/2.1.20"
 
 
 class PreflightApprovalError(ValueError):
@@ -69,6 +69,9 @@ class PreflightApprovalError(ValueError):
 #: buffer.
 APPROVAL_TRANSPORT_FIELDS: Final[tuple[str, ...]] = (
     "base_url",
+    # Whether routing may come out of the process environment. A capture
+    # approved as a direct local-terminal call must not become a proxied one.
+    "trust_env",
     "connect_timeout_seconds",
     "read_timeout_seconds",
     "max_response_bytes",

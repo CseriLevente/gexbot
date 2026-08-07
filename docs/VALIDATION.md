@@ -237,7 +237,7 @@ They move independently, and conflating them is how a change hides.
 | Normalization schema | `normalized-chain/2.1.18` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
 | Request-spec schema | `thetadata-request-spec/2.1.10` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
 | Capture-operation schema | `capture-operation/2.1.19` | `src/adapters/capture_operation.py` | what one capture operation fixes changes. Moved in v2.1.19: an operation now carries the preflight approval a human gave, so every record stamped with the operation is bound to what was approved |
-| Preflight-approval schema | `capture-preflight-approval/2.1.19` | `src/adapters/thetadata/preflight_approval.py` | what an approval covers changes. An approval computed under older rules must not match a live run checked under newer ones — the digest would agree while the two sides disagreed about what it promised |
+| Preflight-approval schema | `capture-preflight-approval/2.1.20` | `src/adapters/thetadata/preflight_approval.py` | what an approval covers changes. An approval computed under older rules must not match a live run checked under newer ones — the digest would agree while the two sides disagreed about what it promised |
 | Expected-universe schema | `expected-universe/2.1.11` | `src/domain/expected_universe.py` | what a universe hash covers changes |
 | Settlement-evidence schema | `settlement-evidence/2.1.10` | `src/domain/settlement.py` | what a settlement rule *means* changes |
 | Capture-artifact envelope | `capture-artifact/2.1.10` | `src/adapters/artifact_store.py` | how a stored artifact is wrapped changes |
@@ -246,7 +246,7 @@ They move independently, and conflating them is how a change hides.
 | Universe-documentation schema | `universe-documentation/2.1.12` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
 | Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
 | Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
-| Operator-report schema | `raw-capture-run/2.1.19` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
+| Operator-report schema | `raw-capture-run/2.1.20` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
 | Run-intent schema | `raw-capture-intent/2.1.19` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
 | HTTP-attempt schema | `http-attempt/2.1.17` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
 | Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
@@ -257,7 +257,7 @@ They move independently, and conflating them is how a change hides.
 | Attempt-evidence schema | `attempt-evidence/2.1.17` | `src/adapters/http_attempts.py` | what reopening a persisted attempt log checks changes |
 
 | Capture-plan schema | `capture-plan/2.1.17` | `src/adapters/thetadata/capture_plan.py` | what a plan says changes -- v2.1.16 splits endpoints a chain needs from endpoints captured as evidence, and carries both the option root and the underlying index |
-| Request-plan schema | `raw-request-plan/2.1.17` | `src/adapters/thetadata/request_plan.py` | what an authorised request looks like changes |
+| Request-plan schema | `raw-request-plan/2.1.20` | `src/adapters/thetadata/request_plan.py` | what an authorised request looks like changes |
 
 | Vendor-documentation schema | `vendor-documentation/2.1.18` | `src/adapters/thetadata/vendor_documentation.py` | what a rule a document may settle changes |
 

@@ -1058,6 +1058,12 @@ def httpx_transport_kwargs(config: ThetaDataConfig) -> dict[str, Any]:
         "read_timeout_seconds": config.timeout_seconds,
         "basic_auth": (username, password) if username and password else None,
         "max_response_bytes": config.max_response_bytes,
+        # **Where routing may come from.** ``False``: this repository targets a
+        # local Theta Terminal, and an ambient ``ALL_PROXY`` must not be able to
+        # send a capture somewhere else while the origin classification -- which
+        # is derived from the URL -- keeps saying the bytes came from localhost.
+        # Proxy support would be configuration an operator approves.
+        "trust_env": False,
     }
 
 
@@ -1180,6 +1186,12 @@ def effective_transport_settings(config: ThetaDataConfig) -> dict[str, Any]:
         "max_response_bytes": kwargs["max_response_bytes"],
         "max_retries": config.max_retries,
         "backoff_base_seconds": config.backoff_base_seconds,
+        # Reported because it decides the path the bytes take, and a capture
+        # that says LOCAL_TERMINAL_CAPTURE should have gone to the local
+        # terminal. Inside the approval's transport fingerprint, so changing
+        # the routing policy invalidates an approval rather than quietly
+        # redirecting an approved run.
+        "trust_env": bool(kwargs.get("trust_env", False)),
     }
 
 

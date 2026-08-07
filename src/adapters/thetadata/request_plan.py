@@ -33,7 +33,25 @@ __all__ = [
 ]
 
 #: Bumped when the shape of a request plan changes.
-REQUEST_PLAN_SCHEMA_VERSION = "raw-request-plan/2.1.17"
+REQUEST_PLAN_SCHEMA_VERSION = "raw-request-plan/2.1.20"
+
+
+def _default_stop_policy() -> str:
+    """The executor's policy, read from the executor.
+
+    Imported inside the function rather than at module scope: this module is
+    pulled in by the plan-building path, and the acquisition module imports
+    rather more.
+    """
+    from src.adapters.thetadata.raw_acquisition import RequestFailurePolicy
+
+    return RequestFailurePolicy.CONTINUE_UNLESS_SYSTEMIC.value
+
+
+def _systemic_stop_reasons() -> tuple[str, ...]:
+    from src.adapters.thetadata.raw_acquisition import systemic_stop_reasons
+
+    return systemic_stop_reasons()
 
 
 class RequestPlanViolation(RuntimeError):
@@ -69,7 +87,16 @@ class PlannedEndpointRequest:
     #: What the sweep does if this request fails. Carried per request because
     #: "continue" and "stop" are the difference between a partial capture and a
     #: cancelled one, and an operator should see which is which before paying.
-    stop_policy: str = "CONTINUE_ON_FAILURE"
+    #:
+    #: Defaulted from the executor's own enum since v2.1.20. It said
+    #: ``CONTINUE_ON_FAILURE`` while the sweep stopped on five systemic
+    #: conditions -- two hand-written descriptions of one behaviour, and the
+    #: plan's was the one being read before money changed hands.
+    stop_policy: str = _default_stop_policy()
+    #: The conditions that *do* stop the sweep, named rather than implied.
+    systemic_stop_reasons: tuple[str, ...] = field(
+        default_factory=lambda: _systemic_stop_reasons()
+    )
 
     @property
     def parameters(self) -> dict[str, str]:
@@ -92,6 +119,7 @@ class PlannedEndpointRequest:
             "required_tier": self.required_tier,
             "request_spec_hash": self.request_spec_hash,
             "stop_policy": self.stop_policy,
+            "systemic_stop_reasons": list(self.systemic_stop_reasons),
         }
 
 

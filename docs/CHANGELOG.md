@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.1.20 - the approved pipeline is the one that sends
+
+    preflight pipeline fingerprint:   0872bb7245ec...
+    execution pipeline fingerprint:   418fd521b915...
+    responses acquired:               all of them
+
+v2.1.19 checked the approval against the pipeline built in `_preflight()` and
+then built a second one in `run_capture()` to do the work. Nothing compared
+them. The run ended unverified -- a report written after the money was spent.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `READY_FOR_RAW_CAPTURE_ONLY` |
+`NOT_READY_FOR_ANALYTICAL_DATASET` | `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+
+The repository remains incapable of placing an order. No ThetaData request has
+been made by any release.
+
+### Defects fixed
+
+| S | Defect in v2.1.19 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | The execution pipeline was never compared with the approved one | The approval described a pipeline that did not send the requests | The approval is re-derived from the object that will actually send, and compared field by field, before `capture_session`, before the run intent, before the sweep, before any transport call. The first semantic field that moved is named |
+| 2 | The sweep derived its own request plan after approval | Three derivations of the same plan; identical by coincidence rather than construction | `_require_execution_matches_approval` returns the approved plan object and `capture_required_endpoints_raw` takes it. A supplied plan is sanity-checked against what the pipeline would derive and refused on a mismatch, never silently replaced |
+| 3 | `dataclasses.replace` could install a forged documentation bundle | v2.1.19 argued the loader was the only way in. The pipeline is a frozen dataclass, so it was not. `PRIOR_TRADING_SESSION` → `SAME_SESSION`, percent → decimal, 60 minutes → 30, and `validate_integrity` passed | `require_documentation_authority()` re-reads, rehashes, reparses, rewalks every path, rechecks every fragment, reruns every normalizer and compares bundle hashes. Called at `capture_session`, `compute_trusted_gex`, `build_verified_calculation_context`, `assess_analytical_readiness` and `assess_readiness` |
+| 4 | `httpx.Client` inherited `trust_env=True` | A capture recording itself `LOCAL_TERMINAL_CAPTURE` -- a classification derived from the URL -- could have gone through an ambient `ALL_PROXY` | `trust_env=False`, named rather than defaulted, and surfaced through the effective settings, the dry run, the approval's transport fingerprint, the run intent and the summary |
+| 5 | Every planned request printed `CONTINUE_ON_FAILURE` | The sweep stops on five systemic conditions. Two hand-written descriptions of one behaviour, and the plan's was the one read before paying | One `RequestFailurePolicy.CONTINUE_UNLESS_SYSTEMIC`, plus the systemic reasons derived from the executor's own enum. Inside the plan hash, so `raw-request-plan` moves to 2.1.20 |
+| 6 | `analytical_blockers` held a static requirements list | The same report said `settlement_evidence: ESTABLISHED` and listed the settlement date as a blocker | `analytical_requirements` (standing) and `actual_analytical_blockers` (derived from this configuration) are separate fields |
+
+### The cheap check and the strong check
+
+`validate_integrity` still only rehashes the document. That is deliberate and
+now load-bearing in the other direction: it runs before every fetch, every
+calculation and every readiness assessment, and re-deriving the bundle costs
+326ms against 0.8ms. On a path that authorizes nothing, the difference buys
+nothing.
+
+The strong check runs where authority is granted. v2.1.19's mistake was not the
+optimisation; it was believing a premise -- "a bundle can only reach a pipeline
+through the loader" -- that a public frozen dataclass makes false.
+
+### Still documentary
+
+The prior-session open-interest rule remains
+`AUTHORITATIVE_VENDOR_DOCUMENTATION`. A snapshot carries open-interest values
+and timestamps and no settlement-date field, so the first capture cannot
+confirm or contradict it.
+
 ## 2.1.18 - the document was there all along
 
     v2.1.17 concluded:  "the exact official documentation bytes are unavailable"

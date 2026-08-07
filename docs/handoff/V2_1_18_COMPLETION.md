@@ -266,23 +266,68 @@ would let silence read as agreement.
 
 | Check | Python 3.12 | Python 3.13 |
 |---|---|---|
-| `ruff check .` | **locally executed**, clean | `unverified` |
-| `ruff format --check .` | **locally executed**, clean | `unverified` |
-| `mypy src` | **locally executed**, no issues in 82 source files | `unverified` |
-| `pytest tests` | **locally executed**, 2497 passed | `unverified` |
+| `pytest` | **locally executed** — 2541 passed | `unverified` |
+| `pytest -m integration` | **locally executed** — 18 passed | `unverified` |
+| `pytest -m regression` | **locally executed** — 46 passed | `unverified` |
+| `pytest -m replay` | **locally executed** — 10 passed | `unverified` |
+| `ruff check .` | **locally executed** — clean | `unverified` |
+| `ruff format --check .` | **locally executed** — 159 files formatted | `unverified` |
+| `mypy src` | **locally executed** — clean, 82 source files | `unverified` |
+| `coverage run -m pytest` | **locally executed** | `unverified` |
+| `coverage report --fail-under=90` | **locally executed** — 90%, gate satisfied | `unverified` |
 
-Python 3.12.10 in `.venv`. **Python 3.13 is `unverified`, not "executed in CI".**
-There is no 3.13 interpreter on this machine and this checkout has no git
-remote, so the CI matrix has never run. Reporting it as CI-green would be
-reporting a job nobody has watched.
+Python 3.12.10 in `.venv`.
+
+**Python 3.13 is `unverified`, not "executed in CI".** There is no 3.13
+interpreter on this machine and this checkout has no git remote, so the CI
+matrix has never run. Reporting it as CI-green would be reporting a job nobody
+has watched.
+
+### The coverage gate failed first
+
+At 89% against the configured floor of 90. The new module was the cause — 81%,
+with the gap almost entirely in the refusal branches.
+
+That is the worst place to have one. A refusal nobody tests is a refusal that
+might not fire, and each of these exists to stop a bad document from settling a
+convention that weights every strike. 44 tests in
+`tests/unit/test_openapi_evidence_refusals.py` close it.
+
+90% is the floor rather than a comfortable margin. The largest remaining gap is
+error handling in `capture_thetadata_once.py` around a live transport that no
+test can reach without a vendor.
+
+### Two contaminations caught during verification
+
+* `_commit_msg.txt` was swept into two commits by `git add -A` and from there
+  into the first archive. Harmless in content, wrong in principle: a build
+  somebody downloads should not carry the note explaining how it was built, and
+  the same sweep would take a `_patch.py` holding whatever was being debugged.
+  Root-level `/_*.py`, `/_*.txt` and `/_*.md` are now ignored, and
+  `test_no_scratch_file_reaches_a_release` checks both the tracked file list and
+  the archive. The existing release-integrity tests covered caches, `artifacts/`
+  and credential-shaped strings; none of them looked at the repository root.
+
+* The archive was rebuilt after both fixes, so its SHA-256 differs from the one
+  computed before them.
 
 ---
 
 ## Release
 
+    git status --porcelain      # empty
     git archive --format=zip --output=gex-bot-v2.1.18.zip HEAD
 
-SHA-256 of the exact uploaded file: recorded alongside the archive.
+| | |
+|---|---|
+| File | `gex-bot-v2.1.18.zip` |
+| SHA-256 | *recomputed after this commit — see the completion message* |
+| Entries | 263 |
+| Files | 218 |
+| Commit | this commit |
+
+Verified inside the archive: the pinned document is present, 812,792 bytes, and
+still hashes to `1b65f93c…b40b50`. No scratch file is present.
 
 ---
 

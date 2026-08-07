@@ -50,3 +50,13 @@ desktop.ini
 # They must never be tracked: a tracked artefact makes the tree dirty at the
 # exact moment the release procedure requires it to be clean.
 gex-bot-*.zip
+
+# Scratch files from the development loop. PowerShell here-strings break on this
+# machine, so edits are applied by writing a throwaway ``_patch.py`` and commit
+# messages by writing ``_commit_msg.txt`` -- and ``git add -A`` swept
+# ``_commit_msg.txt`` into two v2.1.18 commits and then into the release archive
+# before this line existed. A build somebody downloads should not contain the
+# note explaining how it was built. See test_no_scratch_file_reaches_a_release.
+/_*.py
+/_*.txt
+/_*.md

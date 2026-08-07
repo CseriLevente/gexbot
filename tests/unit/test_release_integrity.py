@@ -285,6 +285,35 @@ def test_no_captured_vendor_payload_is_tracked(in_git_repo):
     assert captured == []
 
 
+def test_no_scratch_file_reaches_a_release(in_git_repo, tmp_path):
+    """The development loop's throwaway files are not part of the source.
+
+    PowerShell here-strings break on the machine this is developed on, so edits
+    are applied by writing a temporary ``_patch.py`` and commit messages by
+    writing ``_commit_msg.txt``. ``git add -A`` swept ``_commit_msg.txt`` into
+    two v2.1.18 commits and from there into the release archive.
+
+    Harmless in content and wrong in principle: a build somebody downloads
+    should not carry the note explaining how it was built, and the same sweep
+    would take a ``_patch.py`` holding whatever was being debugged at the time.
+    """
+    scratch = [
+        path
+        for path in tracked_files()
+        if re.fullmatch(r"_[^/]*\.(py|txt|md)", path)
+    ]
+    assert scratch == [], scratch
+
+    archive = tmp_path / "release.zip"
+    if git("archive", "--format=zip", f"--output={archive}", "HEAD").returncode != 0:
+        pytest.skip("git archive unavailable")
+    import zipfile
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+    assert not [n for n in names if re.fullmatch(r"_[^/]*\.(py|txt|md)", n)]
+
+
 def test_the_archive_carries_no_captured_payloads(in_git_repo, tmp_path):
     archive = tmp_path / "release.zip"
     if git("archive", "--format=zip", f"--output={archive}", "HEAD").returncode != 0:

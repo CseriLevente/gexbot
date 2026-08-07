@@ -165,11 +165,13 @@ thetadata:
   # never aggregated, and it does not relax the vendor-IV checks.
   vendor_gamma_policy: DISABLED
 
-  # Deliberately empty. Eight load-bearing dimensions are the vendor's to
+  # Deliberately empty. Six load-bearing dimensions are still the vendor's to
   # define -- IV price basis, underlying source, underlying timestamp,
-  # expiration timestamp, day count, the minimum time floor, and since v2.1.5
-  # the rate units and dividend convention -- and this repository has not
-  # compared any of them against real vendor output. Until it has, the honest
+  # expiration timestamp, day count and the dividend convention -- and this
+  # repository has not compared any of them against real vendor output. The
+  # rate units and the minimum time floor left this list in v2.1.18, settled
+  # from the pinned OpenAPI document rather than from a response. Until the
+  # rest have been compared against real output, the honest
   # entry is no entry, and every trusted calculation is refused.
   #
   # After a capture, each answered question becomes an *observation*:

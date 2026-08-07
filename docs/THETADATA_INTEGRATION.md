@@ -19,7 +19,7 @@ executed against a real Theta Terminal or a real subscription.
 | Transport protocol, retries, `Retry-After`, size caps, redaction | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` (deterministic fake) |
 | Raw response store (append-only, atomic, collision-safe) | `IMPLEMENTED` · `TESTED_WITH_OFFLINE_FIXTURES` |
 | Real HTTP transport (`HttpxTransport`) | `IMPLEMENTED`, **never executed** |
-| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED` — no contract-list endpoint is wired (OD-11) |
+| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED` — the contract-list endpoint is captured as evidence and grants no coverage authority until its scope has been compared against a filtered request (OD-11) |
 | Live vendor response validated | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | Local gamma compared against vendor gamma | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | Whether the Standard tier suffices in practice | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
@@ -264,10 +264,43 @@ Install the HTTP extra first: `pip install -e ".[http]"`.
 
 ## Before a paid session
 
+**The checklist. Every line, in order, before spending money.**
+
+1. **Python 3.12 CI green** on the commit you are about to run.
+2. **Python 3.13 CI green** on the same commit. Both, not either: the matrix
+   exists to catch what one interpreter hides, and a job nobody has watched is
+   not a passing job. A workflow file that *would* run them is not a result.
+3. **Dry run during the session you are about to capture**, from that commit:
+
+   ```bash
+   python -m src.tools.capture_thetadata_once \
+       --config config/thetadata_capture.yaml \
+       --output /absolute/path/outside/the/repo
+   ```
+
+4. **Read the five planned requests.** Symbols, dates, strike range, DTE
+   window. This is the only moment they are cheap to be wrong.
+5. **Copy the printed `approval_hash`** and rerun with `--execute-live
+   --approve <hash>`.
+
+The approval covers the market session date, so it stops matching at the next
+session boundary — a Friday approval refuses a Monday run. That is deliberate:
+Monday's contract-list request carries Monday's date, so it is a different
+request and needs a fresh look. Rerun the dry run; it costs seconds.
+
+There is no flag that skips the approval. If it does not match, the refusal
+says what changed and the answer is always a new dry run.
+
 Read [ADAPTER_CERTIFICATION.md](ADAPTER_CERTIFICATION.md). It lists what must
 hold before a capture produces evidence rather than a directory of bytes, and
 names the two vendor-dependent unknowns -- the open-interest settlement date and
 the spot synchronisation -- that only a live session can resolve.
+
+On the first of those: the session opens under a settlement rule read from the
+vendor's pinned OpenAPI document, and **the capture cannot confirm it**. No
+snapshot endpoint carries a settlement-date field, so the bytes look identical
+whether the convention holds or not. The rule stays
+`AUTHORITATIVE_VENDOR_DOCUMENTATION` afterwards. See OD-26.
 
 Construct the session through one path:
 
@@ -536,11 +569,17 @@ The attempt index (`attempts/index.jsonl`) is appended and fsynced as each
 attempt happens, so the attempt evidence survives a finalization failure or an
 interpreter that dies.
 
-**It computes no GEX.** Eight load-bearing vendor conventions are unknown, so a
+**It computes no GEX.** Six load-bearing vendor conventions are unknown, so a
 number from these bytes would have no stated meaning -- and comparing those
-conventions against the captured responses is what the session is for. The
-capture also establishes no open-interest settlement rule, which makes it
-permanently raw-only: the rule is chosen when a session opens and there is no
+conventions against the captured responses is what the session is for. The rate
+units and the minimum time floor were settled in v2.1.18 from the pinned
+OpenAPI document; both rest on `VENDOR_DOCUMENTATION`, which records what the
+vendor says rather than what it did.
+
+Since v2.1.18 the capture *does* open under a documented open-interest
+settlement rule, derived from the vendor's own description of
+`/option/snapshot/open_interest`. That is documentary evidence and stays
+classified as such: the rule is chosen when a session opens and there is no
 argument through which one can be supplied later (OD-26).
 
 > Earlier drafts of this page described `pipeline.capture_and_compute(...)`,

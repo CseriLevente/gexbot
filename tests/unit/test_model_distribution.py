@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.18"
+    assert package["project"]["version"] == "2.1.19"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -326,10 +326,15 @@ def test_all_three_versions_are_documented():
         "universe-resolver/2.1.12",
         "adapter-certification/2.1.13",
         "universe-documentation/2.1.12",
-        "raw-capture-run/2.1.18",
-        "raw-capture-intent/2.1.18",
+        "raw-capture-run/2.1.19",
+        "raw-capture-intent/2.1.19",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",
+        # v2.1.19: the operation gained the
+        # preflight approval a human gave, and the approval is its own
+        # artifact.
+        "capture-operation/2.1.19",
+        "capture-preflight-approval/2.1.19",
         # Unmoved: what a stored payload *is* did not change in v2.1.17.
         "raw-response/2.1.17",
         "raw-capture-manifest/2.1.17",

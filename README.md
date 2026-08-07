@@ -71,7 +71,7 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | HTTP transport, retries, `Retry-After`, size caps | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` (deterministic fake) |
 | Raw-response store (atomic, collision-safe) | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` |
 | Real network transport (`HttpxTransport`) | `IMPLEMENTED` Â· **never executed** Â· `NOT_VALIDATED_WITH_LIVE_THETADATA` |
-| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED`/`UNKNOWN` end to end â€” no contract-list endpoint is wired (OD-11) |
+| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED`/`UNKNOWN` end to end â€” the contract-list endpoint is captured as evidence and its scope has not been compared against a filtered request (OD-11) |
 | Unknown completeness cannot score full confidence | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | ThetaData config â†’ effective runtime (`ThetaDataRuntime`) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Strict config validation (finite, typed, non-empty) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
@@ -94,7 +94,7 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | One adapter exception hierarchy | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Schema-safe raw-store integrity scanning | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Collision-safe capture sessions | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
-| Adapter-certification readiness | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; the shipped default is `READY_FOR_RAW_CAPTURE_ONLY`, and cannot be trusted to calculate while eight load-bearing vendor conventions are unknown |
+| Adapter-certification readiness | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; the shipped default is `READY_FOR_RAW_CAPTURE_ONLY`, and cannot be trusted to calculate while six load-bearing vendor conventions are unknown |
 | Derived certification (verifier and validator run inside readiness) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; a caller cannot supply a verdict |
 | Field-level provenance re-read from the payload | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` |
 | Capture plan: every endpoint the session needs | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |

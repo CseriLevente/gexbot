@@ -23,10 +23,12 @@ there with no manifest and no summary, which is raw data nobody can interpret.
 Every exit path here writes a manifest and a summary, marks the run state, and
 returns a documented exit code.
 
-What it does not do: compute a GEX. Eight load-bearing vendor conventions are
+What it does not do: compute a GEX. Six load-bearing vendor conventions are
 unknown, and until they have been compared against real responses a number from
 this data would have no stated meaning -- comparing them is what the capture is
-*for*. It also places no orders and constructs no broker: this repository has
+*for*. Two others -- the rate units and the minimum time floor -- were settled
+in v2.1.18 from the vendor's own pinned OpenAPI document, which is a claim the
+vendor makes rather than behaviour anyone has observed. It also places no orders and constructs no broker: this repository has
 neither.
 """
 
@@ -66,11 +68,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.18"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.19"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.18"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.19"
 
 
 class ContractListEvidenceState(str, Enum):
@@ -859,9 +861,7 @@ def _approval_difference(
     for days in range(1, _APPROVAL_LOOKBACK_DAYS + 1):
         earlier = moment - timedelta(days=days)
         try:
-            candidate = approval_for(
-                pipeline=pipeline, config=config, moment=earlier
-            )
+            candidate = approval_for(pipeline=pipeline, config=config, moment=earlier)
         except Exception:  # pragma: no cover - a probe must not mask the refusal
             break
         if candidate.matches(pasted):
@@ -1251,6 +1251,12 @@ def run_capture(
             # documented anywhere, and remains the open question a real
             # response has to settle.
             settlement_rule=checked.settlement_rule,
+            # What a human approved for this session's requests. On the
+            # operation, so every record the sweep writes is stamped with an
+            # identity that covers it.
+            preflight_approval_hash=(
+                checked.approval.approval_hash if checked.approval else None
+            ),
         )
         run.mark = run.session.mark()
         # Derived before the intent is written, so the document that says what
@@ -2023,6 +2029,44 @@ def _fail(message: str, code: ExitCode, *, summary: pathlib.Path | None = None) 
     return int(code)
 
 
+def _print_approval(report: dict[str, Any], *, output: str, config: str) -> None:
+    """The five values the operator is actually deciding on, set apart.
+
+    The full report is long, and the thing a human has to read before spending
+    money is five lines of it. Printed last and framed, with the exact command
+    to run next -- a value somebody has to hunt for is a value somebody skims.
+    """
+    approval = report.get("preflight_approval") or {}
+    if not approval:
+        return
+    print(_RULE)
+    print("PREFLIGHT APPROVAL -- check these before approving")
+    print(_RULE)
+    for name in (
+        "market_session_date",
+        "request_plan_hash",
+        "pipeline_fingerprint",
+        "documentation_bundle_fingerprint",
+        "approval_hash",
+    ):
+        print(f"{name:>34}  {approval.get(name, '')}")
+    print(_RULE)
+    print(
+        "This approval is for the "
+        f"{approval.get('market_session_date', '')} session only. It stops "
+        "matching at the next session boundary, and if anything above changes "
+        "-- rerun the dry run.\n"
+    )
+    print("To capture, having read the planned requests above:\n")
+    print(
+        f"    python -m src.tools.capture_thetadata_once \\\n"
+        f"        --config {config} \\\n"
+        f"        --output {output} \\\n"
+        f"        --execute-live \\\n"
+        f"        --approve {approval.get('approval_hash', '')}\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -2034,6 +2078,7 @@ def main(argv: list[str] | None = None) -> int:
         _print(report)
         if report["destination_refusals"]:
             return _fail("; ".join(report["destination_refusals"]), ExitCode.REFUSED)
+        _print_approval(report, output=args.output, config=args.config)
         print(
             "DRY RUN -- nothing was sent and nothing was written. Re-run with "
             "--execute-live to contact the vendor.\n"

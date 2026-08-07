@@ -1123,6 +1123,7 @@ def _operation_digest_problems(record: Any) -> list[str]:
             expected_universe_fingerprint=(
                 record.expected_universe_fingerprint or None
             ),
+            preflight_approval_hash=(record.preflight_approval_hash or None),
             parser_version=record.parser_version,
         )
     except (ValueError, TypeError) as error:
@@ -2128,11 +2129,13 @@ def assess_readiness(
 
     # -- known and accepted limitations -------------------------------------
     warnings.append(
-        "chain completeness will be PARTIALLY_OBSERVED: no verified ThetaData "
-        "contract-list endpoint is wired, so the captured chain cannot be "
-        "measured against an independent universe. This is a reason to capture, "
-        "not a reason to refuse -- the session is how the endpoint gets "
-        "identified. See docs/OPEN_DECISIONS.md OD-11."
+        "chain completeness will be PARTIALLY_OBSERVED: the contract-list "
+        "endpoint is requested and captured as evidence since v2.1.16, and its "
+        "scope has never been compared against a filtered snapshot request -- a "
+        "listing of everything quoted on a session is a different set from the "
+        "contracts a request bounded by max_dte and strike_range was owed. This "
+        "is a reason to capture, not a reason to refuse: making that comparison "
+        "is what the session is for. See docs/OPEN_DECISIONS.md OD-11."
     )
     unverified.append("chain_completeness")
 

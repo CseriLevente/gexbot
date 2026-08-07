@@ -236,7 +236,8 @@ They move independently, and conflating them is how a change hides.
 | Validation schema | `adapter-validation/2.1.10` | `src/adapters/validation.py` | what a validation report means changes |
 | Normalization schema | `normalized-chain/2.1.18` | `src/domain/normalization.py` | which chain fields a trusted calculation is bound to changes |
 | Request-spec schema | `thetadata-request-spec/2.1.10` | `src/adapters/thetadata/request_spec.py` | what counts as the same vendor request changes |
-| Capture-operation schema | `capture-operation/2.1.10` | `src/adapters/capture_operation.py` | what one capture operation fixes changes |
+| Capture-operation schema | `capture-operation/2.1.19` | `src/adapters/capture_operation.py` | what one capture operation fixes changes. Moved in v2.1.19: an operation now carries the preflight approval a human gave, so every record stamped with the operation is bound to what was approved |
+| Preflight-approval schema | `capture-preflight-approval/2.1.19` | `src/adapters/thetadata/preflight_approval.py` | what an approval covers changes. An approval computed under older rules must not match a live run checked under newer ones — the digest would agree while the two sides disagreed about what it promised |
 | Expected-universe schema | `expected-universe/2.1.11` | `src/domain/expected_universe.py` | what a universe hash covers changes |
 | Settlement-evidence schema | `settlement-evidence/2.1.10` | `src/domain/settlement.py` | what a settlement rule *means* changes |
 | Capture-artifact envelope | `capture-artifact/2.1.10` | `src/adapters/artifact_store.py` | how a stored artifact is wrapped changes |
@@ -245,8 +246,8 @@ They move independently, and conflating them is how a change hides.
 | Universe-documentation schema | `universe-documentation/2.1.12` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
 | Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
 | Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
-| Operator-report schema | `raw-capture-run/2.1.18` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
-| Run-intent schema | `raw-capture-intent/2.1.18` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
+| Operator-report schema | `raw-capture-run/2.1.19` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
+| Run-intent schema | `raw-capture-intent/2.1.19` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
 | HTTP-attempt schema | `http-attempt/2.1.17` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
 | Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
 | Raw-response schema | `raw-response/2.1.17` | `src/adapters/raw_store.py` | what a stored payload *is* changes -- v2.1.13 stores entity bytes rather than a re-encoding of a lossily decoded string, and v2.1.14 records the content type, the declared and selected charset, the decode status and the decoded-text hash alongside them |

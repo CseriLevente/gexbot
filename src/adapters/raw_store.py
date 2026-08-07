@@ -213,6 +213,14 @@ class CaptureIdentity:
     #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
     #: rather than comparing stored digests to each other and calling it checked.
     spot_synchronization_policy_fingerprint: str = ""
+    #: The preflight approval a human gave for this operation's requests.
+    #:
+    #: Stored on the record for the same reason the fields above are: the
+    #: operation digest covers it, and ``resolve_operation`` rebuilds the
+    #: identity out of what the records carry. A value inside a fingerprint
+    #: that the records do not carry cannot be recomputed at verification, so
+    #: it would make every capture fail to verify rather than bind anything.
+    preflight_approval_hash: str = ""
 
     @property
     def names_an_operation(self) -> bool:
@@ -264,6 +272,7 @@ class CaptureIdentity:
             "spot_synchronization_policy_fingerprint": (
                 self.spot_synchronization_policy_fingerprint
             ),
+            "preflight_approval_hash": self.preflight_approval_hash,
         }
 
 
@@ -314,6 +323,7 @@ class RawResponseRecord:
     #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
     #: rather than comparing stored digests to each other and calling it checked.
     spot_synchronization_policy_fingerprint: str = ""
+    preflight_approval_hash: str = ""
     #: What the stored bytes *are*, and under which rules. Written since v2.1.14;
     #: before that the constant existed and nothing recorded it, so a record gave
     #: no way to tell whether its digest covered entity bytes or a re-encoding of
@@ -397,6 +407,7 @@ class RawResponseRecord:
             spot_synchronization_policy_fingerprint=(
                 self.spot_synchronization_policy_fingerprint
             ),
+            preflight_approval_hash=self.preflight_approval_hash,
         )
 
     @property
@@ -1092,6 +1103,9 @@ class InMemoryRawStore:
             spot_synchronization_policy_fingerprint=(
                 identity.spot_synchronization_policy_fingerprint if identity else ""
             ),
+            preflight_approval_hash=(
+                identity.preflight_approval_hash if identity else ""
+            ),
             **_decode_fields(decode),
             response_headers=_safe_headers(response_headers),
             request_plan_schema_version=_plan_fields(planned_request)[
@@ -1257,6 +1271,9 @@ class FileRawStore:
             ),
             spot_synchronization_policy_fingerprint=(
                 identity.spot_synchronization_policy_fingerprint if identity else ""
+            ),
+            preflight_approval_hash=(
+                identity.preflight_approval_hash if identity else ""
             ),
             **_decode_fields(decode),
             response_headers=_safe_headers(response_headers),
@@ -1624,6 +1641,7 @@ class FileRawStore:
                     spot_synchronization_policy_fingerprint=data.get(
                         "spot_synchronization_policy_fingerprint", ""
                     ),
+                    preflight_approval_hash=data.get("preflight_approval_hash", ""),
                 )
             )
         return tuple(out)
@@ -1698,6 +1716,9 @@ class NullRawStore:
             ),
             spot_synchronization_policy_fingerprint=(
                 identity.spot_synchronization_policy_fingerprint if identity else ""
+            ),
+            preflight_approval_hash=(
+                identity.preflight_approval_hash if identity else ""
             ),
             **_decode_fields(decode),
             response_headers=_safe_headers(response_headers),
@@ -1928,6 +1949,7 @@ class CaptureSession:
     #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
     #: rather than comparing stored digests to each other and calling it checked.
     spot_synchronization_policy_fingerprint: str = ""
+    preflight_approval_hash: str = ""
     #: The artifacts those two digests name. Carried on the session so a fetch
     #: needs no repetition of what the session already knows, and so replay
     #: recovers the objects rather than only the digests naming them.
@@ -1980,6 +2002,7 @@ class CaptureSession:
             spot_synchronization_policy_fingerprint=(
                 self.spot_synchronization_policy_fingerprint
             ),
+            preflight_approval_hash=self.preflight_approval_hash,
         )
 
     def next_sequence(self) -> int:
@@ -2111,6 +2134,7 @@ class ManifestRecord:
     #: v2.1.9 so ``verify_capture`` can recompute that digest from the record
     #: rather than comparing stored digests to each other and calling it checked.
     spot_synchronization_policy_fingerprint: str = ""
+    preflight_approval_hash: str = ""
     #: What the stored bytes *are*, and under which rules. Written since v2.1.14;
     #: before that the constant existed and nothing recorded it, so a record gave
     #: no way to tell whether its digest covered entity bytes or a re-encoding of
@@ -2194,6 +2218,7 @@ class ManifestRecord:
             spot_synchronization_policy_fingerprint=(
                 self.spot_synchronization_policy_fingerprint
             ),
+            preflight_approval_hash=self.preflight_approval_hash,
         )
 
     @classmethod
@@ -2235,6 +2260,7 @@ class ManifestRecord:
             spot_synchronization_policy_fingerprint=(
                 record.spot_synchronization_policy_fingerprint
             ),
+            preflight_approval_hash=record.preflight_approval_hash,
         )
 
     def semantic_payload(self) -> dict[str, Any]:

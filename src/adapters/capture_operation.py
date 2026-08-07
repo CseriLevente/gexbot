@@ -46,7 +46,7 @@ __all__ = [
 #: Bumped when the *meaning* of an operation identity changes, so a stamp taken
 #: under older rules is refused rather than compared field by field against
 #: newer ones.
-CAPTURE_OPERATION_SCHEMA_VERSION = "capture-operation/2.1.10"
+CAPTURE_OPERATION_SCHEMA_VERSION = "capture-operation/2.1.19"
 
 
 class ValuationTimestampRule(str, Enum):
@@ -128,6 +128,14 @@ class CaptureOperationIdentity:
     open_interest_date_rule_fingerprint: str | None = None
     #: Digest of the independently observed contract universe, where one exists.
     expected_universe_fingerprint: str | None = None
+    #: The preflight approval a human gave for this operation's requests.
+    #: ``None`` for an operation opened without one -- a replay, a rebuild, or
+    #: any path that sends nothing.
+    #:
+    #: Inside the fingerprint, so every record stamped with the operation is
+    #: transitively bound to what was approved. A capture that claims one
+    #: approval and was opened under another is a different operation.
+    preflight_approval_hash: str | None = None
     parser_version: str = ""
     schema_version: str = CAPTURE_OPERATION_SCHEMA_VERSION
 
@@ -178,6 +186,7 @@ class CaptureOperationIdentity:
                 self.open_interest_date_rule_fingerprint
             ),
             "expected_universe_fingerprint": self.expected_universe_fingerprint,
+            "preflight_approval_hash": self.preflight_approval_hash,
             "parser_version": self.parser_version,
         }
 

@@ -345,7 +345,26 @@ calibrated trading parameters.
 ## What happens next
 
 Run the first raw-only ThetaData session during a valid US options-market
-session, on Python 3.12, with the shipped capture profile. That session is what
-turns the vendor's documented claims into observations — including whether the
-open interest it returns actually belongs to the session the document says it
-does.
+session, on Python 3.12, with the shipped capture profile.
+
+**Corrected in v2.1.19.** This section previously said the session "turns the
+vendor's documented claims into observations — including whether the open
+interest it returns actually belongs to the session the document says it does".
+The second half is wrong and worth being precise about.
+
+A first capture observes open-interest *values*, response timestamps and
+contract identities. It contains no vendor settlement-date field — no ThetaData
+snapshot endpoint has one, which is OD-26. So nothing in the captured bytes can
+confirm or contradict the claim that open interest reflects the previous
+trading day; the numbers look the same either way.
+
+The prior-session rule therefore stays classified as
+`AUTHORITATIVE_VENDOR_DOCUMENTATION` after the capture, exactly as before it.
+Upgrading it to `LIVE_COMPARISON` because a capture exists would be recording
+that we watched the vendor do something we did not watch. Confirming it needs
+an independent method — comparing successive sessions' figures against a
+separate source, or a vendor field that does not exist yet.
+
+What the session *does* settle: whether the five endpoints answer, what they
+actually return, whether the documented CSV columns are the real ones, and
+whether the contract listing's scope matches a filtered request.

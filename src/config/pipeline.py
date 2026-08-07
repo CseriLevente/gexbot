@@ -2553,6 +2553,7 @@ class ThetaDataResearchPipeline:
         universe_resolution: Any = None,
         declared_expected_universe: Any = None,
         settlement_rule: Any = None,
+        preflight_approval_hash: str | None = None,
         artifact_store: Any = None,
         universe_max_age: Any = None,
         pipeline_compatibility: Any = None,
@@ -2656,6 +2657,7 @@ class ThetaDataResearchPipeline:
             session_id=session_id,
             open_interest_as_of=open_interest_as_of,
             expected_universe=universe,
+            preflight_approval_hash=preflight_approval_hash,
             open_interest_date_rule_fingerprint=(
                 artifact.artifact_hash if artifact is not None else None
             ),
@@ -2707,6 +2709,11 @@ class ThetaDataResearchPipeline:
             spot_synchronization_policy_fingerprint=(
                 self.spot_synchronization_policy_fingerprint
             ),
+            # What a human approved for this session's requests. Stamped on
+            # every record, because the operation digest covers it and
+            # ``resolve_operation`` rebuilds that digest out of what the
+            # records carry.
+            preflight_approval_hash=preflight_approval_hash or "",
             # The artifacts themselves, carried on the session so that
             # ``fetch_chain(capture=session)`` needs no repetition of what the
             # session already knows, and so replay recovers the objects rather
@@ -3111,6 +3118,7 @@ class ThetaDataResearchPipeline:
         open_interest_as_of: date | None = None,
         expected_universe: Any = None,
         open_interest_date_rule_fingerprint: str | None = None,
+        preflight_approval_hash: str | None = None,
     ) -> Any:
         """Fix everything one capture operation decides, before it runs.
 
@@ -3153,6 +3161,7 @@ class ThetaDataResearchPipeline:
             expected_universe_fingerprint=(
                 expected_universe.artifact_hash if expected_universe else None
             ),
+            preflight_approval_hash=preflight_approval_hash,
             parser_version=PARSER_VERSION,
         )
 
@@ -3204,6 +3213,7 @@ class ThetaDataResearchPipeline:
                 "open_interest_date_rule_fingerprint"
             ],
             expected_universe_fingerprint=stamped["expected_universe_fingerprint"],
+            preflight_approval_hash=stamped.get("preflight_approval_hash") or None,
             parser_version=stamped["parser_version"],
         )
 

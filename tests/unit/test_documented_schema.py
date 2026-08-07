@@ -26,6 +26,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
+from tests.certification_fixtures import approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 INDEX = "/v3/index/snapshot/price"
@@ -309,6 +310,7 @@ def test_a_live_capture_outside_the_session_is_refused(tmp_path, moment, status)
             transport=None,
             as_of=moment,
             allow_unsettled_raw_only=True,
+            approved=approval_hash_for(CAPTURE_CONFIG, as_of=moment),
         )
     assert not (tmp_path / "capture").exists()
 
@@ -324,6 +326,7 @@ def test_the_override_is_recorded_everywhere_it_matters(tmp_path, capsys):
         transport=vendor_transport(),
         as_of=sunday,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=sunday),
         allow_out_of_session=True,
     )
     assert report["out_of_session_capture"] is True
@@ -387,6 +390,7 @@ def test_a_refused_contract_list_is_not_reported_as_observed(tmp_path):
         transport=transport,
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
         allow_out_of_session=True,
     )
     assert report["contract_list_evidence_state"] == "VENDOR_REFUSED"
@@ -419,6 +423,7 @@ def test_a_failed_evidence_endpoint_does_not_contradict_itself(tmp_path):
         transport=transport,
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
         allow_out_of_session=True,
     )
 
@@ -443,6 +448,7 @@ def test_the_summary_exposes_each_layer_separately(tmp_path):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
         allow_out_of_session=True,
     )
     for key in (
@@ -472,6 +478,7 @@ def test_every_raw_record_names_the_plan_it_was_captured_under(tmp_path):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
         allow_out_of_session=True,
     )
     plan_hash = report["request_plan"]["request_plan_hash"]
@@ -505,6 +512,7 @@ def test_a_record_captured_under_another_plan_does_not_verify(tmp_path):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
         allow_out_of_session=True,
     )
     store = FileRawStore(run_path(report, "raw_store_path"))

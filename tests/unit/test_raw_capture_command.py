@@ -37,6 +37,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
+from tests.certification_fixtures import approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -556,13 +557,20 @@ def test_two_runs_in_the_same_second_get_different_ids():
 
 def live_run(tmp_path, *, transport=None, **overrides):
     """A full run against the deterministic fake transport."""
-    from tests.certification_fixtures import AS_OF, vendor_transport
+    from tests.certification_fixtures import AS_OF, approval_hash_for, vendor_transport
 
+    moment = overrides.pop("as_of", AS_OF)
     return run_capture(
         CAPTURE_CONFIG,
         output=str(tmp_path / "capture"),
         transport=transport if transport is not None else vendor_transport(),
-        as_of=overrides.pop("as_of", AS_OF),
+        as_of=moment,
+        # The approval a dry run of this session would print. Passed rather
+        # than bypassed: since v2.1.19 an acquiring run needs one, and a test
+        # that skipped it would be exercising a path production does not have.
+        approved=overrides.pop(
+            "approved", approval_hash_for(CAPTURE_CONFIG, as_of=moment)
+        ),
         # The fixture session predates the pinned vendor document, so no
         # documentary settlement authority covers it and the run must say so.
         allow_unsettled_raw_only=overrides.pop("allow_unsettled_raw_only", True),
@@ -681,6 +689,7 @@ def failing_run(tmp_path):
             transport=transport,
             as_of=AS_OF,
             allow_unsettled_raw_only=True,
+            approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
         ),
         transport,
     )
@@ -778,6 +787,13 @@ def test_a_failed_run_returns_a_documented_nonzero_exit_code(tmp_path, capsys):
     def with_fake(config_path, **kwargs):
         return original(config_path, **{**kwargs, "transport": transport})
 
+    # No ``as_of``, so the run is for the current session and the approval has
+    # to be for that session too -- which is the whole point of tying one to
+    # the other.
+    from datetime import UTC, datetime
+
+    approval = approval_hash_for(CAPTURE_CONFIG, as_of=datetime.now(UTC))
+
     tool.run_capture = with_fake
     try:
         code = main(
@@ -787,6 +803,8 @@ def test_a_failed_run_returns_a_documented_nonzero_exit_code(tmp_path, capsys):
                 "--output",
                 str(destination),
                 "--execute-live",
+                "--approve",
+                approval,
             ]
         )
     finally:

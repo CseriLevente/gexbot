@@ -32,6 +32,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
+from tests.certification_fixtures import approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
@@ -156,6 +157,7 @@ def test_two_concurrent_runs_cannot_both_acquire_one_destination(tmp_path):
                 transport=vendor_transport(),
                 as_of=AS_OF,
                 allow_unsettled_raw_only=True,
+                approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
             )
         except CaptureRunError as error:
             with lock:
@@ -433,6 +435,7 @@ def test_a_refused_connection_run_reports_no_response(tmp_path):
         transport=_Refusing(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert report["run_state"] == RawCaptureRunState.FAILED_NO_RESPONSE.value
     assert report["http_attempts"]["attempt_count"] >= 1
@@ -486,6 +489,7 @@ def test_a_vendor_status_gets_its_own_classification(tmp_path, status, code, exi
         transport=_StatusTransport(status),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert report["error_code"] == code, report["error_code"]
     assert "INTERNAL_ERROR" not in report["error_code"]
@@ -515,6 +519,7 @@ def test_a_two_hundred_vendor_error_document_is_captured_then_reported(tmp_path)
         transport=_StatusTransport(200, b'{"error":"no data for that symbol"}'),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value
     assert report["parser_state"] == "PARSER_FAILED"
@@ -543,6 +548,7 @@ def test_a_two_hundred_malformed_csv_is_a_parser_finding_not_a_lost_capture(tmp_
         transport=_StatusTransport(200, b"<html><body>not csv</body></html>"),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     acquisition = report["raw_acquisition"]
     assert acquisition["missing_endpoints"] == []
@@ -562,6 +568,7 @@ def test_an_oversized_live_response_has_its_own_exit_code(tmp_path):
         transport=_StatusTransport(200, b"x" * (80 * 1024 * 1024)),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     from src.tools.capture_thetadata_once import _EXIT_FOR
 
@@ -639,6 +646,7 @@ def test_a_finalization_failure_still_closes_the_transport(tmp_path, monkeypatch
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert closed == [True]
     assert report["emergency"] is True
@@ -687,6 +695,7 @@ def test_an_emergency_summary_reports_the_state_the_evidence_supports(
         transport=_Refused(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert refused["emergency"] is True
     assert refused["attempt_count"] >= 1
@@ -700,6 +709,7 @@ def test_an_emergency_summary_reports_the_state_the_evidence_supports(
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert answered["emergency"] is True
     assert answered["records_known_in_memory"]
@@ -791,4 +801,5 @@ def live_run(tmp_path, *, destination=None, transport=None):
         transport=transport if transport is not None else vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )

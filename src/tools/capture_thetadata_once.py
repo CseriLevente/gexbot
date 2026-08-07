@@ -47,6 +47,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from src.adapters.thetadata.preflight_approval import approval_for
 from src.adapters.thetadata.raw_acquisition import ParserStatus
 from src.gex.capture_window import assess_capture_window
 
@@ -420,11 +421,21 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
     # run will send to. A local Theta Terminal is a different origin from a
     # direct vendor call, and the shipped profile is the local one.
     live_origin = _live_capture_origin(settings["base_url"])
+    approval = approval_for(pipeline=pipeline, config=loaded.thetadata, moment=as_of)
     return {
         "schema_version": RAW_CAPTURE_RUN_SCHEMA_VERSION,
         "mode": "DRY_RUN",
         "run_state": RawCaptureRunState.PLANNED.value,
         "config_path": str(pathlib.Path(config_path).resolve()),
+        # **What the live run will be held to.** Printed first because it is
+        # the thing the operator carries forward: everything else on this
+        # report explains it, and `--execute-live` will not start without it.
+        #
+        # An approval is about one session's requests. The contract listing
+        # carries the market session date, so this stops matching at the next
+        # session boundary -- rerun the dry run during the session you are
+        # about to capture.
+        "preflight_approval": approval.as_dict(),
         "resolved_configuration": pipeline.as_dict(),
         "effective_transport": settings,
         # **The actual requests, before --execute-live.** v2.1.15 printed a
@@ -573,6 +584,11 @@ class _Preflight:
     #: authority. Recorded, like the session override, because a capture taken
     #: this way is permanently unable to become a trusted GEX.
     unsettled_allowed: bool = False
+    #: The approval this run was checked against. Carried rather than
+    #: recomputed downstream: a second derivation could differ from the one the
+    #: refusal was decided on, which would make the stamped hash a claim about
+    #: a check that did not happen.
+    approval: Any = None
 
 
 def _documentation_section(pipeline: Any, settlement: Any) -> dict[str, Any]:
@@ -642,6 +658,7 @@ def _preflight(
     live: bool,
     allow_out_of_session: bool = False,
     allow_unsettled_raw_only: bool = False,
+    approved: str = "",
 ) -> _Preflight:
     """Phase A. Every way this run can be refused, checked before it claims.
 
@@ -711,13 +728,36 @@ def _preflight(
     if live and not window.inside_capture_window and not allow_out_of_session:
         raise CaptureRunError(window.refusal)
 
-    # **Does this run know what its open interest will mean?** Checked before
-    # the destination is claimed, like every other refusal: the vendor's own
+    # **Is this the run the operator approved?** Recomputed from the same
+    # inputs the dry run used, and compared against what they pasted.
+    #
+    # Here rather than later for the same reason every other refusal is here:
+    # a run that never starts leaves nothing behind. This is before the
+    # destination is claimed and long before a transport exists, so a stale
+    # approval costs a message rather than a directory or a paid request.
+    #
+    # Checked for **every** acquiring run, not only when the transport will be
+    # the real one. ``live`` is false whenever a caller injects a transport, so
+    # gating on it would put the authorization check one keyword argument away
+    # from being skipped -- and the path the tests exercise would stop being
+    # the path production takes, which is how a gate comes to be believed in
+    # rather than relied on. ``plan_capture`` asks for nothing: a dry run is
+    # what *produces* an approval.
+    approval = approval_for(pipeline=pipeline, config=loaded.thetadata, moment=moment)
+    _require_approval(
+        approval,
+        approved,
+        pipeline=pipeline,
+        config=loaded.thetadata,
+        moment=moment,
+    )
+
+    # **Does this run know what its open interest will mean?** The vendor's own
     # OpenAPI description says open interest "reflects the open interest at the
     # of the previous trading day", and the artifact derived from it is what
     # turns that sentence into a date. A run that cannot produce one is still
-    # allowed to collect bytes -- but only if the operator says so, because
-    # the resulting capture can never become a trusted GEX.
+    # allowed to collect bytes -- but only if the operator says so, because the
+    # resulting capture can never become a trusted GEX.
     settlement, drift, settlement_failure = _settlement_for_run(pipeline, moment=moment)
     if drift:
         raise CaptureRunError(
@@ -759,6 +799,84 @@ def _preflight(
         settlement_rule=settlement,
         documentation=_documentation_section(pipeline, settlement),
         unsettled_allowed=allow_unsettled_raw_only,
+        approval=approval,
+    )
+
+
+#: How far back to look for the session an unmatched approval was taken in.
+#:
+#: Seven days covers a long weekend plus a holiday, which is the realistic gap
+#: between "I approved this" and "I am running it". Beyond that the operator is
+#: not resuming an interrupted session, and saying so vaguely would be worse
+#: than saying nothing.
+_APPROVAL_LOOKBACK_DAYS = 7
+
+
+def _require_approval(
+    approval: Any, approved: str, *, pipeline: Any, config: Any, moment: datetime
+) -> None:
+    """Refuse a live run the operator has not approved *this* form of.
+
+    The remedy for every refusal is the same and is cheap: rerun the dry run,
+    read what changed, approve the new hash. There is deliberately no flag that
+    skips this -- one would restore exactly the gap the approval exists to
+    close, and would be reached for precisely when somebody is in a hurry
+    during a paid session.
+    """
+    pasted = str(approved or "").strip()
+    if not pasted:
+        raise CaptureRunError(
+            "a live capture requires --approve with the approval hash printed "
+            "by a dry run of this session. Run without --execute-live, read the "
+            "planned requests, then pass what it printed:\n"
+            f"    --approve {approval.approval_hash}"
+        )
+    if approval.matches(pasted):
+        return
+    raise CaptureRunError(
+        f"--approve {pasted} does not authorise this run. "
+        f"{_approval_difference(approval, pasted, pipeline=pipeline, config=config, moment=moment)}\n"
+        f"The approval for what would be sent now is {approval.approval_hash}. "
+        "Rerun the dry run, check the planned requests, and approve that."
+    )
+
+
+def _approval_difference(
+    approval: Any, pasted: str, *, pipeline: Any, config: Any, moment: datetime
+) -> str:
+    """Name what moved, when that can be established rather than guessed.
+
+    A hash cannot be inverted, so in general the old values are not
+    recoverable and the honest answer is to say which fields the approval
+    covers. One case *is* recoverable and is the one that will actually happen:
+    an approval taken in an earlier session. Re-deriving this same artifact for
+    each of the last few sessions costs nothing and turns "your hash is wrong"
+    into "it is Monday now", which is a different message to receive at 09:31
+    with a paid subscription running.
+    """
+    from datetime import timedelta
+
+    for days in range(1, _APPROVAL_LOOKBACK_DAYS + 1):
+        earlier = moment - timedelta(days=days)
+        try:
+            candidate = approval_for(
+                pipeline=pipeline, config=config, moment=earlier
+            )
+        except Exception:  # pragma: no cover - a probe must not mask the refusal
+            break
+        if candidate.matches(pasted):
+            changed = approval.differences_from(candidate)
+            return (
+                f"{changed[0] if changed else 'approval changed'}: that approval "
+                f"was taken for the {candidate.market_session_date.isoformat()} "
+                f"session and this run is for "
+                f"{approval.market_session_date.isoformat()}."
+            )
+    return (
+        "The approval covers the market session date, the request plan, the "
+        "capture plan, the pipeline, the documentation bundle, the instrument "
+        "mapping, the subscription tier and the effective transport settings; "
+        "one of them differs from when that hash was printed."
     )
 
 
@@ -961,6 +1079,7 @@ def run_capture(
     as_of: datetime | None = None,
     allow_out_of_session: bool = False,
     allow_unsettled_raw_only: bool = False,
+    approved: str = "",
 ) -> dict[str, Any]:
     """One capture operation, preserved, finalized and verified.
 
@@ -996,6 +1115,7 @@ def run_capture(
         live=transport is None,
         allow_out_of_session=allow_out_of_session,
         allow_unsettled_raw_only=allow_unsettled_raw_only,
+        approved=approved,
     )
     destination = checked.destination
     loaded = checked.loaded
@@ -1066,6 +1186,9 @@ def run_capture(
         )
     run.extra["effective_raw_store_path"] = str(raw_root)
     run.extra["vendor_documentation"] = checked.documentation
+    run.extra["preflight_approval"] = (
+        checked.approval.as_dict() if checked.approval is not None else {}
+    )
     run.extra["unsettled_raw_only_override"] = bool(
         checked.unsettled_allowed and checked.settlement_rule is None
     )
@@ -1530,6 +1653,9 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         # vendor's API it was collected against -- and re-fetch the URL to see
         # whether the ground has moved.
         "vendor_documentation": run.extra.get("vendor_documentation", {}),
+        # The approval this capture was taken under, so a reader who finds the
+        # directory later can tell which reviewed plan produced it.
+        "preflight_approval": run.extra.get("preflight_approval", {}),
         "unsettled_raw_only_override": run.extra.get(
             "unsettled_raw_only_override", False
         ),
@@ -1739,6 +1865,11 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
             # conventions, and which set it was is not recoverable afterwards
             # from the bytes -- the document can be rewritten at any time.
             "vendor_documentation": run.extra.get("vendor_documentation", {}),
+            # **What the operator approved, before the first request.** The
+            # run intent is written before anything is sent, so this is on
+            # disk at the moment the approval was still the only authority
+            # the run had.
+            "preflight_approval": run.extra.get("preflight_approval", {}),
             "unsettled_raw_only_override": run.extra.get(
                 "unsettled_raw_only_override", False
             ),
@@ -1827,6 +1958,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--approve",
+        default="",
+        metavar="APPROVAL_HASH",
+        help=(
+            "the approval_hash printed by a dry run of this session. Required "
+            "with --execute-live. It covers the market session date, the "
+            "request plan, the capture plan, the pipeline, the documentation "
+            "bundle, the instrument mapping, the tier and the effective "
+            "transport settings -- so a plan that changed after you read it "
+            "will not be sent. There is no flag to skip this; rerun the dry "
+            "run and approve the new hash."
+        ),
+    )
+    parser.add_argument(
         "--allow-unsettled-raw-only",
         action="store_true",
         help=(
@@ -1903,6 +2048,7 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output,
             allow_out_of_session=args.allow_out_of_session,
             allow_unsettled_raw_only=args.allow_unsettled_raw_only,
+            approved=args.approve,
         )
     except CaptureRunError as error:
         return _fail(str(error), ExitCode.REFUSED)

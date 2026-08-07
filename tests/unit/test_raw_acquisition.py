@@ -26,6 +26,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
+from tests.certification_fixtures import approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -72,6 +73,7 @@ def test_an_index_schema_error_does_not_prevent_the_other_endpoints(tmp_path):
         ),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
 
     acquisition = report["raw_acquisition"]
@@ -115,6 +117,7 @@ def test_a_parser_failure_cannot_downgrade_a_complete_raw_acquisition(tmp_path):
         ),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
 
     assert report["run_state"] == RawCaptureRunState.COMPLETED_RAW_VERIFIED.value
@@ -637,6 +640,7 @@ def _live_run(destination, *, expect_report=True):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
 
 
@@ -663,6 +667,7 @@ def _capture_with_attempts(tmp_path, *, name="capture"):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     return report, run_path(report, "attempt_store_path")
 

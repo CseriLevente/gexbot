@@ -24,6 +24,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
+from tests.certification_fixtures import approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -259,6 +260,7 @@ def test_a_malformed_contract_list_does_not_stop_the_other_endpoints(tmp_path):
         transport=transport,
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     acquisition = report["raw_acquisition"]
     assert set(acquisition["acquired_endpoints"]) == set(
@@ -296,6 +298,7 @@ def test_a_good_contract_list_response_grants_no_coverage(tmp_path):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     assert CONTRACT_LIST in report["raw_acquisition"]["acquired_endpoints"]
     # Derived since v2.1.17: bytes arrived and they parsed, which is the
@@ -413,6 +416,7 @@ def test_the_live_run_records_the_plan_it_was_authorised_against(tmp_path):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     live = report["request_plan"]
     assert live["request_plan_hash"] == report["raw_acquisition"]["request_plan_hash"]
@@ -466,6 +470,7 @@ def test_a_failed_attempt_receipt_prevents_a_verified_run(tmp_path, monkeypatch)
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
 
     assert report["attempt_evidence"]["ok"] is False
@@ -494,6 +499,7 @@ def test_a_fresh_log_cannot_verify_a_directory_it_never_read(tmp_path):
         transport=vendor_transport(),
         as_of=AS_OF,
         allow_unsettled_raw_only=True,
+        approved=approval_hash_for(CAPTURE_CONFIG, as_of=AS_OF),
     )
     root = run_path(report, "attempt_store_path")
 

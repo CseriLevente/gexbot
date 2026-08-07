@@ -4368,6 +4368,63 @@ class ThetaDataResearchPipeline:
 
         return tuple(blockers)
 
+    def _require_documentation_still_follows_from_its_bytes(self) -> None:
+        """Re-establish that this session's readings follow from its document.
+
+        A no-op for a session carrying no documentary evidence: there is
+        nothing to re-derive, and that is a legitimate state rather than a
+        failure.
+
+        **This rereads and rehashes the document; it does not re-run the
+        extractions, and that is sufficient rather than a shortcut.** The
+        argument, because it is the kind of thing a later reader would either
+        "optimise" away or restore without knowing why:
+
+        * an extraction is a pure function of the document bytes and a spec;
+        * a bundle is frozen, so its specs and values cannot change after it
+          is built;
+        * since v2.1.19 a bundle can only reach a pipeline through the loader
+          -- ``_rederived_documentation`` rebuilds a caller's object from the
+          bytes and keeps the rebuilt one -- so the specs in any bundle held
+          here are the specs those bytes were actually read under.
+
+        The only input that can change between construction and now is the
+        file. So rehashing it establishes exactly what re-running the
+        extractions would establish, and re-running them costs 326ms against
+        0.8ms for the hash. ``validate_integrity`` runs before every fetch,
+        every calculation and every readiness assessment; a third of a second
+        each time would be paid on every one of them to re-derive values that
+        cannot have moved.
+
+        Local bytes only. Rereading a pinned file is not a network request, and
+        an integrity check that reached the vendor would make every calculation
+        depend on the vendor being up.
+        """
+        bundle = self.documentation_bundle
+        if bundle is None:
+            return
+        root = str(getattr(bundle, "verified_root", "") or "").strip()
+        if not root:
+            raise PipelineConsistencyError(
+                "this session's documentation bundle names no verified root, "
+                "so it cannot be re-derived from anything"
+            )
+        import pathlib
+
+        from src.adapters.thetadata.vendor_documentation import (
+            VendorDocumentationError,
+        )
+
+        try:
+            bundle.document.read_bytes(pathlib.Path(root))
+        except (VendorDocumentationError, OSError) as error:
+            raise PipelineConsistencyError(
+                f"the documentation this session was opened under no longer "
+                f"follows from the bytes under {root}: {error}. Every dimension "
+                "it settled was settled by a document that has since changed or "
+                "gone."
+            ) from error
+
     def validate_integrity(self) -> None:
         """Recompute every derived report and refuse if one has been replaced.
 
@@ -4378,6 +4435,18 @@ class ThetaDataResearchPipeline:
         """
         from src.adapters.thetadata.capabilities import assess_tier
         from src.adapters.thetadata.endpoints import Tier
+
+        # **The document first.** Recomputing pricing compatibility from the
+        # bundle proves the report follows from the bundle; it proves nothing
+        # about whether the bundle follows from the document. Until v2.1.19 a
+        # forged bundle therefore passed this check with the forgery intact --
+        # the arithmetic was consistent all the way down to a reading nobody
+        # had taken.
+        #
+        # Local bytes only. Re-reading the pinned file is not a network request,
+        # and an integrity check that reached the vendor would make every
+        # calculation depend on the vendor being up.
+        self._require_documentation_still_follows_from_its_bytes()
 
         # Recomputed under **this session's** documentation, not under whatever
         # the production bundle happens to be. A session opened with no
@@ -4624,11 +4693,33 @@ def _resolve_documentation(
 ) -> tuple[Any, DocumentedVendorConventions | None, str]:
     """Turn the ``documentation_bundle`` argument into what the session needs.
 
-    Returns ``(bundle, conventions, failure)``. A failure is *reported*, not
-    raised: a missing or tampered bundle must not stop raw bytes from being
-    stored, and it must stop them from being trusted. Which of those two applies
-    is the operator's decision to make with the flag, not this constructor's to
-    make by throwing.
+    Returns ``(bundle, conventions, failure)``.
+
+    Two failure modes, treated differently on purpose.
+
+    **A checkout that cannot produce the production document** is *reported*.
+    A missing or unreadable file must not stop raw bytes from being stored, and
+    it must stop them from being trusted; which of those applies is the
+    operator's decision to make with ``--allow-unsettled-raw-only``, not this
+    constructor's to make by throwing.
+
+    **A bundle a caller handed in that does not follow from its bytes** is
+    *raised*. That is not a checkout in a state; it is an object asserting
+    evidence it does not have, and there is no operator decision to defer to.
+    ``VendorDocumentationBundle`` is a public dataclass, so until v2.1.19 this
+    constructed cleanly and ``validate_integrity`` then recomputed pricing
+    compatibility from it::
+
+        VendorDocumentationBundle(
+            document=real_pinned_document,          # real bytes, real digest
+            extractions=(fabricated_extraction,),   # invented path and value
+            verified_root=real_document_root,
+        )
+
+    A bundle is a report. The loader is the authority. So the caller's object is
+    re-derived from the source bytes and *the re-derived one is kept* -- not the
+    caller's, even when the two agree, because keeping the caller's would leave
+    the pipeline holding an object whose provenance is "somebody passed it in".
     """
     if requested is None:
         return None, None, ""
@@ -4643,7 +4734,61 @@ def _resolve_documentation(
             requested = production_bundle()
         except (VendorDocumentationError, OSError) as error:
             return None, None, str(error)
+    else:
+        requested = _rederived_documentation(requested)
     return requested, DocumentedVendorConventions.from_bundle(requested), ""
+
+
+def _rederived_documentation(bundle: Any) -> Any:
+    """Rebuild a caller's bundle from the bytes it names, or refuse it.
+
+    Deliberately not an ``isinstance`` check. The type says which fields an
+    object has; it says nothing about whether the values in them were read out
+    of a document, and a forged bundle is the correct type throughout.
+    """
+    from src.adapters.thetadata.openapi_evidence import (
+        ExtractionSpec,
+        load_vendor_documentation_bundle,
+    )
+    from src.adapters.thetadata.vendor_documentation import VendorDocumentationError
+
+    root = str(getattr(bundle, "verified_root", "") or "").strip()
+    if not root:
+        raise PipelineConsistencyError(
+            "the supplied documentation bundle names no verified root, so there "
+            "is nothing to re-derive it from. A bundle carrying no path to its "
+            "own bytes is a set of claims about a document nobody can open."
+        )
+
+    try:
+        rebuilt = load_vendor_documentation_bundle(
+            root=root,
+            document=bundle.document,
+            specs=tuple(
+                ExtractionSpec(
+                    rule=extraction.rule,
+                    yaml_path=extraction.yaml_path,
+                    expected_source_fragment=extraction.expected_source_fragment,
+                    normalizer=extraction.normalizer,
+                )
+                for extraction in bundle.extractions
+            ),
+        )
+    except (VendorDocumentationError, OSError, AttributeError, TypeError) as error:
+        raise PipelineConsistencyError(
+            f"the supplied documentation bundle does not follow from the bytes "
+            f"under {root}: {error}"
+        ) from error
+
+    if rebuilt.bundle_hash != bundle.bundle_hash:
+        raise PipelineConsistencyError(
+            f"the supplied documentation bundle hashes to "
+            f"{bundle.bundle_hash}; re-deriving it from the document under "
+            f"{root} produces {rebuilt.bundle_hash}. The values it carries are "
+            "not the values those bytes yield, so it is a claim about the "
+            "document rather than a reading of it."
+        )
+    return rebuilt
 
 
 def _documented_time_floor(

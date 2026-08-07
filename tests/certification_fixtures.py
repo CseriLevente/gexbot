@@ -165,6 +165,29 @@ def vendor_transport(**variants: bool) -> FakeTransport:
     return transport
 
 
+def approval_hash_for(config_path: str, *, as_of: datetime) -> str:
+    """The approval a dry run of this profile at this moment would print.
+
+    Derived the same way the operator's dry run derives it, so a test that
+    passes this is exercising the real authorization path rather than a
+    weakened one. Since v2.1.19 ``run_capture`` requires an approval for every
+    acquiring run, including runs driven by the fake transport: gating it on
+    "will this contact the vendor" would leave the check one keyword argument
+    away from being skipped.
+    """
+    from src.adapters.thetadata.preflight_approval import approval_for
+    from src.config.pipeline import ThetaDataResearchPipeline
+    from src.config.schema import load_config
+
+    loaded = load_config(config_path)
+    pipeline = ThetaDataResearchPipeline.from_loaded_config(
+        loaded, transport=FakeTransport()
+    )
+    return approval_for(
+        pipeline=pipeline, config=loaded.thetadata, moment=as_of
+    ).approval_hash
+
+
 def default_store_for(settings: dict[str, Any]) -> Any:
     """The store a fixture pipeline captures into when no session is opened.
 

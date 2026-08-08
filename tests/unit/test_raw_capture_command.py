@@ -37,7 +37,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import approval_hash_for
+from tests.certification_fixtures import DOCUMENTED_SESSION, approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -240,7 +240,9 @@ def test_the_effective_transport_settings_are_reported_without_secrets(
 ):
     monkeypatch.setenv("THETADATA_USERNAME", "an-operator")
     monkeypatch.setenv("THETADATA_PASSWORD", "not-in-any-report")
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     settings = report["effective_transport"]
     for key in (
         "base_url",
@@ -302,7 +304,9 @@ def test_the_shipped_profile_is_a_local_terminal_capture():
 
 
 def test_the_dry_run_reports_the_origin_a_live_run_would_stamp(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     assert report["expected_capture_origin"] == "LOCAL_TERMINAL_CAPTURE"
 
 
@@ -321,7 +325,9 @@ def test_a_dry_run_makes_no_network_call(tmp_path):
     that *cannot* send, so "no request was made" is a property of the object."""
     from src.tools.capture_thetadata_once import _NoTransport
 
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     assert report["mode"] == "DRY_RUN"
     assert report["would_place_orders"] is False
     assert report["would_compute_trusted_gex"] is False
@@ -338,7 +344,9 @@ def test_a_dry_run_creates_no_files_or_directories(tmp_path):
     created the directory that the following real run then refused as non-empty.
     """
     destination = tmp_path / "capture"
-    report = plan_capture(CAPTURE_CONFIG, output=str(destination))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(destination), as_of=DOCUMENTED_SESSION
+    )
     assert report["wrote_files"] is False
     assert not destination.exists()
     assert sorted(p.name for p in tmp_path.iterdir()) == []
@@ -414,7 +422,9 @@ def test_an_existing_empty_destination_is_refused_by_both_modes(tmp_path):
     destination.mkdir(parents=True)
     assert list(destination.iterdir()) == []
 
-    planned = plan_capture(CAPTURE_CONFIG, output=str(destination))
+    planned = plan_capture(
+        CAPTURE_CONFIG, output=str(destination), as_of=DOCUMENTED_SESSION
+    )
     assert planned["destination_refusals"], "the dry run accepted it"
     assert "already exists and is empty" in " ".join(planned["destination_refusals"])
 
@@ -423,9 +433,9 @@ def test_an_existing_empty_destination_is_refused_by_both_modes(tmp_path):
 
     # The parent existing is fine, which is the normal case.
     assert (
-        plan_capture(CAPTURE_CONFIG, output=str(parent / "tomorrow"))[
-            "destination_refusals"
-        ]
+        plan_capture(
+            CAPTURE_CONFIG, output=str(parent / "tomorrow"), as_of=DOCUMENTED_SESSION
+        )["destination_refusals"]
         == []
     )
 
@@ -784,15 +794,23 @@ def test_a_failed_run_returns_a_documented_nonzero_exit_code(tmp_path, capsys):
     original = tool.run_capture
     destination = tmp_path / "capture"
 
+    # **The instant is injected here, through the same seam the transport is.**
+    #
+    # ``main()`` takes no ``--as-of`` and should not: the operator does not get
+    # to choose which session they are capturing. But this test is about an
+    # exit code, not about the calendar, and reading the wall clock made it
+    # fail on Saturday 2026-08-08 -- the market-session guard refused the run
+    # (correctly) and it exited REFUSED/2 instead of RETRY_EXHAUSTED/7.
+    #
+    # The approval is derived for the same fixed session, because the two are
+    # tied together on purpose.
     def with_fake(config_path, **kwargs):
-        return original(config_path, **{**kwargs, "transport": transport})
+        return original(
+            config_path,
+            **{**kwargs, "transport": transport, "as_of": DOCUMENTED_SESSION},
+        )
 
-    # No ``as_of``, so the run is for the current session and the approval has
-    # to be for that session too -- which is the whole point of tying one to
-    # the other.
-    from datetime import UTC, datetime
-
-    approval = approval_hash_for(CAPTURE_CONFIG, as_of=datetime.now(UTC))
+    approval = approval_hash_for(CAPTURE_CONFIG, as_of=DOCUMENTED_SESSION)
 
     tool.run_capture = with_fake
     try:

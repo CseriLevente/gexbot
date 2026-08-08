@@ -32,7 +32,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import approval_hash_for
+from tests.certification_fixtures import DOCUMENTED_SESSION, approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
@@ -70,7 +70,9 @@ def test_a_dry_run_modifies_nothing_in_the_repository(tmp_path):
     ``artifacts/raw`` and ``artifacts/raw.health`` in the working tree.
     """
     before = repository_tree()
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     after = repository_tree()
 
     assert report["wrote_files"] is False
@@ -80,7 +82,7 @@ def test_a_dry_run_modifies_nothing_in_the_repository(tmp_path):
 
 def test_a_dry_run_modifies_nothing_at_the_requested_destination(tmp_path):
     destination = tmp_path / "capture"
-    plan_capture(CAPTURE_CONFIG, output=str(destination))
+    plan_capture(CAPTURE_CONFIG, output=str(destination), as_of=DOCUMENTED_SESSION)
     assert not destination.exists()
     assert list(tmp_path.iterdir()) == []
 

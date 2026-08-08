@@ -2638,14 +2638,6 @@ class ThetaDataResearchPipeline:
         # dataclass can be replaced after construction.
         self.require_documentation_authority()
 
-        # **The strong check, not the cheap one.** Opening a session stamps a
-        # settlement rule and a documentation fingerprint onto every record it
-        # will write, so this is where a forged bundle would acquire authority
-        # over bytes. Re-derived from the pinned document rather than trusted
-        # because ``from_config`` once produced this object -- a frozen
-        # dataclass can be replaced after construction.
-        self.require_documentation_authority()
-
         artifact = _settlement_artifact(settlement_rule)
         open_interest_as_of = (
             artifact.resolved_settlement_date if artifact is not None else None
@@ -3706,10 +3698,6 @@ class ThetaDataResearchPipeline:
         from src.adapters.certification import build_verified_calculation_context
 
         self.validate_integrity()
-        # A trusted number rests on the documented rate units, the
-        # documented time floor and the documented settlement session.
-        # Re-derive all three from the bytes before producing one.
-        self.require_documentation_authority()
         # A trusted number rests on the documented rate units, the
         # documented time floor and the documented settlement session.
         # Re-derive all three from the bytes before producing one.

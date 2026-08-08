@@ -26,7 +26,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import approval_hash_for
+from tests.certification_fixtures import DOCUMENTED_SESSION, approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 INDEX = "/v3/index/snapshot/price"
@@ -186,7 +186,9 @@ def test_a_value_tier_index_profile_is_refused_at_plan_derivation():
 
 
 def test_the_shipped_profile_is_still_ready_for_raw_capture(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     assert report["capture_readiness"] == "READY_FOR_RAW_CAPTURE_ONLY"
     assert report["destination_refusals"] == []
 
@@ -248,7 +250,9 @@ def test_undocumented_pricing_dimensions_remain_unknown(tmp_path, dimension):
     the pinned document settles both. These two are still here because it does
     not settle them, and no amount of having *a* document changes that.
     """
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     blockers = " ".join(report["calculation_blockers"])
     assert dimension in blockers, blockers
 
@@ -256,7 +260,9 @@ def test_undocumented_pricing_dimensions_remain_unknown(tmp_path, dimension):
 @pytest.mark.parametrize("dimension", ["RATE_UNITS", "MINIMUM_TIME_FLOOR"])
 def test_documented_pricing_dimensions_no_longer_block(tmp_path, dimension):
     """The two the document settles stop blocking a trusted calculation."""
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     blockers = " ".join(report["calculation_blockers"])
     assert dimension not in blockers, blockers
 
@@ -339,7 +345,9 @@ def test_the_override_is_recorded_everywhere_it_matters(tmp_path, capsys):
 
 
 def test_the_dry_run_prints_the_market_clock(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     for key in (
         "market_time_et",
         "market_session_date",

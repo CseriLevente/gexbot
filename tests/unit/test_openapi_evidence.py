@@ -33,6 +33,7 @@ from src.adapters.thetadata.openapi_evidence import (
     verified_settlement_artifact,
 )
 from src.adapters.thetadata.vendor_documentation import DocumentedRule
+from tests.certification_fixtures import DOCUMENTED_SESSION
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -268,7 +269,9 @@ def test_the_dry_run_reports_an_established_settlement_date(tmp_path):
     """The operator's own report, not a unit-level construction."""
     from src.tools.capture_thetadata_once import plan_capture
 
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     documentation = report["vendor_documentation"]
 
     assert documentation["documentation_available"] is True
@@ -314,7 +317,9 @@ def test_the_dry_run_reports_exactly_six_remaining_unknowns(tmp_path):
     """
     from src.tools.capture_thetadata_once import plan_capture
 
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     remaining = report["vendor_documentation"]["remaining_documentation_unknowns"]
 
     assert sorted(remaining) == [

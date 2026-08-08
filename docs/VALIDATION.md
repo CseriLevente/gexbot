@@ -246,7 +246,7 @@ They move independently, and conflating them is how a change hides.
 | Universe-documentation schema | `universe-documentation/2.1.12` | `src/adapters/universe_evidence.py` | what a universe document has to say changes |
 | Universe-extraction schema | `universe-extraction/2.1.11` | `src/adapters/universe_evidence.py` | what a reading of a document records changes |
 | Capture-verification receipt | `capture-verification/2.1.11` | `src/adapters/universe_resolvers.py` | what a verification receipt has to carry changes |
-| Operator-report schema | `raw-capture-run/2.1.20` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
+| Operator-report schema | `raw-capture-run/2.1.21` | `src/tools/capture_thetadata_once.py` | the shape of the capture report changes |
 | Run-intent schema | `raw-capture-intent/2.1.19` | `src/tools/capture_thetadata_once.py` | what a run states before its first request changes |
 | HTTP-attempt schema | `http-attempt/2.1.17` | `src/adapters/http_attempts.py` | what is recorded about one request attempt changes |
 | Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |

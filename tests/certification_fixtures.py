@@ -39,6 +39,58 @@ from tests.pricing_evidence import resolved_settings
 AS_OF = eastern(2026, 3, 17, 11, 0)
 CAPTURED_AT = datetime(2026, 3, 17, 15, 0, tzinfo=UTC)
 
+# =============================================================================
+# Fixed instants. **No test may decide a market question from the wall clock.**
+# =============================================================================
+#
+# v2.1.20's suite called the dry run with no instant, so it planned for
+# whichever day CI happened to run. Three tests then asserted that the resulting
+# New York date was a trading session, and on Saturday 2026-08-08 they failed
+# while production was behaving exactly as designed: Saturday is not a session.
+#
+# A test that fails on a Saturday is not a test of a market rule. It is a test
+# of the release schedule.
+
+#: A regular session **the pinned documentation rule covers**. Friday.
+#:
+#: Two conditions, and both matter. It has to be a trading session, or the
+#: capture window is shut; and it has to fall on or after the day the OpenAPI
+#: document was retrieved (2026-08-06), or the settlement rule does not reach it
+#: and the evidence reads ``UNESTABLISHED``. ``AS_OF`` satisfies the first and
+#: not the second, which is exactly why the dry-run tests need their own.
+DOCUMENTED_SESSION = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)
+
+#: A Saturday, 01:00 in New York. Not a session in any zone.
+#:
+#: The day the v2.1.20 suite actually broke on. Kept as a fixture so the
+#: behaviour that exposed the defect is covered every day of the week rather
+#: than one day in seven.
+#:
+#: 05:00 UTC rather than something more natural like midday, because a fixed
+#: instant must also be a *past* one: the readiness probe builds a hypothetical
+#: spot provenance stamped at ``as_of``, and provenance refuses a print from
+#: the future -- correctly, since a quote that has not happened cannot have
+#: been read. 15:00 UTC on this date was four hours ahead of the clock on the
+#: day this was written, so it would have passed tomorrow and failed today,
+#: which is the same defect wearing different trousers.
+NON_TRADING_SATURDAY = datetime(2026, 8, 8, 5, 0, tzinfo=UTC)
+
+#: The session Saturday defers to.
+SESSION_AFTER_SATURDAY = date(2026, 8, 10)
+
+#: **UTC says Saturday the 8th. New York says Friday the 7th.**
+#:
+#: 02:00 UTC is 22:00 the previous evening in New York. Every date this
+#: repository derives is the *market's*, so this instant belongs to Friday's
+#: session -- after the close, but Friday's. Reading ``as_of.date()`` anywhere
+#: would answer Saturday, and the contract-list request would ask the vendor
+#: for a day the market was shut.
+UTC_NEW_YORK_BOUNDARY = datetime(2026, 8, 8, 2, 0, tzinfo=UTC)
+
+#: What that instant means in New York.
+BOUNDARY_NEW_YORK_SESSION = date(2026, 8, 7)
+
+
 #: Raw capture is mandatory for capture readiness (v2.1.4 §6), and a pipeline
 #: built from these settings writes real files when it fetches.
 #:

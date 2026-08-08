@@ -24,7 +24,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import approval_hash_for
+from tests.certification_fixtures import DOCUMENTED_SESSION, approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -313,7 +313,9 @@ def test_a_good_contract_list_response_grants_no_coverage(tmp_path):
     # A complete raw capture, including the listing, and readiness has not
     # moved: the dataset blockers are the same ones, and coverage is still an
     # open question. Capturing a list is not proving a universe.
-    planned = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "planned"))
+    planned = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "planned"), as_of=DOCUMENTED_SESSION
+    )
     assert planned["capture_readiness"] == "READY_FOR_RAW_CAPTURE_ONLY"
     assert planned["actual_analytical_blockers"], "coverage is still an open question"
     assert any(
@@ -335,7 +337,9 @@ def test_a_good_contract_list_response_grants_no_coverage(tmp_path):
 
 def test_the_dry_run_reveals_every_request(tmp_path):
     """The named regression: v2.1.15 printed a count of endpoints and a tier."""
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     planned = report["planned_requests"]
 
     by_endpoint = {
@@ -363,7 +367,9 @@ def test_the_dry_run_reveals_every_request(tmp_path):
 
 
 def test_planned_parameters_are_deterministically_sorted(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     for entry in report["planned_requests"]["requests"]:
         names = [name for name, _ in entry["canonical_query_parameters"]]
         assert names == sorted(names), entry["endpoint"]
@@ -373,7 +379,9 @@ def test_planned_parameters_are_deterministically_sorted(tmp_path):
 
     # Two derivations of one configuration agree, which is what makes the hash
     # comparable between the dry run and the live run.
-    again = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "other"))
+    again = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "other"), as_of=DOCUMENTED_SESSION
+    )
     assert (
         again["planned_requests"]["request_plan_hash"]
         == report["planned_requests"]["request_plan_hash"]
@@ -383,7 +391,9 @@ def test_planned_parameters_are_deterministically_sorted(tmp_path):
 def test_no_secret_reaches_the_request_plan(tmp_path, monkeypatch):
     monkeypatch.setenv("THETADATA_USERNAME", "an-operator")
     monkeypatch.setenv("THETADATA_PASSWORD", "not-in-any-report")
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     rendered = json.dumps(report["planned_requests"])
 
     assert "not-in-any-report" not in rendered
@@ -410,7 +420,9 @@ def test_a_request_that_differs_from_the_plan_is_refused():
 def test_the_live_run_records_the_plan_it_was_authorised_against(tmp_path):
     from tests.certification_fixtures import AS_OF, vendor_transport
 
-    dry = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    dry = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     report = run_capture(
         CAPTURE_CONFIG,
         output=str(tmp_path / "capture"),

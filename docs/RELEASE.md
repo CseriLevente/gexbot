@@ -212,7 +212,26 @@ thing that has gone wrong somewhere, and the session costs money.
 - [ ] output destination **new and outside this repository** — the command
       creates it and refuses a path that already exists, a symlink, or one
       that resolves inside the checkout
-- [ ] sufficient disk space for a full SPX+SPXW chain plus retry bodies
+- [ ] sufficient disk space for **five responses plus retry bodies** — the
+      dry run prints the arithmetic under `disk`
+
+**What this session actually captures.** Five requests, not a full chain:
+
+| # | Endpoint | Symbol |
+|---|---|---|
+| 1 | `/v3/index/snapshot/price` | `SPX` — the underlying index |
+| 2 | `/v3/option/snapshot/quote` | `SPXW` |
+| 3 | `/v3/option/snapshot/open_interest` | `SPXW` |
+| 4 | `/v3/option/snapshot/greeks/first_order` | `SPXW` |
+| 5 | `/v3/option/list/contracts/quote` | `SPXW` — evidence only |
+
+**The standard `SPX` option root is not captured**, and this checklist said
+"a full SPX+SPXW chain" until v2.1.21, which overstated both the scope and the
+disk budget. The index request takes `SPX` because SPXW options are written on
+that index; every option request takes the option root. The purpose of the
+first paid session is to validate the existing SPXW adapter path, not to
+collect a dataset.
+
 - [ ] dry run completed successfully and its report reviewed line by line:
 
 ```bash

@@ -35,7 +35,12 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import AS_OF, approval_hash_for, vendor_transport
+from tests.certification_fixtures import (
+    AS_OF,
+    DOCUMENTED_SESSION,
+    approval_hash_for,
+    vendor_transport,
+)
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -437,7 +442,9 @@ def test_the_effective_settings_report_the_routing_policy():
 
 
 def test_the_dry_run_reports_the_routing_policy(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     assert report["effective_transport"]["trust_env"] is False
 
 
@@ -555,7 +562,9 @@ def test_the_stop_policy_is_inside_the_request_plan_hash():
 def test_the_dry_run_does_not_call_established_settlement_a_blocker(tmp_path):
     """**The §6 regression.** The same report said ``ESTABLISHED`` and listed
     the settlement date among ``analytical_blockers``."""
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
 
     assert report["vendor_documentation"]["settlement_evidence"] == "ESTABLISHED"
     assert "analytical_blockers" not in report
@@ -572,7 +581,9 @@ def test_the_dry_run_does_not_call_established_settlement_a_blocker(tmp_path):
 
 
 def test_the_actual_blockers_name_what_is_really_missing(tmp_path):
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     joined = " ".join(report["actual_analytical_blockers"]).lower()
     assert "no capture exists yet" in joined
     assert "universe" in joined

@@ -68,7 +68,7 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.20"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.21"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
@@ -362,7 +362,9 @@ class _NoTransport:
         )
 
 
-def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
+def plan_capture(
+    config_path: str, *, output: str, as_of: datetime | None = None
+) -> dict[str, Any]:
     """Everything a live run would use, resolved, printable, and non-mutating.
 
     Reads the configuration and builds the pipeline, which is where a
@@ -376,6 +378,19 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
     ``raw.health/`` -- so a dry run left a directory behind, and the next real
     run then refused it as non-empty. The store capability is probed in a
     temporary directory that is deleted before this returns.
+
+    ``as_of`` names the instant to plan for. ``None`` reads the clock, which is
+    what the CLI does and what an operator wants.
+
+    It exists for tests, and it is not a CLI flag. Almost everything this
+    report says is a function of the market session: whether the window is
+    open, whether a settlement date can be derived, what date the contract-list
+    request carries, and therefore the approval hash. Tests that read the wall
+    clock assert against whichever day CI happened to run, which is how
+    v2.1.20's suite came to fail on a Saturday while production was behaving
+    correctly. Deciding the session date is the operator's business and the
+    market's; a ``--as-of`` flag would let somebody approve a plan for a day
+    that is not today, and the approval exists precisely to stop that.
     """
     from src.adapters.certification import (
         ANALYTICAL_DATASET_REQUIREMENTS,
@@ -390,7 +405,7 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
     pipeline = ThetaDataResearchPipeline.from_loaded_config(
         loaded, transport=_NoTransport()
     )
-    as_of = datetime.now(UTC)
+    as_of = _require_aware(as_of, "as_of") if as_of is not None else datetime.now(UTC)
     destination = pathlib.Path(output).expanduser()
     settings = effective_transport_settings(loaded.thetadata)
 
@@ -434,6 +449,14 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         "mode": "DRY_RUN",
         "run_state": RawCaptureRunState.PLANNED.value,
         "config_path": str(pathlib.Path(config_path).resolve()),
+        # **Where this instant falls in the options market's own day.**
+        #
+        # The live report has carried this since v2.1.17; the dry run did not,
+        # which meant an operator who ran it at the weekend saw an approval
+        # hash, an established-looking plan, and nothing saying the market was
+        # shut. It is the same object the live preflight refuses on, so the two
+        # cannot disagree about whether the window is open.
+        "market_session": assess_capture_window(as_of).as_dict(),
         # **What the live run will be held to.** Printed first because it is
         # the thing the operator carries forward: everything else on this
         # report explains it, and `--execute-live` will not start without it.
@@ -522,6 +545,26 @@ def plan_capture(config_path: str, *, output: str) -> dict[str, Any]:
         # Named so the dry-run output and the live-run output can be diffed.
         "unknown_origin": CaptureOrigin.UNKNOWN_ORIGIN.value,
     }
+
+
+def _require_aware(moment: datetime, name: str) -> datetime:
+    """A supplied instant must say which zone it is in.
+
+    A naive datetime here would be interpreted as whatever the reading
+    machine's zone happens to be, and every question this report answers is a
+    question about the New York session. ``2026-08-08T02:00`` is Friday's
+    session in New York and Saturday's calendar day in UTC; a value that cannot
+    say which it means cannot decide either.
+    """
+    if not isinstance(moment, datetime):
+        raise CaptureRunError(f"{name} must be a datetime, got {type(moment).__name__}")
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise CaptureRunError(
+            f"{name} must be timezone-aware. A naive instant silently means "
+            "whatever zone the reading machine is in, and the market session it "
+            "falls in is the thing being decided."
+        )
+    return moment
 
 
 def _actual_analytical_blockers(pipeline: Any, settlement: Any) -> tuple[str, ...]:

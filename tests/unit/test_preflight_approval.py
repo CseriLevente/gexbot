@@ -40,7 +40,12 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import AS_OF, approval_hash_for, vendor_transport
+from tests.certification_fixtures import (
+    AS_OF,
+    DOCUMENTED_SESSION,
+    approval_hash_for,
+    vendor_transport,
+)
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -242,7 +247,9 @@ def test_credentials_are_not_in_the_approval_payload(tmp_path):
     The transport fields it covers are an allowlist, so a credential field that
     arrives in ``effective_transport_settings`` later cannot walk in by default.
     """
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     blob = json.dumps(report["preflight_approval"]).lower()
     for forbidden in ("password", "username", "credential", "secret", "token"):
         assert forbidden not in blob, forbidden
@@ -256,8 +263,12 @@ def test_credentials_are_not_in_the_approval_payload(tmp_path):
 def test_the_approval_ignores_the_destination_and_the_run_id(tmp_path):
     """An approval that moved when the output directory changed would train an
     operator to stop reading it."""
-    first = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "one"))
-    second = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "two"))
+    first = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "one"), as_of=DOCUMENTED_SESSION
+    )
+    second = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "two"), as_of=DOCUMENTED_SESSION
+    )
     assert (
         first["preflight_approval"]["approval_hash"]
         == second["preflight_approval"]["approval_hash"]
@@ -358,9 +369,9 @@ def test_every_raw_record_is_bound_to_the_approved_operation(tmp_path):
 
 
 def test_the_dry_run_prints_the_five_values_the_operator_decides_on(tmp_path):
-    approval = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))[
-        "preflight_approval"
-    ]
+    approval = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )["preflight_approval"]
     for name in (
         "market_session_date",
         "request_plan_hash",
@@ -375,7 +386,9 @@ def test_the_dry_run_prints_the_five_values_the_operator_decides_on(tmp_path):
 def test_the_dry_run_still_writes_nothing(tmp_path):
     """Producing an approval must not make the dry run mutating."""
     destination = tmp_path / "capture"
-    report = plan_capture(CAPTURE_CONFIG, output=str(destination))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(destination), as_of=DOCUMENTED_SESSION
+    )
     assert report["wrote_files"] is False
     assert not destination.exists()
     assert list(tmp_path.iterdir()) == []

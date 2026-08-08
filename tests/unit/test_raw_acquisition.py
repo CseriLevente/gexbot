@@ -26,7 +26,7 @@ from src.tools.capture_thetadata_once import (
     run_capture,
     run_path,
 )
-from tests.certification_fixtures import approval_hash_for
+from tests.certification_fixtures import DOCUMENTED_SESSION, approval_hash_for
 
 CAPTURE_CONFIG = "config/thetadata_capture.yaml"
 
@@ -548,7 +548,9 @@ def test_the_disk_requirement_reflects_the_configured_capture(tmp_path):
     """
     from src.tools.capture_thetadata_once import disk_requirement
 
-    report = plan_capture(CAPTURE_CONFIG, output=str(tmp_path / "capture"))
+    report = plan_capture(
+        CAPTURE_CONFIG, output=str(tmp_path / "capture"), as_of=DOCUMENTED_SESSION
+    )
     disk = report["disk_space"]
 
     # Five since v2.1.16: the contract listing consumes the same response cap

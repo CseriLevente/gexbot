@@ -65,7 +65,7 @@ __all__ = [
 #: Bumped when what a pricing-evidence record must carry changes. v2.1.22 adds
 #: the observed-implementation side, so a v2.1.21 reader that saw only the
 #: documented value would report agreement where there is a conflict.
-PRICING_EVIDENCE_SCHEMA_VERSION = "pricing-evidence/2.1.22"
+PRICING_EVIDENCE_SCHEMA_VERSION = "pricing-evidence/2.1.23"
 
 
 class BehaviorDimension(str, Enum):
@@ -156,18 +156,35 @@ class EvidenceStatus(str, Enum):
 class CaptureIdentity:
     """Which immutable capture an observation was read from.
 
-    All three, always. The session id names the run, the manifest hash names the
-    set of records, and the archive digest names the bytes a third party can
-    obtain. An observation carrying only a session id points at a directory that
-    could have been edited since.
+    The session id names the run and the manifest hash names the set of
+    records; both are mandatory, because an observation that cannot name the
+    capture it came from is not reproducible, and an unreproducible measurement
+    of vendor behaviour is indistinguishable from an assertion.
+
+    ``archive_sha256`` is **optional and separate**, because it identifies a
+    different byte artefact: the distributable archive, which a capture
+    directory on disk does not have until somebody makes one. v2.1.22 wrote
+
+        archive_sha256 = supplied or capture.manifest_hash
+
+    which filled a field named after one artefact with the digest of another.
+    Any reader checking a download against it would have got a mismatch and no
+    way to tell a re-wrap from a substitution.
+
+    Two different artefacts cannot share a SHA-256, so an ``archive_sha256``
+    equal to the ``manifest_hash`` is that substitution and nothing else. It is
+    refused here rather than documented, so the bug cannot come back by way of
+    a convenient default somewhere else.
     """
 
     session_id: str
     manifest_hash: str
-    archive_sha256: str
+    #: Empty means *not computed*, which is honest and common. It never means
+    #: "same as the manifest".
+    archive_sha256: str = ""
 
     def __post_init__(self) -> None:
-        for name in ("session_id", "manifest_hash", "archive_sha256"):
+        for name in ("session_id", "manifest_hash"):
             if not str(getattr(self, name) or "").strip():
                 raise ThetaDataProvenanceError(
                     f"CaptureIdentity.{name} is empty; a live observation that "
@@ -176,19 +193,36 @@ class CaptureIdentity:
                     "indistinguishable from an assertion"
                 )
         for name in ("manifest_hash", "archive_sha256"):
-            value = str(getattr(self, name))
+            value = str(getattr(self, name) or "")
+            if name == "archive_sha256" and not value:
+                continue
             if len(value) != 64 or not all(c in "0123456789abcdef" for c in value):
                 raise ThetaDataProvenanceError(
                     f"CaptureIdentity.{name} is {value!r}; a full lowercase "
                     "SHA-256 is required. A truncated digest cannot be checked "
                     "against the artefact it claims to identify."
                 )
+        if self.archive_sha256 and self.archive_sha256 == self.manifest_hash:
+            raise ThetaDataProvenanceError(
+                "archive_sha256 equals manifest_hash. These identify different "
+                "byte artefacts -- a manifest document and a distributable "
+                "archive -- so equal digests mean one was substituted for the "
+                "other. Leave archive_sha256 empty when no archive has been "
+                "hashed; 'unknown' is a true statement and 'the manifest' is "
+                "not."
+            )
+
+    @property
+    def archive_identity_known(self) -> bool:
+        """Whether an archive digest was actually computed for this capture."""
+        return bool(self.archive_sha256)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "manifest_hash": self.manifest_hash,
             "archive_sha256": self.archive_sha256,
+            "archive_identity_known": self.archive_identity_known,
         }
 
 
@@ -447,6 +481,14 @@ class VendorRateSemantics:
     economic_rate_percent: float
     vendor_observed_rate_unit: str
     documented_rate_unit: str
+    #: The value the configuration will *actually* put on the wire. Normally
+    #: identical to ``vendor_request_rate_value``; supplied separately so a
+    #: profile whose ``rate_value`` disagrees with its own declared units shows
+    #: up as a mismatch instead of being assumed away by re-derivation.
+    configured_wire_value: float | None = None
+    #: What the local Black-Scholes prices with, read from the model spec
+    #: rather than from the vendor block, so the two can be compared at all.
+    configured_local_model_rate: float | None = None
     #: Set only when the two units disagree; carried so a report can show the
     #: conflict at the point the number is used rather than in a distant ledger.
     conflict: bool = field(default=False)
@@ -477,11 +519,6 @@ class VendorRateSemantics:
         return self.economic_rate_percent / 100.0
 
     @property
-    def local_model_rate(self) -> float:
-        """What the local Black-Scholes prices with. A decimal, always."""
-        return self.economic_rate_decimal
-
-    @property
     def vendor_request_rate_value(self) -> float:
         """The number to put on the wire so the vendor prices the intended rate.
 
@@ -504,13 +541,57 @@ class VendorRateSemantics:
             "apply its own default, or establish the unit first."
         )
 
+    @property
+    def wire_value(self) -> float:
+        """The number that will really be sent, not the one that should be."""
+        if self.configured_wire_value is not None:
+            return self.configured_wire_value
+        return self.vendor_request_rate_value
+
+    @property
+    def predicted_vendor_effective_rate(self) -> float:
+        """The ``r`` the vendor's Black-Scholes will receive.
+
+        The wire value read under the unit the *implementation* was measured
+        using. This is the quantity that had no name before v2.1.22 and no
+        prediction before v2.1.23: an operator reading a dry run could see the
+        wire value and the economic rate and still not be told what the vendor
+        would actually price, which is exactly what went wrong the first time.
+        """
+        if self.vendor_observed_rate_unit == "PERCENT_ANNUAL_RATE":
+            return self.wire_value / 100.0
+        return self.wire_value
+
+    @property
+    def predicted_effective_rate_matches_intended(self) -> bool:
+        """Will the vendor price the rate the local model prices?
+
+        Distinct from :attr:`conflict`. The documentation conflict is a
+        standing fact about the vendor; this is a question about *this
+        request*, and a correct request answers it yes while the conflict is
+        still true.
+        """
+        return abs(self.predicted_vendor_effective_rate - self.local_model_rate) <= 1e-9
+
+    @property
+    def local_model_rate(self) -> float:
+        """What the local Black-Scholes prices with. A decimal, always."""
+        if self.configured_local_model_rate is not None:
+            return self.configured_local_model_rate
+        return self.economic_rate_decimal
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "economic_rate_percent": self.economic_rate_percent,
             "economic_rate_decimal": self.economic_rate_decimal,
             "local_model_rate": self.local_model_rate,
             "vendor_request_rate_value": self.vendor_request_rate_value,
+            "wire_value": self.wire_value,
             "vendor_observed_rate_unit": self.vendor_observed_rate_unit,
             "documented_rate_unit": self.documented_rate_unit,
             "documentation_live_conflict": self.conflict,
+            "predicted_vendor_effective_rate": (self.predicted_vendor_effective_rate),
+            "predicted_effective_rate_matches_intended_rate": (
+                self.predicted_effective_rate_matches_intended
+            ),
         }

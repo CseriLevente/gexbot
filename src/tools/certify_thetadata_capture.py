@@ -60,10 +60,22 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
     """
     data = report.as_dict()
     cap = data["capture"]
+    request = data["capture_request"]
+    economics = data["rate_economics"]
     lines = [
         f"capture         {cap['session_id']}",
-        f"manifest        {cap['manifest_hash']}",
+        f"manifest        {cap['manifest_hash']} (recomputed from descriptors)",
+        f"archive         {cap['archive_sha256'] or '<not computed>'}",
         f"records         {data['raw_record_verification']['records_verified']} verified",
+        f"request         rate_value={request['greeks_rate_value']:g} "
+        f"({request['binding']})",
+        f"vendor rate     r={economics['vendor_effective_rate']:g} "
+        f"| intended r={economics['intended_economic_rate']:g} "
+        f"({economics['intended_rate_source']})",
+        f"rate verdict    documentation conflict="
+        f"{economics['rate_units_documentation_live_conflict']} | "
+        f"economically correct="
+        f"{economics['capture_effective_rate_matches_intended_rate']}",
     ]
     universe = data["universe"]
     lines.append(
@@ -98,6 +110,24 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
         f"    {row['basis']:<48} rows {row['rows']:>6,}  "
         f"median |IV err| {row['median_abs_iv_error']:.6g}"
         for row in data["iv_basis_comparison"]
+    )
+    clock = data["expiration_clock_evidence"]
+    lines.append(
+        f"resolved        day count {data['resolved_day_count']} | clock "
+        f"{data['resolved_expiration_clock']} (estimate "
+        f"{clock['implied_clock_et'] or 'n/a'})"
+    )
+    lines.append(
+        f"clock scope     {clock['intraday_count']} expirations support it, "
+        f"{clock['contradicting_count']} contradict a global rule; transition "
+        f"{clock['boundary_status']}"
+        + (
+            f" between {clock['boundary_last_intraday']} and "
+            f"{clock['boundary_first_whole_day']} "
+            f"({clock['boundary_gap_days']}d unsampled)"
+            if clock["boundary_status"] == "OPEN"
+            else ""
+        )
     )
     conflicts = ", ".join(data["documentation_live_conflicts"]) or "none"
     lines.append(f"conflicts:      {conflicts}")

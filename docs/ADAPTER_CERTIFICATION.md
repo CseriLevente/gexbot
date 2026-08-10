@@ -1658,3 +1658,150 @@ that IV and delta now land at ordinary SPX volatility levels and reproduce local
 Black-Scholes under `r = 0.042`.
 
 Do not assume that before observing it.
+
+---
+
+# v2.1.23: certification stops assuming the first capture
+
+v2.1.22 reconstructed the first capture correctly and then encoded its answers
+into the machinery that was supposed to find them.
+
+    inversion              rate = 4.2
+    rate hypotheses        {4.2, 0.042}
+    day-count scoring      rate = 4.2
+    IV reconstruction      rate = 4.2
+    ledger labels          "ACT_365", "16:00 America/New_York"
+
+Every one of those is the first capture's own result. The planned second capture
+sends `rate_value = 0.042`, so it would have been scored against the wrong pair
+of hypotheses and then labelled from the wrong literals — a confident, wrong
+certification.
+
+## The wire value comes from the capture
+
+Hypotheses are derived from whatever the capture actually sent:
+
+    DECIMAL_ANNUAL_RATE   r = w
+    PERCENT_ANNUAL_RATE   r = w / 100
+
+For `w = 4.2` that is `{4.2, 0.042}`; for `w = 0.042` it is `{0.042, 0.00042}`.
+Nothing in the code knows which.
+
+`w` is **not** a caller argument. Adding one would be worse than the constant it
+replaced: it would let anyone pair one capture's responses with another
+capture's rate and get a certification out. Instead the value is read from the
+run intent and proved against the manifest —
+
+    run-intent      request_plan.requests[].canonical_query_parameters
+    manifest        records[].planned_request_hash
+                    records[].request_spec_fingerprint
+
+— by recomputing the request digest from the parameters and comparing it with
+the stamp taken at capture time. Edit `rate_value` in the intent and the
+recomputation no longer matches, and certification refuses. The manifest itself
+is verified by recomputing its own digest from its own descriptors, so the
+anchor is not a number somebody could also have edited.
+
+## The rate and the day count are searched together
+
+Neither resolves alone. The inversion that reads the clock needs a rate *and* a
+denominator, and the clock decides which expirations belong to which regime.
+Read a 360-day vendor at 365 and every implied day is 1.4% long — enough to push
+a whole-calendar-day expiration past the intraday threshold and misclassify the
+regime outright.
+
+So all `2 × 4` combinations are reconstructed end to end and the best fit wins.
+The published tables are slices through that grid, relabelled for the dimension
+each is about, so a table can never disagree with the winner it was drawn from.
+
+## The clock is read, not matched
+
+`implied_days − calendar_days` is the gap between the valuation stamp's time of
+day and the expiry's, so the intraday readings *state* the close. Candidates are
+then built on a five-minute grid around that estimate and scored.
+
+The snap matters. On the first capture the implied offset drifts with maturity —
+0.2490 at the front, 0.2503 a week out — so the median lands at **16:01** for a
+close that is really 16:00, and 16:01 even scores marginally better
+(3.10e-04 against 3.48e-04). That gap is inside the noise the four-decimal
+`implied_vol` creates. Exchanges close on the clock; reconstructions do not. The
+unrounded estimate stays in the evidence as `implied_clock_et`, so both numbers
+are visible and a reader can disagree.
+
+## Two different questions about the rate
+
+v2.1.22 ran these together and blocked the first capture on the documentation
+conflict. That was right by accident.
+
+| | |
+|---|---|
+| `rate_units_documentation_live_conflict` | does the vendor read its own parameter as it documents it? |
+| `capture_effective_rate_matches_intended_rate` | did *this request* buy the rate it meant to? |
+
+The first is permanent and is a statement about the vendor. The second is about
+one capture, and the corrected profile fixes it while the conflict stands.
+Conflated, a correct second capture would inherit the first one's blocker
+forever.
+
+    capture #1   wire 4.2     vendor r = 4.2     intended 0.042   ratio 100   BLOCKED
+    capture #2   wire 0.042   vendor r = 0.042   intended 0.042   ratio 1     not blocked
+    both         documentation/live conflict = TRUE
+
+The intended rate cannot be recovered from the wire value — that ambiguity *is*
+the defect — so the run intent now records it. Captures taken before v2.1.23 do
+not carry one, and rather than guess, certification reads the wire value under
+the vendor's **documented** unit and says so
+(`intended_rate_source = DERIVED_FROM_DOCUMENTED_UNIT`). For the first capture
+that gives 0.042 against a vendor 4.2, which is exactly what happened.
+
+## Expiration scope is data, not prose
+
+`expiration_clock_evidence` carries the scope structurally:
+
+    implied_clock_et          16:01 America/New_York   (unrounded estimate)
+    intraday_expirations      2026-08-10 ... 2026-08-14
+    whole_day_expirations     26 expirations, named
+    contradicting_count       26
+    scope_is_global           false
+    boundary_last_intraday    2026-08-14
+    boundary_first_whole_day  2026-08-17
+    boundary_gap_days         3
+    boundary_status           OPEN
+
+`OPEN` because the sample jumps from four days out to seven with nothing
+between, so "expiring this week", "five business days" and "under seven days"
+are all still consistent with it. A downstream consumer can establish that
+without parsing English.
+
+## Manifest identity and archive identity
+
+`archive_sha256 = supplied or capture.manifest_hash` filled a field named after
+one artefact with the digest of another. It is optional now, empty when no
+archive has been hashed, and an `archive_sha256` equal to the `manifest_hash` is
+refused by the type — two artefacts cannot share a digest, so equality is the
+substitution and nothing else.
+
+### An adjacent defect, fixed because this one needed it
+
+`RawCaptureManifest.rebuilt_from` restored every descriptor field except
+`preflight_approval_hash`, which `semantic_payload()` — and therefore
+`manifest_hash` — covers. Rebuilding the first live capture produced
+`c46633ae…` against a stored `2f45534b…`.
+
+The round trip was silently lossy, so any check built on recomputing the digest
+would have refused every honest capture and learned nothing about a dishonest
+one. Same omission as v2.1.20's `ManifestRecord.of`, in the other direction: a
+field added to the descriptor has to be added in three places, and nothing
+failed when it was added in two.
+
+## What the tests now prove
+
+The synthetic vendor is parameterised, and varied against the grain: wire values
+of 4.2 *and* 0.042, a percent-reading vendor as well as a decimal one, ACT/360
+and ACT/252 as well as ACT/365, closes at 15:30 and 16:30 as well as 16:00.
+Assertions are on the final evidence objects, because a score table can be
+correct while the label beside it is a constant.
+
+The first capture's findings are unchanged and reproduce from the fixture:
+`ACT_365`, 16:00 ET front-week, whole calendar days beyond, documentation
+conflict retained, and still blocked from a trusted GEX.

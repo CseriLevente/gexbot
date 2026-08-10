@@ -25,29 +25,41 @@
     "parser_version": "thetadata-v3-parser/2.1.17",
     "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
   },
+  "capture_request": {
+    "binding": "RECOMPUTED_AGAINST_MANIFEST_PLANNED_REQUEST_HASH",
+    "greeks_annual_dividend": 0.0,
+    "greeks_rate_value": 4.2,
+    "verified_endpoints": [
+      "/v3/index/snapshot/price",
+      "/v3/option/list/contracts/quote",
+      "/v3/option/snapshot/greeks/first_order",
+      "/v3/option/snapshot/open_interest",
+      "/v3/option/snapshot/quote"
+    ]
+  },
   "day_count_comparison": [
     {
-      "delta_rmse": 0.00017460045617437685,
+      "delta_rmse": 0.0001584804637398003,
       "hypothesis": "ACT/365",
-      "median_abs_delta_error": 4.451469477144681e-05,
+      "median_abs_delta_error": 4.434673004381621e-05,
       "rows": 7348
     },
     {
-      "delta_rmse": 0.0007208047888807152,
+      "delta_rmse": 0.013961639481461724,
       "hypothesis": "ACT/365.25",
-      "median_abs_delta_error": 8.016227660713677e-05,
+      "median_abs_delta_error": 0.00018963728248269467,
       "rows": 7348
     },
     {
-      "delta_rmse": 0.0159298570792905,
+      "delta_rmse": 0.013486576120886202,
       "hypothesis": "ACT/360",
-      "median_abs_delta_error": 0.0004802374719931092,
+      "median_abs_delta_error": 0.00044613922678004084,
       "rows": 7348
     },
     {
-      "delta_rmse": 0.09862788858244732,
+      "delta_rmse": 0.09021003920376473,
       "hypothesis": "ACT/252",
-      "median_abs_delta_error": 0.01289964060124934,
+      "median_abs_delta_error": 0.011399364434035436,
       "rows": 7348
     }
   ],
@@ -70,13 +82,54 @@
     "overlap": 14556,
     "p99_gap_seconds": 2.444
   },
+  "expiration_clock_evidence": {
+    "boundary_first_whole_day": "2026-08-17",
+    "boundary_gap_days": 3,
+    "boundary_last_intraday": "2026-08-14",
+    "boundary_status": "OPEN",
+    "contradicting_count": 26,
+    "implied_clock_et": "16:01 America/New_York",
+    "implied_clock_seconds_after_midnight": 57669.37055195574,
+    "intraday_count": 5,
+    "intraday_expirations": [
+      "2026-08-10",
+      "2026-08-11",
+      "2026-08-12",
+      "2026-08-13",
+      "2026-08-14"
+    ],
+    "scope_is_global": false,
+    "unexplained_expirations": [],
+    "whole_day_expirations": [
+      "2026-08-17",
+      "2026-08-18",
+      "2026-08-19",
+      "2026-08-20",
+      "2026-08-21",
+      "2026-08-24",
+      "2026-08-25",
+      "2026-08-26",
+      "2026-08-27",
+      "2026-08-28",
+      "2026-08-31",
+      "2026-09-01",
+      "2026-09-02",
+      "2026-09-03",
+      "2026-09-04",
+      "2026-09-08",
+      "2026-09-09",
+      "2026-09-10",
+      "2026-09-11",
+      "2026-09-14",
+      "2026-09-15",
+      "2026-09-16",
+      "2026-09-18",
+      "2026-09-21",
+      "2026-09-25",
+      "2026-09-30"
+    ]
+  },
   "expiration_time_comparison": [
-    {
-      "delta_rmse": 0.00034791561392758294,
-      "hypothesis": "16:00 America/New_York",
-      "median_abs_delta_error": 4.795259171688133e-05,
-      "rows": 1592
-    },
     {
       "delta_rmse": 0.009037917931919043,
       "hypothesis": "15:30 America/New_York",
@@ -84,9 +137,69 @@
       "rows": 1592
     },
     {
+      "delta_rmse": 0.007796395614686174,
+      "hypothesis": "15:35 America/New_York",
+      "median_abs_delta_error": 9.443064699407851e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.006476606313205351,
+      "hypothesis": "15:40 America/New_York",
+      "median_abs_delta_error": 8.322655825197571e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.005068394950977941,
+      "hypothesis": "15:45 America/New_York",
+      "median_abs_delta_error": 7.771235992576678e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.003563182682879667,
+      "hypothesis": "15:50 America/New_York",
+      "median_abs_delta_error": 7.443821745340944e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.0019576195601976668,
+      "hypothesis": "15:55 America/New_York",
+      "median_abs_delta_error": 7.05562951102821e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.00034791561392758294,
+      "hypothesis": "16:00 America/New_York",
+      "median_abs_delta_error": 4.795259171688133e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.001644397237812145,
+      "hypothesis": "16:05 America/New_York",
+      "median_abs_delta_error": 8.061784474510146e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.0035728405261937334,
+      "hypothesis": "16:10 America/New_York",
+      "median_abs_delta_error": 0.00010468740056420782,
+      "rows": 1592
+    },
+    {
       "delta_rmse": 0.0056063270033672955,
       "hypothesis": "16:15 America/New_York",
       "median_abs_delta_error": 0.00012956954365611354,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.007723726714534073,
+      "hypothesis": "16:20 America/New_York",
+      "median_abs_delta_error": 0.00015465430047318686,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.009905131439049687,
+      "hypothesis": "16:25 America/New_York",
+      "median_abs_delta_error": 0.0001862170350517058,
       "rows": 1592
     },
     {
@@ -106,15 +219,15 @@
     "underlying": "the underlying price embedded in the greeks response"
   },
   "gex_blockers": [
-    "the Greeks in this capture were produced under rate_value=4.2 consumed as a decimal, i.e. 420%. Every implied volatility and every delta in it describes a market that does not exist. The capture remains the evidence that established the conflict and must not be discarded.",
+    "the vendor priced this capture at r=4.2 and the request meant r=0.042, a factor of 100. Every implied volatility and every delta in it describes a market that does not exist. The capture remains the evidence that established the rate semantics and must not be discarded.",
     "426 contract identities have no open-interest row. Open interest is the linear weight on every GEX term and there is no evidence-backed policy for an absent one, so an aggregate would be choosing silently."
   ],
   "iv_basis_comparison": [
     {
       "basis": "NBBO_MID",
-      "median_abs_iv_error": 5.075599013787402e-05,
+      "median_abs_iv_error": 5.0581442555430733e-05,
       "rows": 2868,
-      "within_half_tick_ratio": 0.4919804741980474
+      "within_half_tick_ratio": 0.49337517433751743
     },
     {
       "basis": "BID",
@@ -248,17 +361,28 @@
     "permits_trusted_aggregate": false,
     "universe_count": 14556
   },
+  "rate_economics": {
+    "capture_effective_rate_matches_intended_rate": false,
+    "documented_rate_unit": "PERCENT_ANNUAL_RATE",
+    "intended_economic_rate": 0.042,
+    "intended_rate_source": "DERIVED_FROM_DOCUMENTED_UNIT",
+    "magnitude_ratio": 100.0,
+    "observed_vendor_rate_unit": "DECIMAL_ANNUAL_RATE",
+    "rate_units_documentation_live_conflict": true,
+    "vendor_effective_rate": 4.2,
+    "wire_rate_value": 4.2
+  },
   "rate_semantics": [
     {
-      "delta_rmse": 0.00017460045617437685,
+      "delta_rmse": 0.0001584804637398003,
       "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=4.2)",
-      "median_abs_delta_error": 4.451469477144681e-05,
+      "median_abs_delta_error": 4.434673004381621e-05,
       "rows": 7348
     },
     {
-      "delta_rmse": 0.23245132263370233,
+      "delta_rmse": 0.23246474693160993,
       "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
-      "median_abs_delta_error": 0.22087848364145213,
+      "median_abs_delta_error": 0.22084373046392233,
       "rows": 7348
     }
   ],
@@ -272,7 +396,9 @@
     },
     "records_verified": 5
   },
-  "report_hash": "a6b1be6863e66c2455bb70be70149588642ca46012ce6fea3cf2727e50f3d816",
+  "report_hash": "2c7d673b0f2fcbf05654b194a13510154f205529e01ffd5ab4a088337bb55738",
+  "resolved_day_count": "ACT_365",
+  "resolved_expiration_clock": "16:00 America/New_York",
   "schema_version": "capture-certification/2.1.22",
   "theta_terminal_version": {
     "carried_in_capture": false,
@@ -310,6 +436,7 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
+          "archive_identity_known": true,
           "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
@@ -325,14 +452,14 @@
             "rows": 7348,
             "selected": true,
             "statistic": "delta_rmse",
-            "value": 0.00017460045617437685
+            "value": 0.0001584804637398003
           },
           {
             "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
             "rows": 7348,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.23245132263370233
+            "value": 0.23246474693160993
           }
         ],
         "notes": "The document says percent and the implementation reads a decimal. Both records are kept; the observed reading governs request construction because the request is answered by the implementation.",
@@ -344,6 +471,7 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
+          "archive_identity_known": true,
           "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
@@ -359,28 +487,28 @@
             "rows": 7348,
             "selected": true,
             "statistic": "delta_rmse",
-            "value": 0.00017460045617437685
+            "value": 0.0001584804637398003
           },
           {
             "hypothesis": "ACT/365.25",
             "rows": 7348,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.0007208047888807152
+            "value": 0.013961639481461724
           },
           {
             "hypothesis": "ACT/360",
             "rows": 7348,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.0159298570792905
+            "value": 0.013486576120886202
           },
           {
             "hypothesis": "ACT/252",
             "rows": 7348,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.09862788858244732
+            "value": 0.09021003920376473
           }
         ],
         "notes": "",
@@ -392,6 +520,7 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
+          "archive_identity_known": true,
           "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
@@ -403,6 +532,48 @@
         "governing_value": "16:00 America/New_York",
         "metrics": [
           {
+            "hypothesis": "15:30 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.009037917931919043
+          },
+          {
+            "hypothesis": "15:35 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.007796395614686174
+          },
+          {
+            "hypothesis": "15:40 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.006476606313205351
+          },
+          {
+            "hypothesis": "15:45 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.005068394950977941
+          },
+          {
+            "hypothesis": "15:50 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.003563182682879667
+          },
+          {
+            "hypothesis": "15:55 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.0019576195601976668
+          },
+          {
             "hypothesis": "16:00 America/New_York",
             "rows": 1592,
             "selected": true,
@@ -410,11 +581,18 @@
             "value": 0.00034791561392758294
           },
           {
-            "hypothesis": "15:30 America/New_York",
+            "hypothesis": "16:05 America/New_York",
             "rows": 1592,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.009037917931919043
+            "value": 0.001644397237812145
+          },
+          {
+            "hypothesis": "16:10 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.0035728405261937334
           },
           {
             "hypothesis": "16:15 America/New_York",
@@ -424,6 +602,20 @@
             "value": 0.0056063270033672955
           },
           {
+            "hypothesis": "16:20 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.007723726714534073
+          },
+          {
+            "hypothesis": "16:25 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.009905131439049687
+          },
+          {
             "hypothesis": "16:30 America/New_York",
             "rows": 1592,
             "selected": false,
@@ -431,15 +623,16 @@
             "value": 0.01212826653512948
           }
         ],
-        "notes": "Read by inverting delta and implied volatility for the vendor's own time-to-expiry, not by scoring a global hypothesis.",
+        "notes": "Read by inverting delta and implied volatility for the vendor's own time-to-expiry, not by scoring a global hypothesis. The structured scope is in expiration_clock_evidence; this string is a summary of it and never the only copy.",
         "observed_value": "16:00 America/New_York",
         "rows_used": 1592,
-        "scope": "SPXW expirations up to and including 2026-08-14. Beyond that boundary 26 expirations in this capture price on whole calendar days instead, so this rule is NOT established for longer maturities and must not be applied to them.",
+        "scope": "SPXW expirations up to and including 2026-08-14. Beyond that boundary 26 expirations in this capture price on whole calendar days instead, so this rule is NOT established for longer maturities and must not be applied to them. The exact transition is OPEN: the nearest contradicting expiration is 2026-08-17, 3 calendar days later, and nothing was captured in between.",
         "status": "LIVE_ONLY"
       },
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
+          "archive_identity_known": true,
           "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
@@ -455,7 +648,7 @@
             "rows": 2868,
             "selected": true,
             "statistic": "median_abs_iv_error",
-            "value": 5.075599013787402e-05
+            "value": 5.0581442555430733e-05
           },
           {
             "hypothesis": "BID",
@@ -481,6 +674,7 @@
       {
         "basis": "LIVE_FIELD_READ",
         "capture": {
+          "archive_identity_known": true,
           "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
@@ -515,6 +709,7 @@
       {
         "basis": "LIVE_SET_COMPARISON",
         "capture": {
+          "archive_identity_known": true,
           "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
@@ -540,9 +735,8 @@
       "calendar_days": 0,
       "expiration": "2026-08-10",
       "implied_days": 0.2490246287204837,
-      "intraday_days_to_1600": 0.24891203703703704,
-      "matches_intraday_1600": true,
-      "matches_whole_days": false,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
       "offset_from_calendar": 0.2490246287204837,
       "rows": 93,
       "spread": 0.3391543276907141
@@ -551,9 +745,8 @@
       "calendar_days": 1,
       "expiration": "2026-08-11",
       "implied_days": 1.2493830300728859,
-      "intraday_days_to_1600": 1.248912037037037,
-      "matches_intraday_1600": true,
-      "matches_whole_days": false,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
       "offset_from_calendar": 0.24938303007288587,
       "rows": 95,
       "spread": 0.001309215781733375
@@ -562,9 +755,8 @@
       "calendar_days": 2,
       "expiration": "2026-08-12",
       "implied_days": 2.249714936943932,
-      "intraday_days_to_1600": 2.2489120370370372,
-      "matches_intraday_1600": true,
-      "matches_whole_days": false,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
       "offset_from_calendar": 0.2497149369439322,
       "rows": 101,
       "spread": 0.0021151802831651523
@@ -573,9 +765,8 @@
       "calendar_days": 3,
       "expiration": "2026-08-13",
       "implied_days": 3.250052506877768,
-      "intraday_days_to_1600": 3.2489120370370372,
-      "matches_intraday_1600": true,
-      "matches_whole_days": false,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
       "offset_from_calendar": 0.2500525068777679,
       "rows": 101,
       "spread": 0.002833150117531158
@@ -584,9 +775,8 @@
       "calendar_days": 4,
       "expiration": "2026-08-14",
       "implied_days": 4.250310879800095,
-      "intraday_days_to_1600": 4.248912037037037,
-      "matches_intraday_1600": true,
-      "matches_whole_days": false,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
       "offset_from_calendar": 0.2503108798000948,
       "rows": 125,
       "spread": 0.0039028641728027225
@@ -595,9 +785,8 @@
       "calendar_days": 7,
       "expiration": "2026-08-17",
       "implied_days": 7.001533950571411,
-      "intraday_days_to_1600": 7.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0015339505714111468,
       "rows": 89,
       "spread": 0.005203994464809014
@@ -606,9 +795,8 @@
       "calendar_days": 8,
       "expiration": "2026-08-18",
       "implied_days": 8.002178006208066,
-      "intraday_days_to_1600": 8.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0021780062080658524,
       "rows": 91,
       "spread": 0.0072570337651862715
@@ -617,9 +805,8 @@
       "calendar_days": 9,
       "expiration": "2026-08-19",
       "implied_days": 9.002758738142491,
-      "intraday_days_to_1600": 9.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0027587381424911683,
       "rows": 93,
       "spread": 0.009219768140965812
@@ -628,9 +815,8 @@
       "calendar_days": 10,
       "expiration": "2026-08-20",
       "implied_days": 10.002569972814044,
-      "intraday_days_to_1600": 10.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0025699728140438083,
       "rows": 95,
       "spread": 0.010041712098276534
@@ -639,9 +825,8 @@
       "calendar_days": 11,
       "expiration": "2026-08-21",
       "implied_days": 11.003237086359356,
-      "intraday_days_to_1600": 11.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.003237086359355601,
       "rows": 181,
       "spread": 0.007036106726824087
@@ -650,9 +835,8 @@
       "calendar_days": 14,
       "expiration": "2026-08-24",
       "implied_days": 14.00378798502614,
-      "intraday_days_to_1600": 14.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0037879850261397507,
       "rows": 85,
       "spread": 0.014438307665123773
@@ -661,9 +845,8 @@
       "calendar_days": 15,
       "expiration": "2026-08-25",
       "implied_days": 15.003955410564206,
-      "intraday_days_to_1600": 15.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.003955410564206119,
       "rows": 87,
       "spread": 0.014445382323110323
@@ -672,9 +855,8 @@
       "calendar_days": 16,
       "expiration": "2026-08-26",
       "implied_days": 16.004299420321885,
-      "intraday_days_to_1600": 16.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.00429942032188535,
       "rows": 88,
       "spread": 0.01378650094794942
@@ -683,9 +865,8 @@
       "calendar_days": 17,
       "expiration": "2026-08-27",
       "implied_days": 17.006502279151253,
-      "intraday_days_to_1600": 17.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.006502279151252566,
       "rows": 92,
       "spread": 0.017188232458703823
@@ -694,9 +875,8 @@
       "calendar_days": 18,
       "expiration": "2026-08-28",
       "implied_days": 18.007233932661386,
-      "intraday_days_to_1600": 18.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0072339326613857224,
       "rows": 123,
       "spread": 0.014244545364377359
@@ -705,9 +885,8 @@
       "calendar_days": 21,
       "expiration": "2026-08-31",
       "implied_days": 21.00642875392472,
-      "intraday_days_to_1600": 21.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.0064287539247196435,
       "rows": 185,
       "spread": 0.016314694911244487
@@ -716,9 +895,8 @@
       "calendar_days": 22,
       "expiration": "2026-09-01",
       "implied_days": 22.007672141855636,
-      "intraday_days_to_1600": 22.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.007672141855636028,
       "rows": 68,
       "spread": 0.023711116567593393
@@ -727,9 +905,8 @@
       "calendar_days": 23,
       "expiration": "2026-09-02",
       "implied_days": 23.006191981989364,
-      "intraday_days_to_1600": 23.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.006191981989363882,
       "rows": 69,
       "spread": 0.017108236760584816
@@ -738,9 +915,8 @@
       "calendar_days": 24,
       "expiration": "2026-09-03",
       "implied_days": 24.008882315237425,
-      "intraday_days_to_1600": 24.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.008882315237425331,
       "rows": 69,
       "spread": 0.01896215552864078
@@ -749,9 +925,8 @@
       "calendar_days": 25,
       "expiration": "2026-09-04",
       "implied_days": 25.007350008786844,
-      "intraday_days_to_1600": 25.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.007350008786843887,
       "rows": 106,
       "spread": 0.020060802503191866
@@ -760,9 +935,8 @@
       "calendar_days": 29,
       "expiration": "2026-09-08",
       "implied_days": 29.010920119139342,
-      "intraday_days_to_1600": 29.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.010920119139342432,
       "rows": 63,
       "spread": 0.03019735423333003
@@ -771,9 +945,8 @@
       "calendar_days": 30,
       "expiration": "2026-09-09",
       "implied_days": 30.008465931369887,
-      "intraday_days_to_1600": 30.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.008465931369887159,
       "rows": 64,
       "spread": 0.032110994738481224
@@ -782,9 +955,8 @@
       "calendar_days": 31,
       "expiration": "2026-09-10",
       "implied_days": 31.010958698300634,
-      "intraday_days_to_1600": 31.248912037037037,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.010958698300633785,
       "rows": 64,
       "spread": 0.030725756769573564
@@ -793,9 +965,8 @@
       "calendar_days": 32,
       "expiration": "2026-09-11",
       "implied_days": 32.0112388809309,
-      "intraday_days_to_1600": 32.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.011238880930896755,
       "rows": 79,
       "spread": 0.024177366397516664
@@ -804,9 +975,8 @@
       "calendar_days": 35,
       "expiration": "2026-09-14",
       "implied_days": 35.01119258859306,
-      "intraday_days_to_1600": 35.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.011192588593061714,
       "rows": 32,
       "spread": 0.032713626326874135
@@ -815,9 +985,8 @@
       "calendar_days": 36,
       "expiration": "2026-09-15",
       "implied_days": 36.017760487303775,
-      "intraday_days_to_1600": 36.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.017760487303775108,
       "rows": 31,
       "spread": 0.03030054302814733
@@ -826,9 +995,8 @@
       "calendar_days": 37,
       "expiration": "2026-09-16",
       "implied_days": 37.015437699176594,
-      "intraday_days_to_1600": 37.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.015437699176594322,
       "rows": 34,
       "spread": 0.02937942928853232
@@ -837,9 +1005,8 @@
       "calendar_days": 39,
       "expiration": "2026-09-18",
       "implied_days": 39.014031941403516,
-      "intraday_days_to_1600": 39.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.014031941403516157,
       "rows": 174,
       "spread": 0.029873790579074466
@@ -848,9 +1015,8 @@
       "calendar_days": 42,
       "expiration": "2026-09-21",
       "implied_days": 42.01715214420054,
-      "intraday_days_to_1600": 42.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.017152144200537123,
       "rows": 32,
       "spread": 0.03121877250663374
@@ -859,9 +1025,8 @@
       "calendar_days": 46,
       "expiration": "2026-09-25",
       "implied_days": 46.019818652367334,
-      "intraday_days_to_1600": 46.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.019818652367334266,
       "rows": 56,
       "spread": 0.04433738928103992
@@ -870,9 +1035,8 @@
       "calendar_days": 51,
       "expiration": "2026-09-30",
       "implied_days": 51.01973034495916,
-      "intraday_days_to_1600": 51.24891203703704,
-      "matches_intraday_1600": false,
-      "matches_whole_days": true,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
       "offset_from_calendar": 0.019730344959157264,
       "rows": 203,
       "spread": 0.043366803626994965

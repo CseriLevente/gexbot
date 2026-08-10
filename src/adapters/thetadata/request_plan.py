@@ -30,6 +30,7 @@ __all__ = [
     "RawRequestPlan",
     "RequestPlanViolation",
     "canonical_parameters",
+    "planned_request_hash",
 ]
 
 #: Bumped when the shape of a request plan changes.
@@ -71,6 +72,33 @@ def canonical_parameters(params: Any) -> tuple[tuple[str, str], ...]:
     apart -- do not produce two different plan hashes for one request.
     """
     return tuple(sorted((str(k), str(v)) for k, v in dict(params or {}).items()))
+
+
+def planned_request_hash(
+    spec_fingerprint: str, endpoint: Any, canonical: tuple[tuple[str, str], ...]
+) -> str:
+    """One request's identity: the session's spec, the endpoint, the parameters.
+
+    The spec fingerprint is in it because two sessions asking the same URL under
+    different rate or dividend parameters are asking different questions of the
+    vendor, and the answer differs.
+
+    Lives here, beside the plan it identifies, rather than in the pipeline that
+    happens to build one. Since v2.1.23 offline certification recomputes this to
+    prove which ``rate_value`` a stored capture was actually taken at, and a
+    verifier that had to import the pipeline to check a capture would be
+    re-deriving the claim from the thing it is checking.
+    """
+    payload = json.dumps(
+        {
+            "request_spec_fingerprint": spec_fingerprint,
+            "endpoint": getattr(endpoint, "value", endpoint),
+            "parameters": [list(pair) for pair in canonical],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

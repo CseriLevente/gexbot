@@ -11,14 +11,30 @@ than only the winner. A report that says "ACT/365" is an assertion. A report
 that says ACT/365 scored 1.7e-4 and ACT/360 scored 1.6e-2 over 7,348 rows is a
 result somebody can disagree with.
 
+**Nothing here knows what the first capture sent.** v2.1.22 did: it inverted at
+``rate=4.2``, scored day counts at ``rate=4.2``, offered exactly ``4.2`` and
+``0.042`` as the rate hypotheses, and labelled the winners ``ACT_365`` and
+``16:00 America/New_York`` from constants. Every one of those was the first
+capture's own answer written into the machinery that was supposed to find it, so
+the second capture -- which sends ``rate_value=0.042`` -- would have been scored
+against the wrong pair and then labelled from the wrong literals.
+
+So the wire value comes from the capture, proved against its manifest, and the
+hypotheses are derived from it: a decimal reading uses it unchanged, a percent
+reading divides by a hundred. The rate and the day count are searched
+*jointly*, because neither resolves without the other -- the inversion that
+reads the clock needs both, and the clock decides which expirations fall in
+which regime.
+
 For the expiration timestamp the report does something stronger than scoring.
 Given the vendor's reported delta and implied volatility, ``d1`` is determined,
 and time-to-expiry follows from a quadratic -- so each row can be *inverted* for
 the clock the vendor used, with no hypothesis at all. Grouped by expiration that
-inversion turned out to matter: the first live capture uses 16:00 ET for
-expirations inside the capture week and whole calendar days beyond it. Scoring a
-single global hypothesis would have averaged those together and reported a
-mediocre fit for both.
+inversion turned out to matter: the first live capture prices expirations inside
+its own week to an intraday close and everything later on whole calendar days.
+Scoring a single global hypothesis would have averaged those together and
+reported a mediocre fit for both, and the scope of the finding is carried as
+structured evidence rather than as a sentence somebody has to read.
 
 The pricing is the engine's own :mod:`src.gex.pricing`, not a private copy. The
 question certification answers is whether *this repository's* Black-Scholes
@@ -40,7 +56,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from enum import Enum
 from statistics import NormalDist
-from typing import Any
+from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
 from src.domain.contracts import OptionRight
@@ -51,8 +67,11 @@ __all__ = [
     "CAPTURE_CERTIFICATION_SCHEMA_VERSION",
     "CaptureCertificationError",
     "CaptureCertificationReport",
+    "CaptureRateEconomics",
+    "CaptureRequestBinding",
     "ContractKey",
     "EndpointSynchrony",
+    "ExpirationClockEvidence",
     "ExpirationClockReading",
     "HypothesisScore",
     "LoadedCapture",
@@ -63,7 +82,7 @@ __all__ = [
     "load_capture",
 ]
 
-CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.22"
+CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.23"
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -71,6 +90,27 @@ EASTERN = ZoneInfo("America/New_York")
 #: which a delta disagreement says nothing about the model -- it is the rounding
 #: in the field we are comparing against.
 IMPLIED_VOL_TICK = 1e-4
+
+#: Fewer rows than this and one expiration's inversion is noise, not a reading.
+MINIMUM_ROWS_PER_EXPIRATION = 20
+
+#: The year fractions worth testing, with the label each one earns if it wins.
+#: A denominator is a hypothesis, so the label is the winner's, never a
+#: constant chosen by whoever wrote the report.
+DAY_COUNT_HYPOTHESES: tuple[tuple[float, str], ...] = (
+    (365.0, "ACT/365"),
+    (365.25, "ACT/365.25"),
+    (360.0, "ACT/360"),
+    (252.0, "ACT/252"),
+)
+
+#: Day-count label -> the token recorded as the resolved convention.
+DAY_COUNT_TOKENS: dict[str, str] = {
+    "ACT/365": "ACT_365",
+    "ACT/365.25": "ACT_365_25",
+    "ACT/360": "ACT_360",
+    "ACT/252": "ACT_252",
+}
 
 #: Endpoint paths, as they appear in the capture record index.
 INDEX_PRICE = "/v3/index/snapshot/price"
@@ -152,6 +192,73 @@ def _set_hash(keys: set[ContractKey]) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class CaptureRequestBinding:
+    """What the capture actually asked the vendor, proved rather than supplied.
+
+    The vendor's Greeks are a function of the parameters the request carried, so
+    reconstructing them needs the ``rate_value`` that was really sent. v2.1.22
+    hard-coded 4.2 because that is what the first capture happened to send;
+    the obvious repair -- a ``rate_value=`` argument on ``certify_capture`` --
+    would be worse than the bug. It would let anyone pair one capture's
+    responses with another capture's rate and get a confident, wrong
+    certification out, which is precisely the substitution every other check in
+    this repository exists to prevent.
+
+    So the value is read from the run intent and then *proved* against the
+    manifest. Each planned request carries its canonical parameters; each
+    manifest record carries the ``request_spec_fingerprint`` of the session and
+    the ``planned_request_hash`` that was stamped at capture time. Recomputing
+    the digest from the parameters reproduces the stamp only if the parameters
+    are the ones that were stamped. Edit ``rate_value`` in the intent and the
+    recomputation no longer matches, and certification refuses.
+
+    The manifest is itself verified by recomputing its own hash from its
+    descriptors, so the anchor is not a number somebody could also have edited.
+    """
+
+    #: endpoint -> canonical parameters, as proved against the manifest.
+    parameters: dict[str, dict[str, str]]
+    verified_endpoints: tuple[str, ...]
+
+    def value_for(self, endpoint: str, name: str) -> str | None:
+        return self.parameters.get(endpoint, {}).get(name)
+
+    @property
+    def greeks_rate_value(self) -> float:
+        """The ``rate_value`` the Greeks request carried. The wire value ``w``."""
+        raw = self.value_for(OPTION_GREEKS, "rate_value")
+        if raw is None:
+            raise CaptureCertificationError(
+                "the capture's Greeks request carries no rate_value, so there "
+                "is no wire value to interpret. Certification will not guess "
+                "one: the vendor applied some default this response cannot "
+                "recover, and every delta in the capture depends on it."
+            )
+        try:
+            return float(raw)
+        except ValueError as error:
+            raise CaptureCertificationError(
+                f"the captured rate_value is {raw!r}, which is not a number"
+            ) from error
+
+    @property
+    def greeks_annual_dividend(self) -> float:
+        raw = self.value_for(OPTION_GREEKS, "annual_dividend")
+        try:
+            return float(raw) if raw is not None else 0.0
+        except ValueError:
+            return 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "verified_endpoints": list(self.verified_endpoints),
+            "greeks_rate_value": self.greeks_rate_value,
+            "greeks_annual_dividend": self.greeks_annual_dividend,
+            "binding": "RECOMPUTED_AGAINST_MANIFEST_PLANNED_REQUEST_HASH",
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LoadedCapture:
     """The five responses, verified against the manifest that describes them."""
 
@@ -163,6 +270,10 @@ class LoadedCapture:
     record_hashes: dict[str, str]
     verified_records: int
     parser_version: str
+    request: CaptureRequestBinding
+    #: What the capturing session declared it *meant* by the wire value, when it
+    #: recorded one. Absent for captures taken before v2.1.23.
+    declared_rate_semantics: dict[str, Any] | None = None
 
     def rows(self, endpoint: str) -> list[dict[str, str]]:
         try:
@@ -175,8 +286,113 @@ class LoadedCapture:
             ) from error
 
 
+def _verified_manifest(root: pathlib.Path) -> tuple[dict[str, Any], Any]:
+    """Load the manifest and prove its digest describes its own descriptors.
+
+    v2.1.22 read ``manifest["manifest_hash"]`` and reported it. A stored digest
+    that nothing recomputes is a label, not a check: edit a descriptor and the
+    label still reads correct, which is the state a verifier is supposed to
+    detect.
+    """
+    from src.adapters.raw_store import RawCaptureManifest
+
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise CaptureCertificationError(
+            f"{manifest_path} does not exist. A capture without its manifest "
+            "cannot be verified, and an unverified capture cannot certify "
+            "anything."
+        )
+    payload = json.loads(manifest_path.read_bytes())
+    stored = str(payload.get("manifest_hash", ""))
+    if not stored:
+        raise CaptureCertificationError(
+            "the manifest carries no manifest_hash; there is nothing to check "
+            "its descriptors against"
+        )
+    rebuilt = RawCaptureManifest.rebuilt_from(payload)
+    if rebuilt.manifest_hash != stored:
+        raise CaptureCertificationError(
+            f"the manifest stores {stored} and its own descriptors hash to "
+            f"{rebuilt.manifest_hash}. Either a descriptor was changed without "
+            "updating the digest, or the digest was changed without the "
+            "descriptors. Both mean this manifest does not describe this "
+            "capture."
+        )
+    return payload, rebuilt
+
+
+def _bind_request(
+    root: pathlib.Path, manifest: dict[str, Any]
+) -> CaptureRequestBinding:
+    """Recover the parameters the capture actually sent, and prove them."""
+    from src.adapters.thetadata.request_plan import planned_request_hash
+
+    intent_path = root / "run-intent.json"
+    if not intent_path.is_file():
+        raise CaptureCertificationError(
+            f"{intent_path} does not exist. The run intent is where a capture "
+            "records the requests it was about to make; without it the "
+            "parameters the vendor answered are unknown, and certification "
+            "will not accept them from a caller instead."
+        )
+    intent = json.loads(intent_path.read_bytes())
+    planned = (intent.get("request_plan") or {}).get("requests") or []
+    records = {r.get("endpoint", ""): r for r in manifest.get("records", [])}
+
+    parameters: dict[str, dict[str, str]] = {}
+    verified: list[str] = []
+    for entry in planned:
+        endpoint = str(entry.get("endpoint", ""))
+        record = records.get(endpoint)
+        if record is None:
+            # Planned but never captured. Not an error here -- the endpoint
+            # simply produced no record, and the acquisition report is where
+            # that is accounted for.
+            continue
+        canonical = tuple(
+            (str(pair[0]), str(pair[1]))
+            for pair in entry.get("canonical_query_parameters", [])
+        )
+        stamped = str(record.get("planned_request_hash", ""))
+        if not stamped:
+            raise CaptureCertificationError(
+                f"the manifest record for {endpoint} carries no "
+                "planned_request_hash, so the parameters in the run intent "
+                "cannot be tied to the response that was stored"
+            )
+        recomputed = planned_request_hash(
+            str(record.get("request_spec_fingerprint", "")), endpoint, canonical
+        )
+        if recomputed != stamped:
+            raise CaptureCertificationError(
+                f"the run intent's parameters for {endpoint} hash to "
+                f"{recomputed} and the manifest record was stamped {stamped}. "
+                "The recorded request is not the request that produced these "
+                "bytes. Certification refuses rather than reconstructing the "
+                "vendor's numbers under parameters it cannot show were sent."
+            )
+        parameters[endpoint] = dict(canonical)
+        verified.append(endpoint)
+
+    if OPTION_GREEKS not in parameters:
+        raise CaptureCertificationError(
+            "no verified request was found for "
+            f"{OPTION_GREEKS}. The Greeks request carries the rate the whole "
+            "reconstruction turns on, and an unverified one is not usable."
+        )
+    return CaptureRequestBinding(
+        parameters=parameters, verified_endpoints=tuple(sorted(verified))
+    )
+
+
 def load_capture(root: pathlib.Path | str) -> LoadedCapture:
-    """Read a capture directory and re-verify every payload against its hash.
+    """Read a capture directory and re-verify everything it claims about itself.
+
+    Three independent checks, none of which trusts a stored value on the
+    strength of its being present: the manifest hashes to its own descriptors,
+    every payload hashes to the digest its descriptor records, and the request
+    parameters in the run intent reproduce the stamp on the manifest record.
 
     The verification is not decoration. Certification reads numbers out of these
     bytes and then this repository records vendor conventions on the strength of
@@ -187,14 +403,7 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
     if not root.is_dir():
         raise CaptureCertificationError(f"{root} is not a directory")
 
-    manifest_path = root / "manifest.json"
-    if not manifest_path.is_file():
-        raise CaptureCertificationError(
-            f"{manifest_path} does not exist. A capture without its manifest "
-            "cannot be verified, and an unverified capture cannot certify "
-            "anything."
-        )
-    manifest = json.loads(manifest_path.read_bytes())
+    manifest, _rebuilt = _verified_manifest(root)
 
     tables: dict[str, list[dict[str, str]]] = {}
     record_hashes: dict[str, str] = {}
@@ -221,6 +430,13 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
         record_hashes[endpoint] = actual
         tables[endpoint] = list(csv.DictReader(io.StringIO(body.decode("utf-8-sig"))))
 
+    intent_path = root / "run-intent.json"
+    declared: dict[str, Any] | None = None
+    if intent_path.is_file():
+        raw_declared = json.loads(intent_path.read_bytes()).get("rate_semantics")
+        if isinstance(raw_declared, dict):
+            declared = dict(raw_declared)
+
     return LoadedCapture(
         root=root,
         session_id=str(manifest.get("session_id", "")),
@@ -234,6 +450,8 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
         record_hashes=record_hashes,
         verified_records=verified,
         parser_version=str(manifest.get("parser_version", "")),
+        request=_bind_request(root, manifest),
+        declared_rate_semantics=declared,
     )
 
 
@@ -395,26 +613,32 @@ class HypothesisScore:
 
 @dataclass(frozen=True, slots=True)
 class ExpirationClockReading:
-    """The time-to-expiry the vendor used for one expiration, read by inversion."""
+    """The time-to-expiry the vendor used for one expiration, read by inversion.
+
+    Deliberately carries no reference to any particular close. v2.1.22 stored
+    ``intraday_days_to_1600`` and classified a reading by its distance from
+    that, which cannot describe a vendor using any other time and made the
+    16:00 conclusion a property of the code rather than of the capture.
+    """
 
     expiration: str
     rows: int
     implied_days: float
     calendar_days: int
-    intraday_days_to_1600: float
     spread: float
 
     @property
     def offset_from_calendar(self) -> float:
+        """Implied minus calendar days: the intraday component, if any."""
         return self.implied_days - self.calendar_days
 
     @property
-    def matches_intraday_1600(self) -> bool:
-        return abs(self.implied_days - self.intraday_days_to_1600) < 0.01
+    def is_whole_day_regime(self) -> bool:
+        return abs(self.offset_from_calendar) < INTRADAY_OFFSET_THRESHOLD_DAYS
 
     @property
-    def matches_whole_days(self) -> bool:
-        return abs(self.offset_from_calendar) < 0.05
+    def is_intraday_regime(self) -> bool:
+        return 0.0 < self.offset_from_calendar < 1.0 and not self.is_whole_day_regime
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -422,12 +646,279 @@ class ExpirationClockReading:
             "rows": self.rows,
             "implied_days": self.implied_days,
             "calendar_days": self.calendar_days,
-            "intraday_days_to_1600": self.intraday_days_to_1600,
             "spread": self.spread,
             "offset_from_calendar": self.offset_from_calendar,
-            "matches_intraday_1600": self.matches_intraday_1600,
-            "matches_whole_days": self.matches_whole_days,
+            "is_intraday_regime": self.is_intraday_regime,
+            "is_whole_day_regime": self.is_whole_day_regime,
         }
+
+
+#: An implied offset smaller than this is a whole-day reading; larger is an
+#: intraday one. Roughly seventy minutes -- far above the inversion's spread on
+#: the real capture (0.0015-0.0198 for whole days) and far below any plausible
+#: intraday offset from a mid-session valuation stamp.
+INTRADAY_OFFSET_THRESHOLD_DAYS = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class _Reconstruction:
+    """One (rate, day-count) hypothesis, carried all the way through.
+
+    Holds the score *and* everything the score depended on, so the winning
+    combination's clock and regime split are the ones that were actually
+    measured under it rather than recomputed afterwards under a different
+    assumption.
+    """
+
+    rate: float
+    days_per_year: float
+    readings: tuple[ExpirationClockReading, ...]
+    evidence: ExpirationClockEvidence
+    boundary: date | None
+    rows: int
+    median_abs_delta_error: float
+    delta_rmse: float
+
+    def labelled(self, hypothesis: str) -> HypothesisScore:
+        """The same numbers, named for whichever dimension is being compared."""
+        return HypothesisScore(
+            hypothesis=hypothesis,
+            rows=self.rows,
+            median_abs_delta_error=self.median_abs_delta_error,
+            delta_rmse=self.delta_rmse,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExpirationClockEvidence:
+    """Which expirations support an intraday clock, and which refuse it.
+
+    The first capture prices expirations inside its own week to a 16:00 close
+    and everything later on whole calendar days. Recording that as
+    ``EXPIRATION_TIMESTAMP = 16:00 ET`` with a sentence of prose about scope
+    would leave a downstream consumer with a global-looking rule and no way to
+    discover it is not one. So the scope is data:
+
+    * ``intraday_expirations`` are the ones that demonstrate the clock;
+    * ``whole_day_expirations`` are the ones that contradict applying it
+      globally, named individually rather than counted;
+    * ``boundary_status`` says whether the transition between the two regimes
+      was actually observed.
+
+    On the first capture it was not. The sample jumps from four days out to
+    seven with nothing in between, so the rule could be "expiring this week",
+    "five business days" or "under seven days" and this capture cannot tell
+    them apart. ``OPEN`` is the honest answer and it is machine-readable.
+    """
+
+    intraday_expirations: tuple[str, ...]
+    whole_day_expirations: tuple[str, ...]
+    unexplained_expirations: tuple[str, ...]
+    #: The time of day the intraday regime implies, read out of the inversion
+    #: rather than matched against a guess. Empty when nothing is intraday.
+    implied_clock_et: str
+    implied_clock_seconds: float
+    boundary_last_intraday: str
+    boundary_first_whole_day: str
+    boundary_gap_days: int
+
+    @property
+    def boundary_status(self) -> str:
+        if not self.intraday_expirations or not self.whole_day_expirations:
+            return "NOT_OBSERVED"
+        # Adjacent calendar days pin the transition exactly. Anything wider
+        # leaves room for a rule this capture never tested.
+        return "RESOLVED" if self.boundary_gap_days <= 1 else "OPEN"
+
+    @property
+    def scope_is_global(self) -> bool:
+        """Whether the intraday clock may be applied to every expiration."""
+        return bool(self.intraday_expirations) and not self.whole_day_expirations
+
+    @property
+    def contradicting_count(self) -> int:
+        return len(self.whole_day_expirations)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "implied_clock_et": self.implied_clock_et,
+            "implied_clock_seconds_after_midnight": self.implied_clock_seconds,
+            "intraday_expirations": list(self.intraday_expirations),
+            "intraday_count": len(self.intraday_expirations),
+            "whole_day_expirations": list(self.whole_day_expirations),
+            "contradicting_count": self.contradicting_count,
+            "unexplained_expirations": list(self.unexplained_expirations),
+            "boundary_last_intraday": self.boundary_last_intraday,
+            "boundary_first_whole_day": self.boundary_first_whole_day,
+            "boundary_gap_days": self.boundary_gap_days,
+            "boundary_status": self.boundary_status,
+            "scope_is_global": self.scope_is_global,
+        }
+
+
+def _clock_evidence(
+    readings: tuple[ExpirationClockReading, ...], valuation: datetime
+) -> ExpirationClockEvidence:
+    """Split the inversion into regimes and read the clock out of it.
+
+    ``implied_days - calendar_days`` is the gap between the valuation stamp's
+    time of day and the expiry's, so the intraday readings *state* the clock.
+    v2.1.22 instead scored a fixed list of candidate times and labelled the
+    winner ``16:00 America/New_York`` from a constant, which cannot report a
+    vendor that moved its close and cannot be tested against a capture
+    generated at any other time.
+    """
+    intraday: list[ExpirationClockReading] = []
+    whole: list[ExpirationClockReading] = []
+    unexplained: list[str] = []
+    for reading in readings:
+        offset = reading.offset_from_calendar
+        if abs(offset) < INTRADAY_OFFSET_THRESHOLD_DAYS:
+            whole.append(reading)
+        elif 0.0 < offset < 1.0:
+            intraday.append(reading)
+        else:
+            # Neither regime. Recorded rather than forced into one, because a
+            # reading a full day out is a finding, not a rounding error.
+            unexplained.append(reading.expiration)
+
+    clock_seconds = 0.0
+    clock_text = ""
+    if intraday:
+        midnight = valuation.replace(hour=0, minute=0, second=0, microsecond=0)
+        offset_seconds = statistics.median(
+            r.offset_from_calendar * 86400.0 for r in intraday
+        )
+        clock_seconds = (valuation - midnight).total_seconds() + offset_seconds
+        # To the nearest minute: the inversion carries the implied-vol rounding
+        # noise, and a label of 15:59:58 would imply a precision the reported
+        # four-decimal volatility cannot support.
+        minute = round(clock_seconds / 60.0)
+        clock_text = f"{minute // 60 % 24:02d}:{minute % 60:02d} America/New_York"
+
+    last_intraday = max((r.expiration for r in intraday), default="")
+    later = sorted(r.expiration for r in whole if r.expiration > last_intraday)
+    first_whole = (
+        later[0] if later else (min((r.expiration for r in whole), default=""))
+    )
+    gap = 0
+    if last_intraday and first_whole:
+        gap = (date.fromisoformat(first_whole) - date.fromisoformat(last_intraday)).days
+
+    return ExpirationClockEvidence(
+        intraday_expirations=tuple(sorted(r.expiration for r in intraday)),
+        whole_day_expirations=tuple(sorted(r.expiration for r in whole)),
+        unexplained_expirations=tuple(sorted(unexplained)),
+        implied_clock_et=clock_text,
+        implied_clock_seconds=clock_seconds,
+        boundary_last_intraday=last_intraday,
+        boundary_first_whole_day=first_whole,
+        boundary_gap_days=gap,
+    )
+
+
+def _clock_time(evidence: ExpirationClockEvidence) -> time:
+    """The derived clock as a ``time``.
+
+    Falls back to the regular US equity-index close only when *no* expiration
+    showed an intraday component at all -- in which case the value is never
+    used to classify anything, because every expiration is whole-day.
+    """
+    if not evidence.implied_clock_et:
+        return time(16, 0)
+    hh, mm = evidence.implied_clock_et.split(" ")[0].split(":")
+    return time(int(hh), int(mm))
+
+
+def _clock_candidates(derived: time) -> tuple[time, ...]:
+    """The derived clock, the round time beside it, and near neighbours.
+
+    Built around whatever was derived rather than from a fixed list, so the
+    comparison discriminates for any close a vendor might use. A fixed list
+    containing the answer proves only that the answer was on the list.
+
+    Candidates sit on a five-minute grid around the derived estimate because
+    the estimator cannot resolve better than that. ``implied_vol`` is reported
+    to four decimals, and on the first capture the implied offset drifts with
+    maturity -- 0.2490 at the front, 0.2503 a week out -- which is enough to
+    move the median by a minute. Offering a per-minute candidate lets that
+    noise win: 16:01 scores 3.10e-04 against 16:00's 3.48e-04 on a capture
+    whose close is 16:00, and reporting a one-minute-off close as a vendor
+    convention would be over-reading the data.
+
+    Nothing is hidden by the snap. The unrounded estimate stays on
+    :class:`ExpirationClockEvidence` as ``implied_clock_et``, so a reader sees
+    both what was measured and what was resolved, and can disagree.
+    """
+    exact = derived.hour * 60 + derived.minute
+    snapped = round(exact / 5.0) * 5
+    # A *continuous* five-minute grid rather than a few offsets. Sparse
+    # neighbours can miss the answer outright: a derived 15:33 snaps to 15:35,
+    # and a grid of +/-15 and +/-30 around that never contains the 15:30 the
+    # vendor actually used. Half an hour either side at five-minute steps
+    # covers every plausible estimation error while still being a comparison
+    # a wrong hypothesis loses.
+    minutes = {snapped + step for step in range(-30, 35, 5)}
+    return tuple(
+        time((m // 60) % 24, m % 60) for m in sorted(minutes) if 0 <= m < 24 * 60
+    )
+
+
+def _invert_clock(
+    rows: list[dict[str, str]],
+    *,
+    spot: float,
+    valuation: datetime,
+    rate: float,
+    days_per_year: float,
+) -> tuple[ExpirationClockReading, ...]:
+    """Read the vendor's time-to-expiry per expiration, under one hypothesis.
+
+    ``days_per_year`` matters as much as the rate. The inversion recovers a
+    year fraction, and turning that back into days needs the vendor's own
+    denominator: read a 360-day vendor at 365 and every implied day is 1.4%
+    long, which is enough to push a whole-calendar-day expiration past the
+    intraday threshold and misclassify the regime entirely.
+    """
+    by_expiration: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        key = ContractKey.from_row(row)
+        try:
+            delta_value = float(row["delta"])
+            sigma = float(row["implied_vol"])
+            strike = float(row["strike"])
+        except (KeyError, ValueError):
+            continue
+        if not (0.05 <= abs(delta_value) <= 0.95):
+            continue
+        years = _implied_years(
+            spot=spot,
+            strike=strike,
+            sigma=sigma,
+            delta_value=delta_value,
+            rate=rate,
+            right=key.option_right,
+        )
+        if years is not None and years > 0.0:
+            by_expiration[key.expiration.isoformat()].append(years * days_per_year)
+
+    readings: list[ExpirationClockReading] = []
+    for exp_text in sorted(by_expiration):
+        values = sorted(by_expiration[exp_text])
+        if len(values) < MINIMUM_ROWS_PER_EXPIRATION:
+            continue
+        lo = values[int(0.05 * len(values))]
+        hi = values[min(int(0.95 * len(values)), len(values) - 1)]
+        readings.append(
+            ExpirationClockReading(
+                expiration=exp_text,
+                rows=len(values),
+                implied_days=statistics.median(values),
+                calendar_days=(date.fromisoformat(exp_text) - valuation.date()).days,
+                spread=hi - lo,
+            )
+        )
+    return tuple(readings)
 
 
 def _parse_et(text: str) -> datetime:
@@ -575,6 +1066,130 @@ def _solve_iv(
 
 
 # ---------------------------------------------------------------------------
+# Two different questions about the rate
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureRateEconomics:
+    """Whether the vendor priced the rate we meant -- a separate question.
+
+    v2.1.22 ran these together. The documentation/live conflict was the reason
+    the first capture was blocked from a GEX, which was right by accident: the
+    capture was blocked because it was priced at 420%, and the conflict is why
+    that happened, but they are not the same fact and they do not have the same
+    lifetime.
+
+    The conflict is permanent. It is a statement about the vendor's published
+    description and it stays true until ThetaData changes one side or the other.
+    Economic correctness is a statement about *one capture's request*, and the
+    corrected profile fixes it while the conflict remains exactly as recorded.
+    Left conflated, a correct second capture would inherit the first one's
+    blocker forever and no amount of fixing the request would clear it.
+    """
+
+    wire_rate_value: float
+    vendor_effective_rate: float
+    intended_economic_rate: float
+    #: How the intended rate was established. A capture that declared its own
+    #: is believed; one that did not is read under the vendor's documented unit,
+    #: which is what an operator following the documentation would have meant.
+    intended_rate_source: str
+    observed_unit: str
+    documented_unit: str
+
+    #: Same rate to within a rounding of the wire text. Nowhere near the factor
+    #: of a hundred this exists to catch.
+    TOLERANCE: ClassVar[float] = 1e-9
+
+    @property
+    def documentation_live_conflict(self) -> bool:
+        """Does the vendor read its own parameter as it documents it?"""
+        return self.observed_unit != self.documented_unit
+
+    @property
+    def effective_rate_matches_intended(self) -> bool:
+        """Did the vendor price the rate this capture meant to buy?"""
+        return (
+            abs(self.vendor_effective_rate - self.intended_economic_rate)
+            <= self.TOLERANCE
+        )
+
+    @property
+    def magnitude_ratio(self) -> float:
+        if self.intended_economic_rate == 0.0:
+            return 1.0 if self.vendor_effective_rate == 0.0 else float("inf")
+        return self.vendor_effective_rate / self.intended_economic_rate
+
+    @property
+    def blocker(self) -> str:
+        """Why this capture's Greeks cannot support a GEX, if they cannot."""
+        if self.effective_rate_matches_intended:
+            return ""
+        return (
+            f"the vendor priced this capture at r={self.vendor_effective_rate:g} "
+            f"and the request meant r={self.intended_economic_rate:g}, a factor "
+            f"of {self.magnitude_ratio:g}. Every implied volatility and every "
+            "delta in it describes a market that does not exist. The capture "
+            "remains the evidence that established the rate semantics and must "
+            "not be discarded."
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "wire_rate_value": self.wire_rate_value,
+            "vendor_effective_rate": self.vendor_effective_rate,
+            "intended_economic_rate": self.intended_economic_rate,
+            "intended_rate_source": self.intended_rate_source,
+            "observed_vendor_rate_unit": self.observed_unit,
+            "documented_rate_unit": self.documented_unit,
+            "rate_units_documentation_live_conflict": (
+                self.documentation_live_conflict
+            ),
+            "capture_effective_rate_matches_intended_rate": (
+                self.effective_rate_matches_intended
+            ),
+            "magnitude_ratio": self.magnitude_ratio,
+        }
+
+
+def _rate_economics(
+    capture: LoadedCapture,
+    *,
+    wire_rate: float,
+    effective_rate: float,
+    observed_unit: str,
+    documented_unit: str,
+) -> CaptureRateEconomics:
+    """What the capture meant to buy, beside what the vendor actually priced.
+
+    The intended rate cannot be recovered from the wire value alone -- that
+    ambiguity is the entire defect -- so a capture has to say. Since v2.1.23 the
+    run intent records it. Captures taken before that do not, and rather than
+    guess, this reads the wire value under the vendor's *documented* unit: the
+    reading an operator following the documentation would have intended, which
+    is exactly what happened for the first capture.
+    """
+    declared = capture.declared_rate_semantics or {}
+    intended = declared.get("economic_rate_decimal")
+    if isinstance(intended, (int, float)) and math.isfinite(float(intended)):
+        source = "DECLARED_BY_CAPTURE"
+        intended_rate = float(intended)
+    else:
+        source = "DERIVED_FROM_DOCUMENTED_UNIT"
+        factor = 0.01 if documented_unit == "PERCENT_ANNUAL_RATE" else 1.0
+        intended_rate = wire_rate * factor
+    return CaptureRateEconomics(
+        wire_rate_value=wire_rate,
+        vendor_effective_rate=effective_rate,
+        intended_economic_rate=intended_rate,
+        intended_rate_source=source,
+        observed_unit=observed_unit,
+        documented_unit=documented_unit,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The report
 # ---------------------------------------------------------------------------
 
@@ -600,8 +1215,15 @@ class CaptureCertificationReport:
     expiration_time_scores: tuple[HypothesisScore, ...]
     iv_basis_scores: tuple[tuple[str, int, float, float], ...]
     clock_readings: tuple[ExpirationClockReading, ...]
+    clock_evidence: ExpirationClockEvidence
+    rate_economics: CaptureRateEconomics
+    request: CaptureRequestBinding
     ledger: Any
     rows_reconstructed: int
+    #: The winning labels, kept on the report so a consumer never has to infer
+    #: them by re-scanning a score table.
+    resolved_day_count: str
+    resolved_expiration_clock: str
 
     @property
     def resolved_dimensions(self) -> tuple[str, ...]:
@@ -631,15 +1253,12 @@ class CaptureCertificationReport:
         the rate does not fix the open interest.
         """
         blockers: list[str] = []
-        rate = self.ledger.for_dimension(_rate_dimension())
-        if rate is not None and rate.status.is_conflict:
-            blockers.append(
-                "the Greeks in this capture were produced under rate_value=4.2 "
-                "consumed as a decimal, i.e. 420%. Every implied volatility and "
-                "every delta in it describes a market that does not exist. The "
-                "capture remains the evidence that established the conflict and "
-                "must not be discarded."
-            )
+        # The *economic* question, not the documentation one. A capture whose
+        # request was built under the measured semantics prices the intended
+        # rate and is not blocked here, while the documentation conflict it
+        # still carries stays exactly as recorded.
+        if self.rate_economics.blocker:
+            blockers.append(self.rate_economics.blocker)
         if not self.open_interest.permits_trusted_aggregate:
             blockers.append(
                 f"{self.open_interest.missing_count} contract identities have "
@@ -687,6 +1306,11 @@ class CaptureCertificationReport:
                 for basis, rows, median, within in self.iv_basis_scores
             ],
             "vendor_clock_by_expiration": [r.as_dict() for r in self.clock_readings],
+            "expiration_clock_evidence": self.clock_evidence.as_dict(),
+            "rate_economics": self.rate_economics.as_dict(),
+            "capture_request": self.request.as_dict(),
+            "resolved_day_count": self.resolved_day_count,
+            "resolved_expiration_clock": self.resolved_expiration_clock,
             "rows_reconstructed": self.rows_reconstructed,
             "vendor_behavior": self.ledger.as_dict(),
             "documentation_live_conflicts": [
@@ -838,100 +1462,101 @@ def certify_capture(
         "authoritative_for_vendor_model": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
     }
 
-    # -- the vendor's clock, by inversion -----------------------------------
+    # -- the vendor's rate and clock, inferred together ---------------------
+    #
+    # These cannot be resolved in sequence. Reading the clock out of the
+    # vendor's deltas needs a rate, and scoring a rate needs the regime
+    # boundary the clock produces. v2.1.22 broke the loop by hard-coding 4.2 --
+    # which is the value the first capture happened to send, so certification
+    # silently assumed its own conclusion and would misread any other capture.
+    #
+    # The loop is broken properly by reconstructing each candidate rate all the
+    # way through and keeping the one that reproduces the vendor's own numbers.
+    # The candidates come from the wire value this capture is *proved* to have
+    # sent: a decimal reading uses it unchanged, a percent reading divides by a
+    # hundred. Nothing here knows what that value is.
     usable = _usable_greeks(greeks)
-    by_expiration: dict[str, list[float]] = defaultdict(list)
-    for row in usable:
-        key = ContractKey.from_row(row)
-        d = float(row["delta"])
-        if not (0.05 <= abs(d) <= 0.95):
-            continue
-        years = _implied_years(
-            spot=spot,
-            strike=float(row["strike"]),
-            sigma=float(row["implied_vol"]),
-            delta_value=d,
-            rate=4.2,
-            right=key.option_right,
-        )
-        if years is not None and years > 0.0:
-            by_expiration[key.expiration.isoformat()].append(years * 365.0)
-
-    readings: list[ExpirationClockReading] = []
-    for exp_text in sorted(by_expiration):
-        values = sorted(by_expiration[exp_text])
-        if len(values) < 20:
-            continue
-        exp_d = date.fromisoformat(exp_text)
-        cal = (exp_d - valuation.date()).days
-        intraday = (
-            datetime.combine(exp_d, time(16, 0), tzinfo=EASTERN) - valuation
-        ).total_seconds() / 86400.0
-        lo = values[int(0.05 * len(values))]
-        hi = values[min(int(0.95 * len(values)), len(values) - 1)]
-        readings.append(
-            ExpirationClockReading(
-                expiration=exp_text,
-                rows=len(values),
-                implied_days=statistics.median(values),
-                calendar_days=cal,
-                intraday_days_to_1600=intraday,
-                spread=hi - lo,
-            )
-        )
-
-    # Where does the intraday clock stop applying? Derived, not assumed.
-    intraday_expirations = [r for r in readings if r.matches_intraday_1600]
-    boundary = (
-        max(date.fromisoformat(r.expiration) for r in intraday_expirations)
-        if intraday_expirations
-        else None
+    wire_rate = capture.request.greeks_rate_value
+    rate_candidates = (
+        ("DECIMAL_ANNUAL_RATE", wire_rate),
+        ("PERCENT_ANNUAL_RATE", wire_rate / 100.0),
     )
 
-    def score(**kwargs: Any) -> HypothesisScore | None:
-        return _score(
+    def reconstruct(rate: float, basis: float) -> _Reconstruction | None:
+        """Invert, split the regimes, derive the clock and score -- as one."""
+        readings = _invert_clock(
+            usable, spot=spot, valuation=valuation, rate=rate, days_per_year=basis
+        )
+        evidence = _clock_evidence(readings, valuation)
+        edge = (
+            date.fromisoformat(evidence.boundary_last_intraday)
+            if evidence.boundary_last_intraday
+            else None
+        )
+        fit = _score(
             usable,
             spot=spot,
             valuation=valuation,
-            whole_days_from=boundary,
-            **kwargs,
+            rate=rate,
+            days_per_year=basis,
+            expiry_time=_clock_time(evidence),
+            whole_days_from=edge,
+            label="",
+        )
+        if fit is None:
+            return None
+        return _Reconstruction(
+            rate=rate,
+            days_per_year=basis,
+            readings=readings,
+            evidence=evidence,
+            boundary=edge,
+            rows=fit.rows,
+            median_abs_delta_error=fit.median_abs_delta_error,
+            delta_rmse=fit.delta_rmse,
         )
 
-    # The two readings of the same configured rate. Which one the vendor used
-    # is *derived* from the fit, not asserted: a later capture in which the
-    # vendor has corrected the parameter must be able to say so, and a
-    # certification that could only ever report a conflict would report one
-    # after the conflict was gone.
-    rate_hypotheses = (
-        ("DECIMAL_ANNUAL_RATE", 4.2),
-        ("PERCENT_ANNUAL_RATE", 0.042),
+    # **Searched jointly, because the dimensions are not independent.** The
+    # inversion needs a rate *and* a denominator before it can say anything
+    # about the clock, and the clock decides which expirations are in which
+    # regime. Resolving them in sequence works only when the first guess is
+    # already right -- which is what hard-coding 4.2 and 365 quietly assumed.
+    grid = {
+        (unit, label): outcome
+        for unit, rate in rate_candidates
+        for basis, label in DAY_COUNT_HYPOTHESES
+        if (outcome := reconstruct(rate, basis)) is not None
+    }
+    if not grid:
+        raise CaptureCertificationError(
+            "no rate and day-count hypothesis could be scored against this "
+            "capture; the Greeks rows carry no usable implied volatilities or "
+            "deltas"
+        )
+    (observed_rate_unit, day_count_label), winner = min(
+        grid.items(), key=lambda item: item[1].delta_rmse
     )
-    scored_rates = [
-        (unit, s)
-        for unit, rate in rate_hypotheses
-        if (
-            s := score(
-                rate=rate,
-                days_per_year=365.0,
-                expiry_time=time(16, 0),
-                label=f"rate_value consumed as {unit} (r={rate})",
-            )
+    effective_rate = winner.rate
+    readings = winner.readings
+    clock_evidence = winner.evidence
+    boundary = winner.boundary
+    clock = _clock_time(clock_evidence)
+
+    # The two published tables are slices through that grid, relabelled for
+    # the dimension each one is about: rates compared at the winning day count,
+    # day counts compared at the winning rate. Nothing is recomputed, so a
+    # table can never disagree with the winner it was drawn from.
+    rate_scores = tuple(
+        grid[(unit, day_count_label)].labelled(
+            f"rate_value consumed as {unit} (r={rate:g})"
         )
-        is not None
-    ]
-    rate_scores = tuple(s for _unit, s in scored_rates)
+        for unit, rate in rate_candidates
+        if (unit, day_count_label) in grid
+    )
     day_count_scores = tuple(
-        s
-        for s in (
-            score(rate=4.2, days_per_year=basis, expiry_time=time(16, 0), label=label)
-            for basis, label in (
-                (365.0, "ACT/365"),
-                (365.25, "ACT/365.25"),
-                (360.0, "ACT/360"),
-                (252.0, "ACT/252"),
-            )
-        )
-        if s is not None
+        grid[(observed_rate_unit, label)].labelled(label)
+        for _basis, label in DAY_COUNT_HYPOTHESES
+        if (observed_rate_unit, label) in grid
     )
     front = [
         r
@@ -939,6 +1564,9 @@ def certify_capture(
         if boundary is not None
         and date.fromisoformat(r["expiration"].strip().strip('"')) <= boundary
     ]
+    # Candidates built around the derived clock rather than a fixed list, so
+    # the comparison is informative for any close the vendor might use and the
+    # winner cannot be right by coincidence of the list.
     expiration_time_scores = tuple(
         s
         for s in (
@@ -946,17 +1574,16 @@ def certify_capture(
                 front,
                 spot=spot,
                 valuation=valuation,
-                rate=4.2,
-                days_per_year=365.0,
-                expiry_time=t,
-                label=label,
+                rate=effective_rate,
+                # The winning denominator, not a constant. Scoring a clock at
+                # the wrong day count lets the fit trade one against the other
+                # -- an ACT/360 vendor read at 365 is short on time, and the
+                # search buys it back by moving the close later.
+                days_per_year=winner.days_per_year,
+                expiry_time=candidate,
+                label=f"{candidate.hour:02d}:{candidate.minute:02d} America/New_York",
             )
-            for t, label in (
-                (time(16, 0), "16:00 America/New_York"),
-                (time(15, 30), "15:30 America/New_York"),
-                (time(16, 15), "16:15 America/New_York"),
-                (time(16, 30), "16:30 America/New_York"),
-            )
+            for candidate in _clock_candidates(clock)
         )
         if s is not None
     )
@@ -975,7 +1602,7 @@ def certify_capture(
                 days = float((exp_d - valuation.date()).days)
             else:
                 days = (
-                    datetime.combine(exp_d, time(16, 0), tzinfo=EASTERN) - valuation
+                    datetime.combine(exp_d, clock, tzinfo=EASTERN) - valuation
                 ).total_seconds() / 86400.0
             if days <= 0.0:
                 continue
@@ -988,8 +1615,8 @@ def certify_capture(
                 target,
                 spot=spot,
                 strike=float(row["strike"]),
-                years=days / 365.0,
-                rate=4.2,
+                years=days / winner.days_per_year,
+                rate=effective_rate,
                 right=key.option_right,
             )
             if solved is None:
@@ -1009,22 +1636,31 @@ def certify_capture(
             )
 
     # -- the ledger ---------------------------------------------------------
+    #
+    # ``archive_sha256`` is passed through exactly as given. When no archive has
+    # been hashed the field stays empty, which is a true statement; v2.1.22
+    # substituted the manifest hash, which is a false one about a different
+    # artefact.
     identity = CaptureIdentity(
         session_id=capture.session_id,
         manifest_hash=capture.manifest_hash,
-        archive_sha256=archive_sha256 or capture.manifest_hash,
+        archive_sha256=archive_sha256,
     )
     best_rate = min(rate_scores, key=lambda s: s.delta_rmse) if rate_scores else None
     #: What the pinned OpenAPI description says. Constant, and never written
     #: from a measurement -- that separation is the whole point of this module.
     documented_rate_unit = "PERCENT_ANNUAL_RATE"
-    observed_rate_unit = next(
-        (unit for unit, s in scored_rates if s is best_rate), documented_rate_unit
-    )
     rate_status = (
         EvidenceStatus.DOCUMENTATION_LIVE_CONFLICT
         if observed_rate_unit != documented_rate_unit
         else EvidenceStatus.DOCUMENTATION_LIVE_AGREE
+    )
+    rate_economics = _rate_economics(
+        capture,
+        wire_rate=wire_rate,
+        effective_rate=effective_rate,
+        observed_unit=observed_rate_unit,
+        documented_unit=documented_rate_unit,
     )
     best_day = (
         min(day_count_scores, key=lambda s: s.delta_rmse) if day_count_scores else None
@@ -1035,7 +1671,25 @@ def certify_capture(
         else None
     )
     best_iv = min(iv_basis_scores, key=lambda s: s[2]) if iv_basis_scores else None
-    beyond = [r for r in readings if not r.matches_intraday_1600]
+    #: What the first-order OpenAPI description says ``implied_vol`` was solved
+    #: against. Constant, and never written from a measurement.
+    documented_iv_basis = "TRADE_PRICE"
+    observed_iv_basis = best_iv[0] if best_iv else documented_iv_basis
+    iv_status = (
+        EvidenceStatus.DOCUMENTATION_LIVE_CONFLICT
+        if observed_iv_basis != documented_iv_basis
+        else EvidenceStatus.DOCUMENTATION_LIVE_AGREE
+    )
+    # Labels come from the winning hypothesis. v2.1.22 emitted "ACT_365" and
+    # "16:00 America/New_York" as literals beside a score table that happened
+    # to agree with them, so a capture under any other convention would have
+    # been scored correctly and then labelled wrongly.
+    day_count_token = (
+        DAY_COUNT_TOKENS.get(best_day.hypothesis, best_day.hypothesis)
+        if best_day
+        else "UNRESOLVED"
+    )
+    expiration_label = best_exp.hypothesis if best_exp else "UNRESOLVED"
 
     observations = [
         LiveBehaviorObservation(
@@ -1073,7 +1727,7 @@ def certify_capture(
             dimension=BehaviorDimension.DAY_COUNT,
             status=EvidenceStatus.LIVE_ONLY,
             basis=ObservationBasis.LIVE_NUMERICAL_RECONSTRUCTION,
-            observed_value="ACT_365",
+            observed_value=day_count_token,
             capture=identity,
             rows_used=best_day.rows if best_day else 0,
             scope="SPXW first-order greeks in this capture",
@@ -1092,15 +1746,20 @@ def certify_capture(
             dimension=BehaviorDimension.EXPIRATION_TIMESTAMP,
             status=EvidenceStatus.LIVE_ONLY,
             basis=ObservationBasis.LIVE_NUMERICAL_RECONSTRUCTION,
-            observed_value="16:00 America/New_York",
+            observed_value=expiration_label,
             capture=identity,
             rows_used=best_exp.rows if best_exp else 0,
             scope=(
                 "SPXW expirations up to and including "
-                f"{boundary.isoformat() if boundary else 'n/a'}. Beyond that "
-                f"boundary {len(beyond)} expirations in this capture price on "
-                "whole calendar days instead, so this rule is NOT established "
-                "for longer maturities and must not be applied to them."
+                f"{clock_evidence.boundary_last_intraday or 'n/a'}. Beyond that "
+                f"boundary {clock_evidence.contradicting_count} expirations in "
+                "this capture price on whole calendar days instead, so this "
+                "rule is NOT established for longer maturities and must not be "
+                "applied to them. The exact transition is "
+                f"{clock_evidence.boundary_status}: the nearest contradicting "
+                f"expiration is {clock_evidence.boundary_first_whole_day or 'n/a'}, "
+                f"{clock_evidence.boundary_gap_days} calendar days later, and "
+                "nothing was captured in between."
             ),
             metrics=tuple(
                 ReconstructionMetric(
@@ -1114,15 +1773,20 @@ def certify_capture(
             ),
             notes=(
                 "Read by inverting delta and implied volatility for the vendor's "
-                "own time-to-expiry, not by scoring a global hypothesis."
+                "own time-to-expiry, not by scoring a global hypothesis. The "
+                "structured scope is in expiration_clock_evidence; this string "
+                "is a summary of it and never the only copy."
             ),
         ),
         LiveBehaviorObservation(
             dimension=BehaviorDimension.IV_PRICE_BASIS,
-            status=EvidenceStatus.DOCUMENTATION_LIVE_CONFLICT,
+            # Derived for the same reason the rate's status is: a hard-coded
+            # conflict cannot report a vendor that stopped conflicting, and it
+            # made exit code 3 unreachable-by-construction rather than earned.
+            status=iv_status,
             basis=ObservationBasis.LIVE_NUMERICAL_RECONSTRUCTION,
-            documented_value="TRADE_PRICE",
-            observed_value="NBBO_MID",
+            documented_value=documented_iv_basis,
+            observed_value=observed_iv_basis,
             documentation_reference=(
                 "components/schemas/first_order_greeks/properties/implied_vol"
             ),
@@ -1209,6 +1873,11 @@ def certify_capture(
         expiration_time_scores=expiration_time_scores,
         iv_basis_scores=tuple(iv_basis_scores),
         clock_readings=tuple(readings),
+        clock_evidence=clock_evidence,
+        rate_economics=rate_economics,
+        request=capture.request,
         ledger=VendorBehaviorLedger(observations=tuple(observations)),
         rows_reconstructed=len(usable),
+        resolved_day_count=day_count_token,
+        resolved_expiration_clock=expiration_label,
     )

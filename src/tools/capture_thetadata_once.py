@@ -68,11 +68,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.22"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.23"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.19"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.23"
 
 
 class ContractListEvidenceState(str, Enum):
@@ -1076,7 +1076,22 @@ def _rate_semantics(pipeline: Any, config: Any) -> Any:
         documented_rate_unit=(
             documented.value if isinstance(documented, RateUnit) else "UNKNOWN"
         ),
+        # The literal value that will go on the wire, and the rate the local
+        # model prices with, taken from their own places rather than
+        # re-derived. Passing them in is what makes
+        # ``predicted_effective_rate_matches_intended_rate`` a real check: a
+        # profile whose vendor block and model block disagree reports a
+        # mismatch instead of a number that agrees with itself.
+        configured_wire_value=(None if raw is None else float(raw)),
+        configured_local_model_rate=_local_model_rate(pipeline),
     )
+
+
+def _local_model_rate(pipeline: Any) -> float | None:
+    """The decimal rate the local Black-Scholes will use, if it is stated."""
+    spec = getattr(pipeline, "model_spec", None)
+    rate = getattr(spec, "risk_free_rate", None)
+    return float(rate) if isinstance(rate, (int, float)) else None
 
 
 def _settlement_for_run(
@@ -1422,6 +1437,12 @@ def run_capture(
             default_raw_store=store,
         )
         run.pipeline = pipeline
+        # Recorded here rather than at preflight because it needs the built
+        # pipeline's documentation bundle. It reaches the run intent, which is
+        # written before the first request goes out.
+        run.extra["rate_semantics"] = _rate_semantics(
+            pipeline, loaded.thetadata
+        ).as_dict()
         for name, held in (("raw store", store), ("artifact store", artifacts)):
             if getattr(held, "durability", "") != "DURABLE_APPEND_ONLY":
                 raise CaptureRunError(
@@ -2084,6 +2105,19 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
             "request_plan": (
                 run.request_plan.as_dict() if run.request_plan is not None else {}
             ),
+            # **What this capture means by its rate, recorded before it is sent.**
+            #
+            # The wire value alone cannot say. 4.2 is 4.2% or 420% depending on
+            # a unit, and the first capture proved the vendor and its own
+            # documentation disagree about which. So certification of a capture
+            # taken before v2.1.23 has to fall back to the documented reading to
+            # guess what was intended; from here on it does not have to guess,
+            # because the session states it.
+            #
+            # A declaration about our own intent, not an observation of the
+            # vendor: it can never change what certification infers the vendor
+            # did, only what it compares that against.
+            "rate_semantics": run.extra.get("rate_semantics", {}),
             "market_session": run.extra.get("market_session", {}),
             "out_of_session_capture": run.extra.get("out_of_session_capture", False),
             # **What the vendor documented, recorded before the first request.**

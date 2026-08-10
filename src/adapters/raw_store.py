@@ -2548,6 +2548,23 @@ class RawCaptureManifest:
                             ),
                             request_plan_hash=entry.get("request_plan_hash", ""),
                             planned_request_hash=entry.get("planned_request_hash", ""),
+                            # **Restored, since v2.1.23.** It was the one
+                            # descriptor field this reconstructor did not carry
+                            # back, and ``semantic_payload`` -- and therefore
+                            # ``manifest_hash`` -- covers it. The round trip was
+                            # silently lossy: rebuilding the first live capture
+                            # produced c46633ae... against a stored
+                            # 2f45534b..., so anything recomputing the digest to
+                            # check a manifest would have refused every honest
+                            # capture and learned nothing about a dishonest one.
+                            #
+                            # Same omission as v2.1.20's ``ManifestRecord.of``,
+                            # in the other direction. A field added to the
+                            # descriptor has to be added in three places, and
+                            # nothing failed when it was added in two.
+                            preflight_approval_hash=entry.get(
+                                "preflight_approval_hash", ""
+                            ),
                         )
                         for entry in payload.get("records", ())
                     ),

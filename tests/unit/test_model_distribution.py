@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.22"
+    assert package["project"]["version"] == "2.1.23"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -326,14 +326,14 @@ def test_all_three_versions_are_documented():
         "universe-resolver/2.1.12",
         "adapter-certification/2.1.13",
         "universe-documentation/2.1.12",
-        "raw-capture-run/2.1.22",
-        "raw-capture-intent/2.1.19",
+        "raw-capture-run/2.1.23",
+        "raw-capture-intent/2.1.23",
         # v2.1.22: the first live capture. Two schemas are new -- what a
         # documented-versus-observed record carries, and what an offline
         # certification derives -- and one moved, because MATCHED on RATE_UNITS
         # can now mean the documentation was contradicted rather than confirmed.
-        "pricing-evidence/2.1.22",
-        "capture-certification/2.1.22",
+        "pricing-evidence/2.1.23",
+        "capture-certification/2.1.23",
         "pricing-compatibility/2.1.22",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",

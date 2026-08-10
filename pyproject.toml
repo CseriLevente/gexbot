@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gex-futures-bot"
-version = "2.1.22"
+version = "2.1.23"
 description = "GEX research engine for SPX/SPXW option chains (research only; cannot trade)"
 requires-python = ">=3.12,<3.14"
 

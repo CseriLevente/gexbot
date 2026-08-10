@@ -1834,25 +1834,16 @@ def _error_status(error: BaseException) -> int | None:
 def _request_hash(
     spec_fingerprint: str, endpoint: Any, canonical: tuple[tuple[str, str], ...]
 ) -> str:
-    """One request's identity: the session's spec, the endpoint, the parameters.
+    """One request's identity. Defined by the request plan, not here.
 
-    The spec fingerprint is in it because two sessions asking the same URL under
-    different rate or dividend parameters are asking different questions of the
-    vendor, and the answer differs.
+    Moved to :mod:`src.adapters.thetadata.request_plan` in v2.1.23 so offline
+    certification can recompute it without importing the pipeline. Kept as a
+    thin alias because two implementations of one digest rule is how a stamp
+    and its verifier drift apart.
     """
-    import hashlib
-    import json
+    from src.adapters.thetadata.request_plan import planned_request_hash
 
-    payload = json.dumps(
-        {
-            "request_spec_fingerprint": spec_fingerprint,
-            "endpoint": getattr(endpoint, "value", endpoint),
-            "parameters": [list(pair) for pair in canonical],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return planned_request_hash(spec_fingerprint, endpoint, canonical)
 
 
 def _attempt_ids(observer: Any, since: int) -> tuple[str, ...]:

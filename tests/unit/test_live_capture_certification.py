@@ -11,16 +11,16 @@ So these tests are not a re-run of the reconstruction. They are the assertion
 that the conclusions drawn from it are the conclusions still encoded in the
 code, and that a later edit which quietly changes one of them fails here.
 
-**No synthetic row appears in any rate-semantics assertion.** The plumbing tests
-at the bottom build a small fake capture to exercise hash verification and the
-refusal paths, and they are careful not to conclude anything about the vendor
-from it -- a fabricated chain can be made to prove whatever its author already
-believed, which is the opposite of evidence.
+**No synthetic row appears anywhere in this file.** A fabricated chain can be
+made to prove whatever its author already believed, which is the opposite of
+evidence. The machinery -- hash verification, refusal paths, and whether the
+inference works at all on conventions it was not given -- is exercised in
+``test_capture_certification_machinery.py`` against a generated capture, and
+nothing there concludes anything about ThetaData.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import pathlib
 
@@ -28,11 +28,8 @@ import pytest
 
 from src.adapters.errors import ThetaDataProvenanceError
 from src.adapters.thetadata.capture_certification import (
-    CaptureCertificationError,
     ContractKey,
     OpenInterestCoverageState,
-    certify_capture,
-    load_capture,
 )
 from src.adapters.thetadata.live_behavior import (
     BehaviorDimension,
@@ -217,6 +214,45 @@ def test_the_capture_profile_sends_the_corrected_value():
     assert config.engine.model_spec.risk_free_rate == pytest.approx(0.042)
 
 
+def test_the_dry_run_predicts_the_second_capture_is_economically_valid(tmp_path):
+    """The block an operator reads before authorising the next paid session.
+
+    Every quantity the decision needs, with the two verdicts kept apart: the
+    documentation conflict is still true, and this request will nonetheless buy
+    the rate it means to.
+    """
+    from src.tools.capture_thetadata_once import plan_capture
+    from tests.certification_fixtures import DOCUMENTED_SESSION
+
+    report = plan_capture(
+        "config/thetadata_capture.yaml",
+        output=str(tmp_path / "capture-next"),
+        as_of=DOCUMENTED_SESSION,
+    )
+    rates = report["rate_semantics"]
+
+    assert rates["economic_rate_percent"] == pytest.approx(4.2)
+    assert rates["economic_rate_decimal"] == pytest.approx(0.042)
+    assert rates["local_model_rate"] == pytest.approx(0.042)
+    assert rates["wire_value"] == pytest.approx(0.042)
+    assert rates["vendor_request_rate_value"] == pytest.approx(0.042)
+    assert rates["documented_rate_unit"] == "PERCENT_ANNUAL_RATE"
+    assert rates["vendor_observed_rate_unit"] == "DECIMAL_ANNUAL_RATE"
+    # wire 0.042 + observed DECIMAL semantics => the vendor prices 0.042 ...
+    assert rates["predicted_vendor_effective_rate"] == pytest.approx(0.042)
+    assert rates["predicted_effective_rate_matches_intended_rate"] is True
+    # ... while the documentation still says something else entirely.
+    assert rates["documentation_live_conflict"] is True
+
+    # And the value reaches the wire, not only the report.
+    greeks = next(
+        request
+        for request in report["planned_requests"]["requests"]
+        if "greeks" in request["endpoint"]
+    )
+    assert dict(greeks["canonical_query_parameters"])["rate_value"] == "0.042"
+
+
 # ---------------------------------------------------------------------------
 # Day count, expiration clock, IV basis, underlying
 # ---------------------------------------------------------------------------
@@ -257,8 +293,8 @@ def test_the_expiration_rule_is_scoped_to_where_it_actually_holds(capture):
     assert "NOT established" in observation["scope"]
 
     readings = capture["vendor_clock_by_expiration"]
-    intraday = [r for r in readings if r["matches_intraday_1600"]]
-    whole = [r for r in readings if r["matches_whole_days"]]
+    intraday = [r for r in readings if r["is_intraday_regime"]]
+    whole = [r for r in readings if r["is_whole_day_regime"]]
     assert {r["expiration"] for r in intraday} == {
         "2026-08-10",
         "2026-08-11",
@@ -269,6 +305,70 @@ def test_the_expiration_rule_is_scoped_to_where_it_actually_holds(capture):
     assert len(whole) > len(intraday)
     # Every expiration is one or the other; none is unexplained.
     assert len(intraday) + len(whole) == len(readings)
+
+
+def test_the_expiration_scope_is_structured_not_only_prose(capture):
+    """A consumer can establish the scope without reading a sentence.
+
+    v2.1.22 put the whole distinction in a ``scope`` string. Anything
+    downstream that wanted to know whether 16:00 applied to a given expiration
+    had to parse English or guess, and guessing would have given it a global
+    rule.
+    """
+    evidence = capture["expiration_clock_evidence"]
+    assert evidence["intraday_expirations"] == [
+        "2026-08-10",
+        "2026-08-11",
+        "2026-08-12",
+        "2026-08-13",
+        "2026-08-14",
+    ]
+    # The 26 that contradict a global 16:00, named rather than counted.
+    assert evidence["contradicting_count"] == 26
+    assert len(evidence["whole_day_expirations"]) == 26
+    assert "2026-09-30" in evidence["whole_day_expirations"]
+    assert evidence["scope_is_global"] is False
+    # And the transition itself was never observed: the sample jumps from four
+    # days out to seven with nothing in between.
+    assert evidence["boundary_last_intraday"] == "2026-08-14"
+    assert evidence["boundary_first_whole_day"] == "2026-08-17"
+    assert evidence["boundary_gap_days"] == 3
+    assert evidence["boundary_status"] == "OPEN"
+    assert not evidence["unexplained_expirations"]
+
+
+def test_the_first_capture_rate_is_bound_to_its_own_request(capture):
+    """The wire value came from the capture, proved against the manifest."""
+    request = capture["capture_request"]
+    assert request["greeks_rate_value"] == pytest.approx(4.2)
+    assert request["binding"] == "RECOMPUTED_AGAINST_MANIFEST_PLANNED_REQUEST_HASH"
+    assert len(request["verified_endpoints"]) == 5
+
+
+def test_the_documentation_conflict_and_the_economic_error_are_separate(capture):
+    """Both true here, and for different reasons."""
+    economics = capture["rate_economics"]
+    assert economics["wire_rate_value"] == pytest.approx(4.2)
+    assert economics["vendor_effective_rate"] == pytest.approx(4.2)
+    assert economics["intended_economic_rate"] == pytest.approx(0.042)
+    assert economics["magnitude_ratio"] == pytest.approx(100.0)
+    # The vendor does not read its own parameter as it documents it ...
+    assert economics["rate_units_documentation_live_conflict"] is True
+    # ... and separately, this capture did not buy the rate it meant to.
+    assert economics["capture_effective_rate_matches_intended_rate"] is False
+    # The first capture predates the run intent recording its own intent.
+    assert economics["intended_rate_source"] == "DERIVED_FROM_DOCUMENTED_UNIT"
+
+
+def test_the_resolved_labels_are_the_winning_hypotheses(capture):
+    assert capture["resolved_day_count"] == "ACT_365"
+    assert capture["resolved_expiration_clock"] == "16:00 America/New_York"
+    best_day = min(capture["day_count_comparison"], key=lambda r: r["delta_rmse"])
+    best_clock = min(
+        capture["expiration_time_comparison"], key=lambda r: r["delta_rmse"]
+    )
+    assert best_day["hypothesis"] == "ACT/365"
+    assert best_clock["hypothesis"] == "16:00 America/New_York"
 
 
 def test_nbbo_midpoint_reproduces_the_captured_implied_volatility(capture):
@@ -394,8 +494,10 @@ def test_the_first_capture_is_evidence_and_not_a_gex_input(capture):
     assert capture["analytical_readiness"] == "ADAPTER_CERTIFICATION_EVIDENCE"
     assert capture["trusted_for_gex"] is False
     blockers = " ".join(capture["gex_blockers"])
-    assert "420%" in blockers
+    # Two independent reasons, and fixing the rate does not fix the second.
+    assert "factor of 100" in blockers
     assert "open-interest" in blockers
+    assert len(capture["gex_blockers"]) == 2
 
 
 def test_every_dimension_the_capture_touched_is_recorded(capture):
@@ -435,68 +537,14 @@ def _identity() -> CaptureIdentity:
 
 
 # ---------------------------------------------------------------------------
-# Plumbing. Fabricated bytes, and no conclusion about the vendor drawn from them.
+# One pure unit check that belongs beside the findings
 # ---------------------------------------------------------------------------
-
-
-def _write_capture(root: pathlib.Path, bodies: dict[str, str]) -> None:
-    (root / "raw").mkdir(parents=True)
-    records = []
-    for endpoint, body in bodies.items():
-        name = endpoint.strip("/").replace("/", "-") + ".raw"
-        raw = body.encode("utf-8")
-        (root / "raw" / name).write_bytes(raw)
-        records.append(
-            {
-                "endpoint": endpoint,
-                "payload_location": name,
-                "payload_hash": hashlib.sha256(raw).hexdigest(),
-                "effective_valuation_timestamp": "2026-08-10T14:01:29.616899+00:00",
-            }
-        )
-    (root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "session_id": "capture-test",
-                "manifest_hash": "0" * 64,
-                "parser_version": "thetadata-v3-parser/2.1.17",
-                "records": records,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_a_payload_that_no_longer_matches_its_hash_is_refused(tmp_path):
-    root = tmp_path / "capture"
-    _write_capture(root, {"/v3/index/snapshot/price": "timestamp,symbol,price\n"})
-    payload = next((root / "raw").iterdir())
-    payload.write_bytes(payload.read_bytes() + b"tampered\n")
-
-    with pytest.raises(CaptureCertificationError, match="not the bytes that were"):
-        load_capture(root)
-
-
-def test_a_capture_without_a_manifest_is_refused(tmp_path):
-    root = tmp_path / "capture"
-    (root / "raw").mkdir(parents=True)
-    with pytest.raises(CaptureCertificationError, match="without its manifest"):
-        load_capture(root)
-
-
-def test_a_manifest_naming_an_absent_payload_is_refused(tmp_path):
-    root = tmp_path / "capture"
-    _write_capture(root, {"/v3/index/snapshot/price": "timestamp\n"})
-    next((root / "raw").iterdir()).unlink()
-    with pytest.raises(CaptureCertificationError, match=r"the file is\s+absent"):
-        load_capture(root)
-
-
-def test_certification_refuses_a_capture_missing_an_endpoint(tmp_path):
-    root = tmp_path / "capture"
-    _write_capture(root, {"/v3/index/snapshot/price": "timestamp,symbol,price\n"})
-    with pytest.raises(CaptureCertificationError, match="no /v3/option"):
-        certify_capture(root)
+#
+# The capture-directory plumbing -- hash mismatches, absent payloads, mutated
+# manifests, missing endpoints -- moved to
+# `test_capture_certification_machinery.py` in v2.1.23, where the synthetic
+# builder produces a capture realistic enough to exercise the verification
+# rather than a stub that skips past it.
 
 
 def test_a_contract_key_keeps_the_vendors_own_strike_text():

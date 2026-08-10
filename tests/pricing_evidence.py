@@ -105,9 +105,17 @@ def attestations(
 
 #: The rate and dividend *values* are settled by configuration: we choose the
 #: numbers and we send them, so both sides of that comparison are ours.
+#:
+#: The unit is not ours, and until v2.1.22 this said ``4.2`` /
+#: ``PERCENT_ANNUAL_RATE`` on the authority of the pinned OpenAPI description.
+#: The first live capture was taken on that basis and priced at 420%: the v3
+#: implementation consumes ``rate_value`` as a decimal. These fixtures now state
+#: the same economic rate the way the vendor actually reads it, because a helper
+#: that builds "a resolved pricing configuration" out of a combination the
+#: vendor mis-prices is not building a resolved configuration.
 CONFIGURED_PRICING_SETTINGS: dict[str, Any] = {
-    "rate_value": 4.2,
-    "rate_units": "PERCENT_ANNUAL_RATE",
+    "rate_value": 0.042,
+    "rate_units": "DECIMAL_ANNUAL_RATE",
     "annual_dividend": 0.0,
     "dividend_convention": "ZERO_DIVIDEND",
 }

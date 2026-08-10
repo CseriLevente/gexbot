@@ -259,5 +259,45 @@ answered and the manifest verified against the store; every other code is
 documented in `docs/THETADATA_INTEGRATION.md`.
 
 **No GEX is computed from that capture**, and none should be trusted until the
-eight vendor conventions in `docs/ADAPTER_CERTIFICATION.md` have been compared
-against the captured bytes.
+vendor conventions in `docs/ADAPTER_CERTIFICATION.md` have been compared against
+the captured bytes.
+
+---
+
+## After the session: certify the capture
+
+```bash
+python -m src.tools.certify_thetadata_capture /absolute/path/to/capture \
+    --archive-sha256 <digest of the archive you distributed> \
+    --json certification.json
+```
+
+Offline. It re-verifies every payload against the manifest before computing
+anything, then derives the rate semantics, the day count, the expiration clock,
+the implied-volatility basis, the underlying the Greeks were computed against,
+universe coverage and open-interest coverage — each as a table of scored
+hypotheses rather than a verdict.
+
+| exit | meaning |
+|---|---|
+| 0 | certified; nothing contradicts the documentation |
+| 2 | the capture could not be read or verified |
+| 3 | certified, **and** a documentation/live conflict is present |
+
+Exit 3 is not a failure. It is the state the first capture is in.
+
+Two runs over an untouched capture produce the same `report_hash`. A run over an
+edited one does not, and a run over a capture whose payloads no longer match
+their manifest hashes refuses before computing anything.
+
+### What the first capture established
+
+See `docs/ADAPTER_CERTIFICATION.md`. The headline: `rate_value` is consumed as a
+**decimal**, not the percent the OpenAPI document describes, so the first
+session was priced at 420%. That capture is
+`ADAPTER_CERTIFICATION_EVIDENCE` / `NOT_TRUSTED_FOR_GEX` and must not be
+discarded — it is the evidence.
+
+The corrected profile sends `rate_value: 0.042`. The dry run prints the economic
+rate, the local model rate, the wire value, both units and the conflict; check
+that block before the second capture.

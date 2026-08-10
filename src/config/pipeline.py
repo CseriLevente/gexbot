@@ -246,6 +246,26 @@ class RateUnit(str, Enum):
 RATE_TOLERANCE = 1e-9
 DIVIDEND_TOLERANCE = 1e-9
 
+#: How ``rate_value`` is *actually* consumed, measured rather than read.
+#:
+#: The pinned OpenAPI document describes the parameter as a percent. The first
+#: live capture sent ``4.2`` on that basis and the returned Greeks are only
+#: reproducible with ``r = 4.2`` -- 420%. Reconstructing 7,348 usable rows put
+#: the delta RMSE at 1.75e-04 under ``r=4.2`` and 2.32e-01 under ``r=0.042``, a
+#: separation of three orders of magnitude with no ambiguity left in it.
+#:
+#: Pinned here rather than derived at import so the pipeline does not need the
+#: capture directory present to build a correct request. The derivation lives in
+#: :mod:`src.adapters.thetadata.capture_certification` and is re-runnable
+#: offline against the archive named below.
+OBSERVED_RATE_UNITS: RateUnit = RateUnit.DECIMAL_ANNUAL_RATE
+
+#: Where a reader checks the measurement above.
+LIVE_RATE_UNIT_REFERENCE = (
+    "docs/ADAPTER_CERTIFICATION.md#rate-units "
+    "(capture-20260810T140129Z-2ef4f56270c1447b)"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RateAssumption:
@@ -582,6 +602,7 @@ def check_rate_compatibility(
     vendor: RateAssumption,
     local: RateAssumption,
     documented_unit: RateUnit | None = None,
+    observed_unit: RateUnit | None = None,
 ) -> PricingCompatibilityReport:
     """Do the two sides mean the same rate?
 
@@ -593,6 +614,18 @@ def check_rate_compatibility(
     read off the local configuration. ``None`` means nothing has established it
     and the units stay ``UNKNOWN`` -- which was the only available answer until
     v2.1.18, because until then the document had not been obtained.
+
+    ``observed_unit`` is what the **implementation** was measured doing, from a
+    numerical reconstruction over a live capture. When both are present and they
+    disagree, the observed one governs: the request is answered by the
+    implementation, and a parameter built to satisfy the document instead is
+    wrong by exactly the factor the two differ by. The first live capture put
+    that factor at one hundred.
+
+    The disagreement is never resolved away. A configuration that matches the
+    measured behaviour still reports the documentation conflict, because "the
+    vendor's published description of this parameter is wrong" is a finding
+    about the vendor that outlives any one config file.
     """
     if vendor.vendor_default or (vendor.raw_value is None and vendor.source):
         return PricingCompatibilityReport(
@@ -644,8 +677,19 @@ def check_rate_compatibility(
     # A *document* can settle it, and now one does: the pinned OpenAPI
     # description says ``rate_value`` is "The interest rate, as a percent". So
     # there are three cases, not one.
+    # The unit that decides what the vendor's Black-Scholes actually receives.
+    # Measurement outranks documentation here and only here: everywhere else in
+    # this repository a document is the stronger evidence, but a document cannot
+    # witness what code does, and this one demonstrably does not describe it.
+    governing_unit = observed_unit or documented_unit
+    documentation_contradicted = (
+        observed_unit is not None
+        and documented_unit is not None
+        and observed_unit is not documented_unit
+    )
+
     reconciliation = RateUnitReconciliation(
-        vendor_input_unit=documented_unit or RateUnit.UNKNOWN,
+        vendor_input_unit=governing_unit or RateUnit.UNKNOWN,
         configured_vendor_unit=vendor.unit,
         configured_vendor_input=vendor.raw_value,
         normalization_factor=vendor.normalization_factor,
@@ -655,7 +699,7 @@ def check_rate_compatibility(
     )
     conditional = ""
 
-    if documented_unit is None:
+    if governing_unit is None:
         # Nothing has established how the API reads the number.
         units = _result(
             PricingDimension.RATE_UNITS,
@@ -676,26 +720,39 @@ def check_rate_compatibility(
             "vendor's to define"
         )
     elif not reconciliation.units_reconcile:
-        # The document and the configuration disagree about what we are
+        # The configuration disagrees with whatever governs about what we are
         # sending. Refused: a config claiming DECIMAL_ANNUAL_RATE while sending
-        # 4.2 to an API documented to read percents is sending 420%, and it is
-        # the local model's agreement with itself that makes it look fine.
+        # 4.2 to an API that reads percents is sending 420%, and it is the local
+        # model's agreement with itself that makes it look fine.
+        measured = observed_unit is not None
         units = _result(
             PricingDimension.RATE_UNITS,
             CompatibilityStatus.MISMATCHED,
-            "VENDOR_RATE_UNITS_CONTRADICT_DOCUMENTATION",
-            vendor=documented_unit.value,
+            (
+                "VENDOR_RATE_UNITS_CONTRADICT_OBSERVED_IMPLEMENTATION"
+                if measured
+                else "VENDOR_RATE_UNITS_CONTRADICT_DOCUMENTATION"
+            ),
+            vendor=governing_unit.value,
             local=vendor.unit.value,
             evidence=CompatibilityEvidence(
-                source=EvidenceSource.VENDOR_DOCUMENTATION,
-                reference="components/parameters/rate_value/description",
+                source=(
+                    EvidenceSource.LIVE_COMPARISON
+                    if measured
+                    else EvidenceSource.VENDOR_DOCUMENTATION
+                ),
+                reference=(
+                    LIVE_RATE_UNIT_REFERENCE
+                    if measured
+                    else "components/parameters/rate_value/description"
+                ),
             ),
             detail=(
-                f"the pinned vendor documentation reads rate_value as "
-                f"{documented_unit.value}; this configuration declares "
-                f"{vendor.unit.value} and sends {vendor.raw_value}. Under the "
-                f"documented reading that is "
-                f"{_documented_reading(vendor.raw_value, documented_unit)}, not "
+                f"the vendor's {'measured implementation' if measured else 'pinned documentation'} "
+                f"reads rate_value as {governing_unit.value}; this "
+                f"configuration declares {vendor.unit.value} and sends "
+                f"{vendor.raw_value}. Read the way the vendor reads it that is "
+                f"{_documented_reading(vendor.raw_value, governing_unit)}, not "
                 f"{vendor.normalized}"
             ),
         )
@@ -710,36 +767,92 @@ def check_rate_compatibility(
                 _result(
                     PricingDimension.RISK_FREE_RATE,
                     CompatibilityStatus.MISMATCHED,
-                    "RATE_VALUE_DIFFERS_UNDER_DOCUMENTED_UNITS",
-                    vendor=_documented_reading(vendor.raw_value, documented_unit),
+                    (
+                        "RATE_VALUE_DIFFERS_UNDER_OBSERVED_UNITS"
+                        if measured
+                        else "RATE_VALUE_DIFFERS_UNDER_DOCUMENTED_UNITS"
+                    ),
+                    vendor=_documented_reading(vendor.raw_value, governing_unit),
                     local=local.normalized,
                     evidence=CompatibilityEvidence(
-                        source=EvidenceSource.VENDOR_DOCUMENTATION,
-                        reference="components/parameters/rate_value/description",
+                        source=(
+                            EvidenceSource.LIVE_COMPARISON
+                            if measured
+                            else EvidenceSource.VENDOR_DOCUMENTATION
+                        ),
+                        reference=(
+                            LIVE_RATE_UNIT_REFERENCE
+                            if measured
+                            else "components/parameters/rate_value/description"
+                        ),
                     ),
                     detail=(
-                        f"read as the document says, {vendor.raw_value} is "
-                        f"{_documented_reading(vendor.raw_value, documented_unit)}; "
+                        f"read the way the vendor reads it, {vendor.raw_value} "
+                        f"is {_documented_reading(vendor.raw_value, governing_unit)}; "
                         f"the local model prices with {local.normalized}"
                     ),
                 ),
             )
         )
-    else:
+    elif documentation_contradicted:
+        # The configuration matches what the implementation does, and the
+        # implementation does not match its own documentation. MATCHED, because
+        # the request is correct -- under a distinct code, because a reader
+        # scanning for RATE_UNITS_AGREE must not conclude that the vendor's
+        # published description was confirmed. It was contradicted.
         units = _result(
             PricingDimension.RATE_UNITS,
             CompatibilityStatus.MATCHED,
-            "RATE_UNITS_AGREE",
-            vendor=documented_unit.value,
+            "RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION",
+            vendor=observed_unit.value if observed_unit else "",
             local=local.unit.value,
             evidence=CompatibilityEvidence(
-                source=EvidenceSource.VENDOR_DOCUMENTATION,
-                reference="components/parameters/rate_value/description",
+                source=EvidenceSource.LIVE_COMPARISON,
+                reference=LIVE_RATE_UNIT_REFERENCE,
             ),
             detail=(
-                f"the pinned vendor documentation reads rate_value as "
-                f"{documented_unit.value} and this configuration sends it that "
-                f"way: {reconciliation.describe()}. Different units, one rate."
+                f"reconstruction of a live capture shows the implementation "
+                f"consumes rate_value as "
+                f"{observed_unit.value if observed_unit else ''}, and this "
+                f"configuration sends it that way: {reconciliation.describe()}. "
+                f"The pinned documentation says "
+                f"{documented_unit.value if documented_unit else ''}, which the "
+                f"capture contradicts; the documented reading is preserved and "
+                f"the measured one governs the request"
+            ),
+        )
+    else:
+        # Agreement. Which evidence to cite depends on what established the
+        # unit: a session holding no document must not be handed a
+        # VENDOR_DOCUMENTATION citation for a fact that was measured.
+        from_document = documented_unit is not None
+        units = _result(
+            PricingDimension.RATE_UNITS,
+            CompatibilityStatus.MATCHED,
+            (
+                "RATE_UNITS_AGREE"
+                if from_document
+                else "RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION"
+            ),
+            vendor=governing_unit.value,
+            local=local.unit.value,
+            evidence=CompatibilityEvidence(
+                source=(
+                    EvidenceSource.VENDOR_DOCUMENTATION
+                    if from_document
+                    else EvidenceSource.LIVE_COMPARISON
+                ),
+                reference=(
+                    "components/parameters/rate_value/description"
+                    if from_document
+                    else LIVE_RATE_UNIT_REFERENCE
+                ),
+            ),
+            detail=(
+                f"the vendor's "
+                f"{'pinned documentation' if from_document else 'measured implementation'}"
+                f" reads rate_value as {governing_unit.value} and this "
+                f"configuration sends it that way: {reconciliation.describe()}."
             ),
         )
 
@@ -4996,6 +5109,7 @@ def assess_pricing_compatibility(
         vendor=vendor_rate_assumption(config),
         local=local_rate_assumption(spec),
         documented_unit=documentation.rate_units,
+        observed_unit=OBSERVED_RATE_UNITS,
     ).merged_with(
         check_dividend_compatibility(
             vendor=vendor_dividend_assumption(config),

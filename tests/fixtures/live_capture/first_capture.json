@@ -1,0 +1,881 @@
+{
+  "_comment": [
+    "Derived certification evidence from the first live ThetaData capture.",
+    "",
+    "The raw vendor payloads are NOT committed. They are paid market data",
+    "under a ThetaData subscription, and redistributing 5 MB of it in a git",
+    "repository is a licensing question this project has no answer to. What",
+    "is committed is everything needed to check that a capture in hand is",
+    "the same capture: the archive digest, the manifest hash, the per-record",
+    "payload hashes, the identity-set hashes, and the statistics the",
+    "reconstruction produced.",
+    "",
+    "To re-derive all of it:",
+    "  python -m src.tools.certify_thetadata_capture <capture-root> \\",
+    "      --archive-sha256 5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+    "",
+    "Every number below came out of that command. None was typed in."
+  ],
+  "access_mode": "THETA_TERMINAL_REST_V3",
+  "analytical_readiness": "ADAPTER_CERTIFICATION_EVIDENCE",
+  "capture": {
+    "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+    "captured_at": "2026-08-10T14:01:29.616899+00:00",
+    "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+    "parser_version": "thetadata-v3-parser/2.1.17",
+    "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+  },
+  "day_count_comparison": [
+    {
+      "delta_rmse": 0.00017460045617437685,
+      "hypothesis": "ACT/365",
+      "median_abs_delta_error": 4.451469477144681e-05,
+      "rows": 7348
+    },
+    {
+      "delta_rmse": 0.0007208047888807152,
+      "hypothesis": "ACT/365.25",
+      "median_abs_delta_error": 8.016227660713677e-05,
+      "rows": 7348
+    },
+    {
+      "delta_rmse": 0.0159298570792905,
+      "hypothesis": "ACT/360",
+      "median_abs_delta_error": 0.0004802374719931092,
+      "rows": 7348
+    },
+    {
+      "delta_rmse": 0.09862788858244732,
+      "hypothesis": "ACT/252",
+      "median_abs_delta_error": 0.01289964060124934,
+      "rows": 7348
+    }
+  ],
+  "dimensions_resolved": [
+    "RATE_UNITS",
+    "DAY_COUNT",
+    "EXPIRATION_TIMESTAMP",
+    "IV_PRICE_BASIS",
+    "UNDERLYING_SOURCE",
+    "DIVIDEND_CONVENTION",
+    "CONTRACT_LIST_UNIVERSE"
+  ],
+  "dimensions_unresolved": [],
+  "endpoint_synchrony": {
+    "identical_ask_ratio": 0.9699093157460841,
+    "identical_bid_ratio": 0.9689475130530365,
+    "identical_timestamp_ratio": 0.7489007969222314,
+    "is_atomic": false,
+    "max_gap_seconds": 51.593,
+    "overlap": 14556,
+    "p99_gap_seconds": 2.444
+  },
+  "expiration_time_comparison": [
+    {
+      "delta_rmse": 0.00034791561392758294,
+      "hypothesis": "16:00 America/New_York",
+      "median_abs_delta_error": 4.795259171688133e-05,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.009037917931919043,
+      "hypothesis": "15:30 America/New_York",
+      "median_abs_delta_error": 0.00011396331061761531,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.0056063270033672955,
+      "hypothesis": "16:15 America/New_York",
+      "median_abs_delta_error": 0.00012956954365611354,
+      "rows": 1592
+    },
+    {
+      "delta_rmse": 0.01212826653512948,
+      "hypothesis": "16:30 America/New_York",
+      "median_abs_delta_error": 0.00021693880382834892,
+      "rows": 1592
+    }
+  ],
+  "fitting_method": {
+    "comparand": "vendor-reported delta, against delta recomputed from vendor-reported implied_vol",
+    "implied_vol_reporting_tick": 0.0001,
+    "population": "implied_vol > 0 and 0 < |delta| < 1",
+    "pricer": "src.gex.pricing (Black-Scholes, the engine's own)",
+    "rows": 7348,
+    "time_to_expiry": "read by inverting the vendor's own delta and implied_vol for T, then scored per hypothesis",
+    "underlying": "the underlying price embedded in the greeks response"
+  },
+  "gex_blockers": [
+    "the Greeks in this capture were produced under rate_value=4.2 consumed as a decimal, i.e. 420%. Every implied volatility and every delta in it describes a market that does not exist. The capture remains the evidence that established the conflict and must not be discarded.",
+    "426 contract identities have no open-interest row. Open interest is the linear weight on every GEX term and there is no evidence-backed policy for an absent one, so an aggregate would be choosing silently."
+  ],
+  "iv_basis_comparison": [
+    {
+      "basis": "NBBO_MID",
+      "median_abs_iv_error": 5.075599013787402e-05,
+      "rows": 2868,
+      "within_half_tick_ratio": 0.4919804741980474
+    },
+    {
+      "basis": "BID",
+      "median_abs_iv_error": 0.004986929120127437,
+      "rows": 2868,
+      "within_half_tick_ratio": 0.0003486750348675035
+    },
+    {
+      "basis": "ASK",
+      "median_abs_iv_error": 0.005059261821667049,
+      "rows": 2868,
+      "within_half_tick_ratio": 0.0
+    }
+  ],
+  "open_interest_coverage": {
+    "coverage_ratio": 0.9707337180544106,
+    "fully_missing_expirations": [
+      "2026-09-16"
+    ],
+    "missing_by_expiration": [
+      {
+        "expiration": "2026-08-10",
+        "listed": 562,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-08-11",
+        "listed": 562,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-08-12",
+        "listed": 562,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-08-13",
+        "listed": 534,
+        "missing": 16
+      },
+      {
+        "expiration": "2026-08-14",
+        "listed": 680,
+        "missing": 34
+      },
+      {
+        "expiration": "2026-08-17",
+        "listed": 504,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-08-18",
+        "listed": 504,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-08-19",
+        "listed": 504,
+        "missing": 6
+      },
+      {
+        "expiration": "2026-08-20",
+        "listed": 474,
+        "missing": 16
+      },
+      {
+        "expiration": "2026-08-24",
+        "listed": 428,
+        "missing": 2
+      },
+      {
+        "expiration": "2026-08-25",
+        "listed": 412,
+        "missing": 2
+      },
+      {
+        "expiration": "2026-08-26",
+        "listed": 412,
+        "missing": 2
+      },
+      {
+        "expiration": "2026-08-27",
+        "listed": 394,
+        "missing": 16
+      },
+      {
+        "expiration": "2026-08-28",
+        "listed": 600,
+        "missing": 34
+      },
+      {
+        "expiration": "2026-09-03",
+        "listed": 310,
+        "missing": 6
+      },
+      {
+        "expiration": "2026-09-04",
+        "listed": 470,
+        "missing": 54
+      },
+      {
+        "expiration": "2026-09-08",
+        "listed": 266,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-09-09",
+        "listed": 242,
+        "missing": 4
+      },
+      {
+        "expiration": "2026-09-10",
+        "listed": 242,
+        "missing": 14
+      },
+      {
+        "expiration": "2026-09-11",
+        "listed": 338,
+        "missing": 46
+      },
+      {
+        "expiration": "2026-09-16",
+        "listed": 150,
+        "missing": 150
+      }
+    ],
+    "missing_identities_hash": "f2cc65a79c4ca852f04493b7e64758c69c55cedb1d76b8b7e0a0e93972a87489",
+    "oi_explicit_zero": 3692,
+    "oi_missing": 426,
+    "oi_present": 10438,
+    "permits_trusted_aggregate": false,
+    "universe_count": 14556
+  },
+  "rate_semantics": [
+    {
+      "delta_rmse": 0.00017460045617437685,
+      "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=4.2)",
+      "median_abs_delta_error": 4.451469477144681e-05,
+      "rows": 7348
+    },
+    {
+      "delta_rmse": 0.23245132263370233,
+      "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
+      "median_abs_delta_error": 0.22087848364145213,
+      "rows": 7348
+    }
+  ],
+  "raw_record_verification": {
+    "record_payload_hashes": {
+      "/v3/index/snapshot/price": "3a163c0ec3388dcb532ebb873f0ffd2c80b5247517403010f9a783964ec580cd",
+      "/v3/option/list/contracts/quote": "3af531d46a0c1c9353441287ec0f79370d29560c63067433fa2a2d8ac806a54e",
+      "/v3/option/snapshot/greeks/first_order": "3ec31b150d3ebd39dab9b66e95473334ea90ab11ea0440300316cd969a3651f2",
+      "/v3/option/snapshot/open_interest": "9130f82af351669c5bc67a7b9a68ddb1281a156e699e066ada27da42821b382d",
+      "/v3/option/snapshot/quote": "45a1a024939f051c950afbdc59f9ea643fb0b3701b489b85a2c4841b73eb8a8d"
+    },
+    "records_verified": 5
+  },
+  "report_hash": "a6b1be6863e66c2455bb70be70149588642ca46012ce6fea3cf2727e50f3d816",
+  "schema_version": "capture-certification/2.1.22",
+  "theta_terminal_version": {
+    "carried_in_capture": false,
+    "note": "No response and no manifest field records the Theta Terminal build. The local installation at capture time was ThetaTerminalv3.jar with lib/202608071.jar, observed on the capture machine rather than in the capture, so it is recorded here as context and is not capture-bound evidence."
+  },
+  "trusted_for_gex": false,
+  "underlying_synchronization": {
+    "authoritative_for_vendor_model": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
+    "index_snapshot_price": 7759.54,
+    "index_snapshot_timestamp": "2026-08-10T10:01:33.000",
+    "price_difference": 0.27,
+    "synchronized": false,
+    "vendor_greeks_underlying_price": 7759.27,
+    "vendor_greeks_underlying_timestamp": "2026-08-10T10:01:34.000"
+  },
+  "universe": {
+    "contract_list_count": 14556,
+    "contract_list_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "greeks_count": 14556,
+    "greeks_matches_list": true,
+    "greeks_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "only_in_list": [],
+    "only_in_snapshots": [],
+    "quote_count": 14556,
+    "quote_matches_list": true,
+    "quote_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "state": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE"
+  },
+  "vendor_behavior": {
+    "conflicts": [
+      "RATE_UNITS",
+      "IV_PRICE_BASIS"
+    ],
+    "observations": [
+      {
+        "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
+        "capture": {
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "dimension": "RATE_UNITS",
+        "documentation_matched": false,
+        "documentation_reference": "components/parameters/rate_value/description",
+        "documented_value": "PERCENT_ANNUAL_RATE",
+        "governing_value": "DECIMAL_ANNUAL_RATE",
+        "metrics": [
+          {
+            "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=4.2)",
+            "rows": 7348,
+            "selected": true,
+            "statistic": "delta_rmse",
+            "value": 0.00017460045617437685
+          },
+          {
+            "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
+            "rows": 7348,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.23245132263370233
+          }
+        ],
+        "notes": "The document says percent and the implementation reads a decimal. Both records are kept; the observed reading governs request construction because the request is answered by the implementation.",
+        "observed_value": "DECIMAL_ANNUAL_RATE",
+        "rows_used": 7348,
+        "scope": "/v3/option/snapshot/greeks/first_order, greeks_version=latest",
+        "status": "DOCUMENTATION_LIVE_CONFLICT"
+      },
+      {
+        "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
+        "capture": {
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "dimension": "DAY_COUNT",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "ACT_365",
+        "metrics": [
+          {
+            "hypothesis": "ACT/365",
+            "rows": 7348,
+            "selected": true,
+            "statistic": "delta_rmse",
+            "value": 0.00017460045617437685
+          },
+          {
+            "hypothesis": "ACT/365.25",
+            "rows": 7348,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.0007208047888807152
+          },
+          {
+            "hypothesis": "ACT/360",
+            "rows": 7348,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.0159298570792905
+          },
+          {
+            "hypothesis": "ACT/252",
+            "rows": 7348,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.09862788858244732
+          }
+        ],
+        "notes": "",
+        "observed_value": "ACT_365",
+        "rows_used": 7348,
+        "scope": "SPXW first-order greeks in this capture",
+        "status": "LIVE_ONLY"
+      },
+      {
+        "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
+        "capture": {
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "dimension": "EXPIRATION_TIMESTAMP",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "16:00 America/New_York",
+        "metrics": [
+          {
+            "hypothesis": "16:00 America/New_York",
+            "rows": 1592,
+            "selected": true,
+            "statistic": "delta_rmse",
+            "value": 0.00034791561392758294
+          },
+          {
+            "hypothesis": "15:30 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.009037917931919043
+          },
+          {
+            "hypothesis": "16:15 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.0056063270033672955
+          },
+          {
+            "hypothesis": "16:30 America/New_York",
+            "rows": 1592,
+            "selected": false,
+            "statistic": "delta_rmse",
+            "value": 0.01212826653512948
+          }
+        ],
+        "notes": "Read by inverting delta and implied volatility for the vendor's own time-to-expiry, not by scoring a global hypothesis.",
+        "observed_value": "16:00 America/New_York",
+        "rows_used": 1592,
+        "scope": "SPXW expirations up to and including 2026-08-14. Beyond that boundary 26 expirations in this capture price on whole calendar days instead, so this rule is NOT established for longer maturities and must not be applied to them.",
+        "status": "LIVE_ONLY"
+      },
+      {
+        "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
+        "capture": {
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "dimension": "IV_PRICE_BASIS",
+        "documentation_matched": false,
+        "documentation_reference": "components/schemas/first_order_greeks/properties/implied_vol",
+        "documented_value": "TRADE_PRICE",
+        "governing_value": "NBBO_MID",
+        "metrics": [
+          {
+            "hypothesis": "NBBO_MID",
+            "rows": 2868,
+            "selected": true,
+            "statistic": "median_abs_iv_error",
+            "value": 5.075599013787402e-05
+          },
+          {
+            "hypothesis": "BID",
+            "rows": 2868,
+            "selected": false,
+            "statistic": "median_abs_iv_error",
+            "value": 0.004986929120127437
+          },
+          {
+            "hypothesis": "ASK",
+            "rows": 2868,
+            "selected": false,
+            "statistic": "median_abs_iv_error",
+            "value": 0.005059261821667049
+          }
+        ],
+        "notes": "The residual under NBBO mid is half the reporting tick of implied_vol, which is the floor -- there is nothing left to explain. Bid and ask are two orders of magnitude worse.",
+        "observed_value": "NBBO_MID",
+        "rows_used": 2868,
+        "scope": "SPXW first-order greeks in this capture",
+        "status": "DOCUMENTATION_LIVE_CONFLICT"
+      },
+      {
+        "basis": "LIVE_FIELD_READ",
+        "capture": {
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "dimension": "UNDERLYING_SOURCE",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
+        "metrics": [],
+        "notes": "The Greeks response carries one underlying print (7759.27 at 2026-08-10T10:01:34.000). The separately captured index snapshot returned 7759.54 at 2026-08-10T10:01:33.000, which is a different state. The index response is not what these Greeks were computed from and must not be described as synchronized.",
+        "observed_value": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
+        "rows_used": 14556,
+        "scope": "reproduction of the vendor's own model",
+        "status": "LIVE_ONLY"
+      },
+      {
+        "basis": "REQUEST_BOUND",
+        "capture": null,
+        "dimension": "DIVIDEND_CONVENTION",
+        "documentation_matched": true,
+        "documentation_reference": "ThetaData greeks article, annual_div",
+        "documented_value": "ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
+        "governing_value": "ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
+        "metrics": [],
+        "notes": "effective dividend 0, effective q 0 for this capture.",
+        "observed_value": "",
+        "rows_used": 0,
+        "scope": "annual_dividend=0.0 was requested, so this capture exercises only the zero case and cannot speak to non-zero handling",
+        "status": "DOCUMENTATION_ONLY"
+      },
+      {
+        "basis": "LIVE_SET_COMPARISON",
+        "capture": {
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "dimension": "CONTRACT_LIST_UNIVERSE",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE",
+        "metrics": [],
+        "notes": "contract list e8d189b6ade90686, quote e8d189b6ade90686, greeks e8d189b6ade90686",
+        "observed_value": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE",
+        "rows_used": 14556,
+        "scope": "SPXW, session 2026-08-10, max_dte=60, quote and first-order greeks snapshots only",
+        "status": "LIVE_ONLY"
+      }
+    ],
+    "schema_version": "pricing-evidence/2.1.22",
+    "unresolved": []
+  },
+  "vendor_clock_by_expiration": [
+    {
+      "calendar_days": 0,
+      "expiration": "2026-08-10",
+      "implied_days": 0.2490246287204837,
+      "intraday_days_to_1600": 0.24891203703703704,
+      "matches_intraday_1600": true,
+      "matches_whole_days": false,
+      "offset_from_calendar": 0.2490246287204837,
+      "rows": 93,
+      "spread": 0.3391543276907141
+    },
+    {
+      "calendar_days": 1,
+      "expiration": "2026-08-11",
+      "implied_days": 1.2493830300728859,
+      "intraday_days_to_1600": 1.248912037037037,
+      "matches_intraday_1600": true,
+      "matches_whole_days": false,
+      "offset_from_calendar": 0.24938303007288587,
+      "rows": 95,
+      "spread": 0.001309215781733375
+    },
+    {
+      "calendar_days": 2,
+      "expiration": "2026-08-12",
+      "implied_days": 2.249714936943932,
+      "intraday_days_to_1600": 2.2489120370370372,
+      "matches_intraday_1600": true,
+      "matches_whole_days": false,
+      "offset_from_calendar": 0.2497149369439322,
+      "rows": 101,
+      "spread": 0.0021151802831651523
+    },
+    {
+      "calendar_days": 3,
+      "expiration": "2026-08-13",
+      "implied_days": 3.250052506877768,
+      "intraday_days_to_1600": 3.2489120370370372,
+      "matches_intraday_1600": true,
+      "matches_whole_days": false,
+      "offset_from_calendar": 0.2500525068777679,
+      "rows": 101,
+      "spread": 0.002833150117531158
+    },
+    {
+      "calendar_days": 4,
+      "expiration": "2026-08-14",
+      "implied_days": 4.250310879800095,
+      "intraday_days_to_1600": 4.248912037037037,
+      "matches_intraday_1600": true,
+      "matches_whole_days": false,
+      "offset_from_calendar": 0.2503108798000948,
+      "rows": 125,
+      "spread": 0.0039028641728027225
+    },
+    {
+      "calendar_days": 7,
+      "expiration": "2026-08-17",
+      "implied_days": 7.001533950571411,
+      "intraday_days_to_1600": 7.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0015339505714111468,
+      "rows": 89,
+      "spread": 0.005203994464809014
+    },
+    {
+      "calendar_days": 8,
+      "expiration": "2026-08-18",
+      "implied_days": 8.002178006208066,
+      "intraday_days_to_1600": 8.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0021780062080658524,
+      "rows": 91,
+      "spread": 0.0072570337651862715
+    },
+    {
+      "calendar_days": 9,
+      "expiration": "2026-08-19",
+      "implied_days": 9.002758738142491,
+      "intraday_days_to_1600": 9.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0027587381424911683,
+      "rows": 93,
+      "spread": 0.009219768140965812
+    },
+    {
+      "calendar_days": 10,
+      "expiration": "2026-08-20",
+      "implied_days": 10.002569972814044,
+      "intraday_days_to_1600": 10.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0025699728140438083,
+      "rows": 95,
+      "spread": 0.010041712098276534
+    },
+    {
+      "calendar_days": 11,
+      "expiration": "2026-08-21",
+      "implied_days": 11.003237086359356,
+      "intraday_days_to_1600": 11.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.003237086359355601,
+      "rows": 181,
+      "spread": 0.007036106726824087
+    },
+    {
+      "calendar_days": 14,
+      "expiration": "2026-08-24",
+      "implied_days": 14.00378798502614,
+      "intraday_days_to_1600": 14.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0037879850261397507,
+      "rows": 85,
+      "spread": 0.014438307665123773
+    },
+    {
+      "calendar_days": 15,
+      "expiration": "2026-08-25",
+      "implied_days": 15.003955410564206,
+      "intraday_days_to_1600": 15.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.003955410564206119,
+      "rows": 87,
+      "spread": 0.014445382323110323
+    },
+    {
+      "calendar_days": 16,
+      "expiration": "2026-08-26",
+      "implied_days": 16.004299420321885,
+      "intraday_days_to_1600": 16.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.00429942032188535,
+      "rows": 88,
+      "spread": 0.01378650094794942
+    },
+    {
+      "calendar_days": 17,
+      "expiration": "2026-08-27",
+      "implied_days": 17.006502279151253,
+      "intraday_days_to_1600": 17.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.006502279151252566,
+      "rows": 92,
+      "spread": 0.017188232458703823
+    },
+    {
+      "calendar_days": 18,
+      "expiration": "2026-08-28",
+      "implied_days": 18.007233932661386,
+      "intraday_days_to_1600": 18.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0072339326613857224,
+      "rows": 123,
+      "spread": 0.014244545364377359
+    },
+    {
+      "calendar_days": 21,
+      "expiration": "2026-08-31",
+      "implied_days": 21.00642875392472,
+      "intraday_days_to_1600": 21.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.0064287539247196435,
+      "rows": 185,
+      "spread": 0.016314694911244487
+    },
+    {
+      "calendar_days": 22,
+      "expiration": "2026-09-01",
+      "implied_days": 22.007672141855636,
+      "intraday_days_to_1600": 22.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.007672141855636028,
+      "rows": 68,
+      "spread": 0.023711116567593393
+    },
+    {
+      "calendar_days": 23,
+      "expiration": "2026-09-02",
+      "implied_days": 23.006191981989364,
+      "intraday_days_to_1600": 23.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.006191981989363882,
+      "rows": 69,
+      "spread": 0.017108236760584816
+    },
+    {
+      "calendar_days": 24,
+      "expiration": "2026-09-03",
+      "implied_days": 24.008882315237425,
+      "intraday_days_to_1600": 24.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.008882315237425331,
+      "rows": 69,
+      "spread": 0.01896215552864078
+    },
+    {
+      "calendar_days": 25,
+      "expiration": "2026-09-04",
+      "implied_days": 25.007350008786844,
+      "intraday_days_to_1600": 25.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.007350008786843887,
+      "rows": 106,
+      "spread": 0.020060802503191866
+    },
+    {
+      "calendar_days": 29,
+      "expiration": "2026-09-08",
+      "implied_days": 29.010920119139342,
+      "intraday_days_to_1600": 29.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.010920119139342432,
+      "rows": 63,
+      "spread": 0.03019735423333003
+    },
+    {
+      "calendar_days": 30,
+      "expiration": "2026-09-09",
+      "implied_days": 30.008465931369887,
+      "intraday_days_to_1600": 30.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.008465931369887159,
+      "rows": 64,
+      "spread": 0.032110994738481224
+    },
+    {
+      "calendar_days": 31,
+      "expiration": "2026-09-10",
+      "implied_days": 31.010958698300634,
+      "intraday_days_to_1600": 31.248912037037037,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.010958698300633785,
+      "rows": 64,
+      "spread": 0.030725756769573564
+    },
+    {
+      "calendar_days": 32,
+      "expiration": "2026-09-11",
+      "implied_days": 32.0112388809309,
+      "intraday_days_to_1600": 32.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.011238880930896755,
+      "rows": 79,
+      "spread": 0.024177366397516664
+    },
+    {
+      "calendar_days": 35,
+      "expiration": "2026-09-14",
+      "implied_days": 35.01119258859306,
+      "intraday_days_to_1600": 35.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.011192588593061714,
+      "rows": 32,
+      "spread": 0.032713626326874135
+    },
+    {
+      "calendar_days": 36,
+      "expiration": "2026-09-15",
+      "implied_days": 36.017760487303775,
+      "intraday_days_to_1600": 36.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.017760487303775108,
+      "rows": 31,
+      "spread": 0.03030054302814733
+    },
+    {
+      "calendar_days": 37,
+      "expiration": "2026-09-16",
+      "implied_days": 37.015437699176594,
+      "intraday_days_to_1600": 37.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.015437699176594322,
+      "rows": 34,
+      "spread": 0.02937942928853232
+    },
+    {
+      "calendar_days": 39,
+      "expiration": "2026-09-18",
+      "implied_days": 39.014031941403516,
+      "intraday_days_to_1600": 39.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.014031941403516157,
+      "rows": 174,
+      "spread": 0.029873790579074466
+    },
+    {
+      "calendar_days": 42,
+      "expiration": "2026-09-21",
+      "implied_days": 42.01715214420054,
+      "intraday_days_to_1600": 42.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.017152144200537123,
+      "rows": 32,
+      "spread": 0.03121877250663374
+    },
+    {
+      "calendar_days": 46,
+      "expiration": "2026-09-25",
+      "implied_days": 46.019818652367334,
+      "intraday_days_to_1600": 46.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.019818652367334266,
+      "rows": 56,
+      "spread": 0.04433738928103992
+    },
+    {
+      "calendar_days": 51,
+      "expiration": "2026-09-30",
+      "implied_days": 51.01973034495916,
+      "intraday_days_to_1600": 51.24891203703704,
+      "matches_intraday_1600": false,
+      "matches_whole_days": true,
+      "offset_from_calendar": 0.019730344959157264,
+      "rows": 203,
+      "spread": 0.043366803626994965
+    }
+  ]
+}

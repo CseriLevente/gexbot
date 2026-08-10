@@ -1,4 +1,157 @@
-# Changelog
+﻿# Changelog
+
+## 2.1.22 - the first live capture, and the parameter it got wrong
+
+    capture   capture-20260810T140129Z-2ef4f56270c1447b
+    manifest  2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20
+    archive   5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638
+
+    rate_value = 4.2, meaning 4.2%
+    reproducible only at r = 4.2, meaning 420%
+
+The first paid ThetaData session ran on 2026-08-10 and completed
+`COMPLETED_RAW_VERIFIED`. Five endpoints, five responses, every payload hashing
+to what the manifest says. It is also unusable for a GEX, and the reason is one
+number.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `VALIDATED_AGAINST_ONE_LIVE_THETADATA_CAPTURE` |
+`NOT_READY_FOR_ANALYTICAL_DATASET`.
+
+The repository remains incapable of placing an order.
+
+### The rate
+
+The pinned OpenAPI description says `rate_value` is "The interest rate, as a
+percent". v2.1.18 read that out of the bytes correctly and the capture profile
+sent `4.2`. Reconstructing the returned Greeks over 7,348 usable rows with the
+engine's own Black-Scholes:
+
+| `r` | median abs delta error | delta RMSE |
+|---|---|---|
+| `4.2` | 4.45e-05 | **1.75e-04** |
+| `0.042` | 2.21e-01 | 2.32e-01 |
+
+The v3 implementation puts the number into Black-Scholes unchanged. Every
+implied volatility and delta in the first capture describes a market priced at
+420%.
+
+Both readings are now kept. The document says percent, the implementation reads
+a decimal, `EVIDENCE_STATUS = DOCUMENTATION_LIVE_CONFLICT`, and it does not
+resolve. The measured reading governs request construction -- the request is
+answered by the implementation -- and the pinned document is not edited, because
+"the vendor's published description of this parameter is wrong" is worth more
+than the parameter value.
+
+### What the word "rate" was covering
+
+Five quantities, one of which had no name and therefore no check:
+
+    economic rate            4.2%
+    local model r            0.042
+    vendor request value     0.042      <- this one
+    vendor observed unit     DECIMAL_ANNUAL_RATE
+    documented unit          PERCENT_ANNUAL_RATE
+
+The dry run prints all five and the conflict flag. `config/thetadata_capture.yaml`
+now sends `rate_value: 0.042`.
+
+### Defects fixed
+
+| S | Defect in v2.1.21 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | `rate_value` was built from the documented unit | The one paid session was priced at 420% | The observed unit governs. `RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION` is `MATCHED` under a code that does not claim the documentation was confirmed |
+| 2 | A dimension had one slot: documented or `UNKNOWN` | Recording the live finding would have required deleting the documentary one | `LiveBehaviorObservation` carries both readings and a status naming their relationship. A conflict with one side missing is refused; agreement filed as conflict is refused |
+| 3 | Nothing could read a capture back | The bytes were bought and then only eyeballed | `python -m src.tools.certify_thetadata_capture` -- offline, deterministic, content-addressed, refuses a payload that no longer matches its manifest hash |
+| 4 | A missing open-interest row and an explicit zero were the same thing | 426 identities would have been silently weighted zero in the linear term of every GEX | `OI_PRESENT` / `OI_EXPLICIT_ZERO` / `OI_MISSING`, and a missing one blocks a trusted aggregate rather than defaulting |
+| 5 | The index snapshot was treated as the Greeks' underlying | It is a different print at a different instant | `vendor_greeks_underlying_*` and `gex_evaluation_*` are separate concepts; the embedded fields are authoritative for reproducing the vendor's model |
+
+### Conventions the capture settled
+
+`ACT/365` for the day count (RMSE 1.75e-04 against 1.59e-02 for ACT/360).
+`NBBO_MID` for the implied-volatility basis, with a residual of 5.08e-05 --
+exactly half the reporting tick of `implied_vol`, which is the floor. The
+contract listing matched the snapshot universe exactly, by set hash rather than
+by count: 14,556 identical identities across list, quote and greeks.
+
+### The expiration clock, and where it stops
+
+Not scored -- inverted. Given the reported delta and implied volatility, `d1` is
+determined and time-to-expiry follows from a quadratic, so each row yields the
+clock the vendor actually used:
+
+| expirations | implied − calendar days |
+|---|---|
+| 2026-08-10 … 2026-08-14 | +0.2490 … +0.2503 |
+| 2026-08-17 … 2026-09-30 | +0.0015 … +0.0198 |
+
+`0.2489` days is exactly 16:00 ET minus the valuation stamp. Inside the capture
+week the vendor uses an intraday clock to a 16:00 close; from the following
+Monday it uses whole calendar days and no time of day at all.
+
+So `EXPIRATION_TIMESTAMP = 16:00 America/New_York` is recorded **scoped to the
+front week**, with the 26 expirations that contradict it named in the same
+record. A global hypothesis would have averaged the two and fitted neither. The
+boundary itself is open: the capture has expirations at 4 and 7 days out and
+nothing between them.
+
+### Not atomic
+
+Quote and Greeks were sequential requests: timestamps equal for 74.9% of rows,
+p99 gap 2.444s, max 51.593s. Vendor-IV reproduction uses the bid/ask embedded in
+the Greeks payload. Joining the two responses and calling the result one
+observation asserts an atomicity the capture disproves.
+
+### What the first capture is
+
+    ADAPTER_CERTIFICATION_EVIDENCE
+    NOT_TRUSTED_FOR_GEX
+
+Two independent blockers, and fixing the rate does not fix the second: the
+Greeks were computed at 420%, and 426 contract identities have no open interest.
+
+It is not discarded. It is the only reason any of the above is known.
+
+### The raw payloads are not committed
+
+They are paid market data and this project has no answer to the licensing
+question. `tests/fixtures/live_capture/first_capture.json` holds the derived
+evidence -- archive digest, manifest hash, per-record payload hashes,
+identity-set hashes, every statistic -- emitted by the certification command
+rather than typed in. The regressions read that, so CI proves the conclusions
+without redistributing the bytes.
+
+No synthetic row appears in any rate-semantics assertion.
+
+### Next
+
+Dry run, review the corrected rate, second capture at `rate_value = 0.042`,
+offline certification. Then check whether IV and delta land at ordinary SPX
+volatility levels. Not before observing it.
+
+## 2.1.21 - deterministic CI
+
+Three tests planned a capture for whichever day CI ran and then asserted the
+result was a trading session. On Saturday 2026-08-08 they failed, and production
+was right in all three: Saturday is not a session, no settlement date follows
+from one, and a live run on a Saturday is refused.
+
+`plan_capture` takes an aware-only `as_of`, defaulting to the clock so the CLI
+is unchanged. Deliberately not a CLI flag: the operator does not choose which
+session they are capturing. All 29 dry runs in the suite name their instant, and
+two guards keep it that way -- no test file may call the clock (AST-parsed, not
+grepped, after the text version flagged a docstring explaining the defect), and
+no dry run may omit its instant.
+
+Weekend and UTC/New-York boundary behaviour is now covered deliberately at fixed
+instants rather than by accident of the calendar. Two things were found doing
+it: the dry run reported no market session at all, and a fixed instant has to be
+a past one, because provenance correctly refuses a print from the future.
+
+Also removed duplicated `require_documentation_authority()` calls in
+`capture_session` and `compute_trusted_gex` (a v2.1.20 patch applied twice), and
+corrected a checklist that asked for disk space for "a full SPX+SPXW chain" when
+the session captures five responses.
 
 ## 2.1.20 - the approved pipeline is the one that sends
 

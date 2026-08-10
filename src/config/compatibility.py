@@ -684,6 +684,18 @@ def apply_attestations(
     )
 
 
+#: Bumped when what a dimension result *means* changes.
+#:
+#: v2.1.22 is a real semantic move, not a release marker. Before it, ``MATCHED``
+#: on ``RATE_UNITS`` meant the vendor's published description had been
+#: confirmed. It can now also mean that description was *contradicted* by a live
+#: capture and the configuration matches the measured behaviour instead --
+#: carried by ``RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION``. A reader who
+#: knew only the older codes would draw the opposite conclusion about the
+#: documentation from the same word.
+PRICING_COMPATIBILITY_SCHEMA_VERSION = "pricing-compatibility/2.1.22"
+
+
 @dataclass(frozen=True, slots=True)
 class PricingCompatibilityReport:
     """Whether vendor-derived numbers may enter a local calculation.

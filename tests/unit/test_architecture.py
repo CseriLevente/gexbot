@@ -583,16 +583,23 @@ def test_the_documentation_describes_apis_that_exist() -> None:
     assert not offenders, offenders
 
 
-def test_the_only_operator_command_is_the_raw_capture() -> None:
-    """``src/tools`` is where a command goes, and there is one.
+def test_the_only_operator_commands_acquire_or_read_bytes() -> None:
+    """``src/tools`` is where a command goes, and there are two.
 
     Added in v2.1.11, which is also the release that added a command at all. A
-    second entry point here would be the natural place for "just run the
-    strategy once" to appear, so the check is that there is nothing else.
+    new entry point here would be the natural place for "just run the strategy
+    once" to appear, so the check is that every command is named.
+
+    v2.1.22 added the second: certification, which reads a capture already
+    taken. The guard was never "one command" -- it is that a command here either
+    acquires raw bytes or reads bytes already acquired, and neither trades.
     """
     tools = SRC / "tools"
     modules = sorted(p.name for p in tools.glob("*.py") if p.name != "__init__.py")
-    assert modules == ["capture_thetadata_once.py"], modules
+    assert modules == [
+        "capture_thetadata_once.py",
+        "certify_thetadata_capture.py",
+    ], modules
 
 
 def test_the_capture_command_cannot_trade_or_calculate() -> None:

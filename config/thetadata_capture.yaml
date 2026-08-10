@@ -138,11 +138,32 @@ thetadata:
 
   greeks_version: latest
   rate_type: sofr
-  # Sent explicitly, with its units named, so the vendor cannot apply a default
-  # we would then have to guess at. 4.2 PERCENT_ANNUAL_RATE == 0.042 decimal,
-  # which is model.risk_free_rate above.
-  rate_value: 4.2
-  rate_units: PERCENT_ANNUAL_RATE
+
+  # CORRECTED IN v2.1.22 AFTER THE FIRST LIVE CAPTURE.
+  #
+  # The intended economic rate has not changed and is 4.2% annual. What changed
+  # is the number that expresses it on the wire.
+  #
+  #   economic rate            4.2%
+  #   local model r            0.042      (model.risk_free_rate above)
+  #   vendor request value     0.042      (rate_value below)
+  #
+  # Until v2.1.21 this read `rate_value: 4.2` with `rate_units:
+  # PERCENT_ANNUAL_RATE`, on the authority of the pinned OpenAPI description --
+  # "The interest rate, as a percent". The first capture was taken that way and
+  # its Greeks are only reproducible with r = 4.2, i.e. 420%. The v3
+  # implementation puts the number into Black-Scholes unchanged.
+  #
+  # So the documented unit and the observed unit disagree, permanently and on
+  # the record: docs/ADAPTER_CERTIFICATION.md keeps both. `rate_units` below
+  # states what the *implementation* does, because that is what decides the
+  # number the vendor prices with. The pinned document is not edited.
+  #
+  # A dry run reports this as RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION and
+  # names the documentation conflict. That is the expected state, not a defect
+  # to be silenced.
+  rate_value: 0.042
+  rate_units: DECIMAL_ANNUAL_RATE
   annual_dividend: 0.0
   dividend_convention: ZERO_DIVIDEND
 

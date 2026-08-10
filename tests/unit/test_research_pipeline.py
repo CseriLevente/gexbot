@@ -168,8 +168,8 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
     vendor-computed -- so this asserts on the two dimensions we *can* settle.
     """
     built = pipeline(
-        rate_value=4.2,
-        rate_units="PERCENT_ANNUAL_RATE",
+        rate_value=0.042,
+        rate_units="DECIMAL_ANNUAL_RATE",
         dividend_convention="ZERO_DIVIDEND",
     )
     report = built.pricing_compatibility
@@ -181,12 +181,17 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
     # The two numbers we send are settleable from configuration.
     assert PricingDimension.RISK_FREE_RATE in settled
     assert PricingDimension.DIVIDEND_VALUE in settled
-    # And since v2.1.18 the two the *pinned document* settles. Both are still
-    # the vendor's conventions rather than ours -- what changed is that the
-    # vendor's own OpenAPI description is now in the repository and says what
-    # they are. ``rate_units`` in particular: 4.2 sent as a documented percent
-    # is 0.042, which is what the model prices with. Different units, one rate.
+    # ``minimum_time_floor`` is settled by the pinned document. ``rate_units``
+    # is settled *against the document*: v2.1.18 read "as a percent" out of the
+    # OpenAPI bytes and v2.1.22's live capture proved the implementation
+    # consumes a decimal. Sending 0.042 as a decimal is what the vendor
+    # actually prices, so the dimension is MATCHED -- under a code that says
+    # which side of the disagreement it matched.
     assert PricingDimension.RATE_UNITS in settled
+    assert (
+        settled[PricingDimension.RATE_UNITS].code
+        == "RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION"
+    )
     assert PricingDimension.MINIMUM_TIME_FLOOR in settled
     # **Six, not eight.** ``dividend_convention`` stays unknown because the
     # document does not say whether ``annual_dividend`` is cash or a yield.
@@ -200,16 +205,22 @@ def test_a_fully_aligned_rate_and_dividend_are_compatible():
     }
 
 
-def test_a_session_without_documentation_keeps_all_eight_unknowns():
-    """Evidence is per session, not a property of the process.
+def test_a_session_without_documentation_keeps_the_documentary_unknowns():
+    """Evidence is per session -- but not every kind of evidence is a document.
 
-    A pipeline built with ``documentation_bundle=None`` has no document, and
-    must not inherit the answers of one that does. This is the state every
-    session was in before v2.1.18.
+    A pipeline built with ``documentation_bundle=None`` has no document and must
+    not inherit the answers of one that does. ``MINIMUM_TIME_FLOOR`` goes back
+    to unknown here for exactly that reason.
+
+    ``RATE_UNITS`` does not, and the difference is the point. It is settled by a
+    numerical reconstruction over an immutable capture, not by a document, and
+    the vendor's implementation does not change according to which file this
+    session loaded. Seven unknowns rather than eight, and the one that left is
+    the one a measurement answered.
     """
     built = pipeline(
-        rate_value=4.2,
-        rate_units="PERCENT_ANNUAL_RATE",
+        rate_value=0.042,
+        rate_units="DECIMAL_ANNUAL_RATE",
         dividend_convention="ZERO_DIVIDEND",
         documentation_bundle=None,
     )
@@ -219,7 +230,6 @@ def test_a_session_without_documentation_keeps_all_eight_unknowns():
         PricingDimension.EXPIRATION_TIMESTAMP,
         PricingDimension.IV_PRICE_BASIS,
         PricingDimension.MINIMUM_TIME_FLOOR,
-        PricingDimension.RATE_UNITS,
         PricingDimension.UNDERLYING_SOURCE,
         PricingDimension.UNDERLYING_TIMESTAMP,
     }

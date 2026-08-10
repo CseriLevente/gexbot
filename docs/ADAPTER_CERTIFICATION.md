@@ -1418,3 +1418,243 @@ wrong" and never "I looked at nothing".
 Nothing. `READY_FOR_RAW_CAPTURE_ONLY`, `NOT_READY_FOR_ANALYTICAL_DATASET`, not
 `ADAPTER_CERTIFIED`. What changed is that the requests the first session makes
 are the requests it should make, and an operator can read them before paying.
+
+---
+
+# v2.1.22: the first live capture
+
+The first paid ThetaData session ran on 2026-08-10 at 14:01:29Z, inside a
+regular trading session. It completed `COMPLETED_RAW_VERIFIED`: five endpoints,
+five responses, every payload hashing to what the manifest says.
+
+    session   capture-20260810T140129Z-2ef4f56270c1447b
+    manifest  2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20
+    archive   5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638
+
+The raw payloads are **not** committed. They are paid market data and this
+project has no answer to the licensing question, so what is committed is
+`tests/fixtures/live_capture/first_capture.json` -- the digests, the identity-set
+hashes and every statistic below, all emitted by the certification command
+rather than typed in. Re-derive the lot with:
+
+```bash
+python -m src.tools.certify_thetadata_capture <capture-root> \
+    --archive-sha256 5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638
+```
+
+It makes no network request, and two runs over an untouched capture produce the
+same `report_hash`.
+
+## Rate units
+
+**The pinned documentation is wrong, and both readings are kept.**
+
+| | |
+|---|---|
+| `DOCUMENTATION` | `rate_value` is expressed as a percent |
+| `LIVE_VENDOR_BEHAVIOR` | `rate_value` is consumed as a decimal annual rate |
+| `EVIDENCE_STATUS` | `DOCUMENTATION_LIVE_CONFLICT` |
+
+The OpenAPI description says *"The interest rate, as a percent"*. v2.1.18 read
+that out of the bytes correctly, and the capture profile therefore sent
+`rate_value=4.2` intending 4.2%. Reconstructing the returned Greeks over 7,348
+usable rows:
+
+| `r` | median abs delta error | delta RMSE |
+|---|---|---|
+| `4.2` | 4.45e-05 | **1.75e-04** |
+| `0.042` | 2.21e-01 | 2.32e-01 |
+
+Three orders of magnitude, with nothing ambiguous left in it. The v3
+implementation puts the number into Black-Scholes unchanged, so the first
+capture was priced at **420%**.
+
+What follows from that:
+
+* the **observed** unit governs request construction. The request is answered by
+  the implementation, and a parameter built to satisfy the document instead is
+  wrong by exactly the factor the two differ by;
+* the **documented** unit is preserved exactly as extracted. The pinned document
+  is not edited. "The vendor's published description of this parameter is wrong"
+  is a finding about the vendor worth more than the parameter value;
+* the conflict does not resolve. A dry run reports
+  `RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION` -- `MATCHED`, because the
+  request is correct, under a distinct code so nobody reads it as the
+  documentation having been confirmed.
+
+The corrected profile states the five quantities separately, because a bare
+number meaning both percent and decimal is what caused this:
+
+    economic rate            4.2%
+    local model r            0.042
+    vendor request value     0.042
+    vendor observed unit     DECIMAL_ANNUAL_RATE
+    documented unit          PERCENT_ANNUAL_RATE
+
+## Day count
+
+`ACT/365`, by reconstruction over the same 7,348 rows.
+
+| convention | delta RMSE |
+|---|---|
+| **ACT/365** | **1.75e-04** |
+| ACT/365.25 | 7.21e-04 |
+| ACT/360 | 1.59e-02 |
+| ACT/252 | 9.86e-02 |
+
+`evidence_kind = LIVE_NUMERICAL_RECONSTRUCTION`, scoped to SPXW first-order
+greeks. Not generalised to other endpoint families.
+
+## Expiration timestamp -- and where it stops
+
+`16:00 America/New_York`, **for the capture week only**.
+
+This one is not a scored hypothesis. Given the reported delta and implied
+volatility, `d1` is determined and time-to-expiry follows from a quadratic, so
+each row can be inverted for the clock the vendor actually used. Grouped by
+expiration:
+
+| expirations | implied − calendar days | reading |
+|---|---|---|
+| 2026-08-10 … 2026-08-14 | +0.2490 … +0.2503 | 16:00 ET |
+| 2026-08-17 … 2026-09-30 | +0.0015 … +0.0198 | whole calendar days |
+
+`0.2489` days is exactly 16:00 ET minus the 10:01:34 valuation stamp. Inside the
+capture week the vendor uses an intraday clock to a 16:00 close; from the
+following Monday on it uses whole calendar days and no time of day at all.
+
+Scored on the front week alone, 16:00 ET wins cleanly:
+
+| expiry time | delta RMSE |
+|---|---|
+| **16:00 ET** | **3.48e-04** |
+| 16:15 ET | 5.61e-03 |
+| 15:30 ET | 9.04e-03 |
+| 16:30 ET | 1.21e-02 |
+
+**Do not apply this rule beyond the front week**, and do not apply it to any
+other option root. The boundary itself is not pinned down: the capture has
+expirations at 4 and 7 calendar days out and nothing between them, so the rule
+could be "expiring this week", "DTE ≤ 5 business days" or "DTE < 7". That
+remains open.
+
+## IV price basis
+
+`NBBO_MID`. Solving each candidate price for the volatility that reprices it and
+comparing against the reported `implied_vol`:
+
+| basis | median abs IV error |
+|---|---|
+| **NBBO mid** | **5.08e-05** |
+| bid | 4.99e-03 |
+| ask | 5.06e-03 |
+
+`implied_vol` is reported to four decimals, so 5.0e-05 is half a tick -- the
+rounding floor of the field being compared against. There is nothing left for a
+better hypothesis to explain. Bid and ask are two orders of magnitude worse.
+
+The current first-order OpenAPI description refers to a **trade price**, so this
+is a second documentation/live conflict and is recorded as one.
+
+## Underlying synchronisation
+
+The Greeks response carries its own underlying, and it is not the index
+snapshot:
+
+    vendor_greeks_underlying_price       7759.27
+    vendor_greeks_underlying_timestamp   2026-08-10T10:01:34.000 ET
+
+    index snapshot price                 7759.54
+    index snapshot timestamp             2026-08-10T10:01:33.000 ET
+
+One distinct underlying price and one distinct timestamp across all 14,556 rows.
+For reproducing ThetaData's model the embedded fields are authoritative:
+`UNDERLYING_SOURCE = GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING`.
+
+The separately captured `/index/snapshot/price` response is **not** the
+underlying state these Greeks were computed from and must not be described as
+synchronised with them. `gex_evaluation_spot` and `gex_evaluation_timestamp` are
+a different pair of concepts and are kept separate.
+
+## Contract-list universe
+
+    contract list  14,556
+    quote          14,556
+    greeks         14,556
+
+Set-identical, by SHA-256 over the sorted canonical identities -- not by count,
+because two responses of 14,556 rows can hold different contracts. State
+promoted for **this request form only**:
+
+    DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE
+
+Scope: SPXW, session 2026-08-10, `max_dte=60`, quote and first-order greeks
+snapshots. Not generalised across dates, symbols, tiers or endpoint families.
+
+## Open-interest coverage
+
+    universe           14,556
+    OI rows            14,130   (97.073%)
+    explicit zero       3,692
+    missing               426
+
+Three states, and the middle one is not the last one:
+
+| state | meaning |
+|---|---|
+| `OI_PRESENT` | the vendor answered with a positive figure |
+| `OI_EXPLICIT_ZERO` | the vendor answered zero. A real observation |
+| `OI_MISSING` | no row. Could be zero, could be ten thousand |
+
+**A missing row is not a proven zero.** Filling one with zero converts the third
+state into the second and deletes the contract from the aggregate without
+changing any count a completeness check looks at. Open interest is the linear
+weight on every GEX term.
+
+The 426 absent identities are accounted for by set hash and by expiration. One
+of them is a whole expiration: **2026-09-16 has 150 contracts listed, quoted and
+greeked, and zero open-interest rows.** A 97% coverage figure reads like
+scattered gaps; this one is not scattered.
+
+No trusted aggregate GEX until there is an evidence-backed policy for these
+identities. There is not one yet, and inventing one here would be choosing
+silently.
+
+## Quote and Greeks are not atomic
+
+Two sequential HTTP requests, not one observation:
+
+    identical timestamp   74.9%
+    identical bid         96.9%
+    identical ask         97.0%
+    p99 gap                2.444 s
+    max gap               51.593 s
+
+For reproducing the vendor's IV, use the bid/ask **embedded in the Greeks
+payload**. Quote-sourced analytics keep the quote's own timestamp. Joining the
+two on contract identity and calling the result a single snapshot asserts an
+atomicity the capture disproves.
+
+## What this capture is, and is not
+
+    ADAPTER_CERTIFICATION_EVIDENCE
+    NOT_TRUSTED_FOR_GEX
+
+Its Greeks were generated at 420%, so every implied volatility and delta in it
+describes a market that does not exist. It is still the only reason this
+repository knows how the rate parameter is consumed, and it must never be
+discarded.
+
+Two independent blockers, and fixing the rate does not fix the second:
+
+1. the rate the Greeks were computed under;
+2. 426 contract identities with no open interest.
+
+## The next capture
+
+A new session with `rate_value = 0.042`, acquiring the same five endpoint
+classes independently. Afterwards, run the certification command again and check
+that IV and delta now land at ordinary SPX volatility levels and reproduce local
+Black-Scholes under `r = 0.042`.
+
+Do not assume that before observing it.

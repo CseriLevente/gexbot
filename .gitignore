@@ -1,4 +1,4 @@
-.venv/
+﻿.venv/
 venv/
 __pycache__/
 *.py[cod]
@@ -60,3 +60,4 @@ gex-bot-*.zip
 /_*.py
 /_*.txt
 /_*.md
+/_*.json

@@ -68,7 +68,7 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.21"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.22"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
@@ -457,6 +457,15 @@ def plan_capture(
         # shut. It is the same object the live preflight refuses on, so the two
         # cannot disagree about whether the window is open.
         "market_session": assess_capture_window(as_of).as_dict(),
+        # **The five different numbers the word "rate" was covering.**
+        #
+        # The first capture sent 4.2 meaning 4.2% and the vendor priced 420%,
+        # because the quantity that actually decided the outcome -- the number
+        # the vendor's Black-Scholes receives -- had no name, so nothing could
+        # check it. It is named here, beside the economic rate it expresses and
+        # the two units that disagree about how to express it. The conflict is
+        # shown rather than resolved: it is a standing fact about the vendor.
+        "rate_semantics": _rate_semantics(pipeline, loaded.thetadata).as_dict(),
         # **What the live run will be held to.** Printed first because it is
         # the thing the operator carries forward: everything else on this
         # report explains it, and `--execute-live` will not start without it.
@@ -1032,6 +1041,41 @@ def _approval_difference(
         "capture plan, the pipeline, the documentation bundle, the instrument "
         "mapping, the subscription tier and the effective transport settings; "
         "one of them differs from when that hash was printed."
+    )
+
+
+def _rate_semantics(pipeline: Any, config: Any) -> Any:
+    """The economic rate, and the three different numbers that can express it.
+
+    Derived from the configuration rather than restated beside it: the operator
+    edits ``rate_value`` and ``rate_units``, and the economic rate those two
+    imply is what the report has to show. Stating the percentage independently
+    would let the pair drift apart, which is the class of defect that produced
+    a 420% capture.
+    """
+    from src.adapters.thetadata.live_behavior import VendorRateSemantics
+    from src.adapters.thetadata.vendor_documentation import DocumentedRule
+    from src.config.pipeline import OBSERVED_RATE_UNITS, RateUnit
+
+    unit = config.rate_units
+    raw = config.rate_value
+    factor = 0.01 if unit is RateUnit.PERCENT_ANNUAL_RATE else 1.0
+    economic_percent = 0.0 if raw is None else raw * factor * 100.0
+
+    documented: Any = None
+    bundle = pipeline.documentation_bundle
+    if bundle is not None:
+        documented = bundle.value_for(DocumentedRule.RATE_UNITS)
+
+    return VendorRateSemantics(
+        economic_rate_percent=economic_percent,
+        # Measured, never read off the configuration being reported on. A
+        # config that could supply its own "observed" unit would be marking
+        # its own homework.
+        vendor_observed_rate_unit=OBSERVED_RATE_UNITS.value,
+        documented_rate_unit=(
+            documented.value if isinstance(documented, RateUnit) else "UNKNOWN"
+        ),
     )
 
 

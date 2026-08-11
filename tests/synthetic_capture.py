@@ -56,6 +56,12 @@ OPTION_CONTRACT_LIST = "/v3/option/list/contracts/quote"
 #: identical on both sides of the binding, which is what the binding checks.
 SPEC_FINGERPRINT = "a" * 64
 
+#: Stand-ins for the documentation bundle a real capture records. Arbitrary
+#: values, consistent between the extraction and the bundle that carries it --
+#: which is the relationship certification checks.
+DOCUMENT_SHA256 = "1" * 64
+BUNDLE_FINGERPRINT = "2" * 64
+
 
 @dataclass(frozen=True, slots=True)
 class SyntheticVendor:
@@ -82,9 +88,21 @@ class SyntheticVendor:
         date(2026, 8, 24),
         date(2026, 9, 16),
     )
-    #: Declared by the capturing session, when it declares one at all. ``None``
-    #: reproduces a pre-v2.1.23 capture, which recorded no intent.
+    #: Declared and *bound* by the capturing session, when it declares one at
+    #: all. ``None`` reproduces a legacy capture, which recorded no intent and
+    #: whose intended rate certification must derive from its documentation.
     declared_economic_rate: float | None = None
+    #: What this vendor's own documentation says ``rate_value`` means -- carried
+    #: by the capture, because certification derives the documented reading
+    #: from the capture rather than from a constant in its own code.
+    documented_rate_unit: str = "PERCENT_ANNUAL_RATE"
+    #: Half the bid/ask spread. Zero makes BID, ASK and the midpoint the same
+    #: number, so no IV price basis is distinguishable from the others.
+    quote_half_spread: float = 0.05
+    #: Give every listed identity an open-interest row. Used to build a capture
+    #: with nothing left for certification to object to -- which must still not
+    #: be enough to authorize a trusted GEX.
+    complete_open_interest: bool = False
     strikes: tuple[int, ...] = field(
         default_factory=lambda: tuple(range(3000, 12000, 50))
     )
@@ -151,7 +169,8 @@ def _rows(vendor: SyntheticVendor) -> tuple[list[dict[str, str]], ...]:
                 stamp = (vendor.valuation - timedelta(seconds=index % 7)).strftime(
                     "%Y-%m-%dT%H:%M:%S.000"
                 )
-                bid, ask = round(price - 0.05, 4), round(price + 0.05, 4)
+                half = vendor.quote_half_spread
+                bid, ask = round(price - half, 4), round(price + half, 4)
                 quote.append(
                     {**identity, "timestamp": stamp, "bid": f"{bid}", "ask": f"{ask}"}
                 )
@@ -173,7 +192,7 @@ def _rows(vendor: SyntheticVendor) -> tuple[list[dict[str, str]], ...]:
                     }
                 )
                 listing.append(dict(identity))
-                if index % 37 == 0:
+                if index % 37 == 0 and not vendor.complete_open_interest:
                     continue
                 oi.append(
                     {**identity, "open_interest": "0" if index % 5 == 0 else "125"}
@@ -274,6 +293,13 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
                 request_spec_fingerprint=SPEC_FINGERPRINT,
                 planned_request_hash=stamped,
                 effective_valuation_timestamp=stamp,
+                # The approval every record is taken under. Carrying it is what
+                # ties the rate intent inside that approval to these bytes.
+                preflight_approval_hash=(
+                    _approval(vendor).approval_hash
+                    if vendor.declared_economic_rate is not None
+                    else ""
+                ),
             )
         )
         planned.append(
@@ -296,17 +322,68 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
     )
 
     intent: dict[str, Any] = {
+        # Pre-binding by default, so a vendor with no declared intent
+        # reproduces a legacy capture rather than an incomplete new one.
         "schema_version": "raw-capture-intent/2.1.23",
         "session_id": session_id,
         "request_plan": {"requests": planned, "request_count": len(planned)},
+        # The documentary readings a capture carries with it. Certification
+        # derives the documented unit from *these*, not from a constant in the
+        # certification code, so a synthetic capture has to bring its own.
+        "vendor_documentation": {
+            "document_sha256": DOCUMENT_SHA256,
+            "bundle_fingerprint": BUNDLE_FINGERPRINT,
+            "extractions": [
+                {
+                    "rule": "RATE_UNITS",
+                    "normalized_value": vendor.documented_rate_unit,
+                    "document_sha256": DOCUMENT_SHA256,
+                    "expected_source_fragment": "The interest rate, as a percent",
+                    "normalizer": "rate_units/1",
+                }
+            ],
+        },
     }
     if vendor.declared_economic_rate is not None:
-        intent["rate_semantics"] = {
-            "economic_rate_decimal": vendor.declared_economic_rate,
-            "economic_rate_percent": vendor.declared_economic_rate * 100.0,
-        }
+        intent["schema_version"] = "raw-capture-intent/2.1.24"
+        intent["rate_semantics"] = _rate_intent(vendor).as_dict()
+        intent["preflight_approval"] = _approval(vendor).as_dict()
     (root / "run-intent.json").write_text(json.dumps(intent), encoding="utf-8")
     return root
+
+
+def _rate_intent(vendor: SyntheticVendor) -> Any:
+    """The capture's statement of what it meant to buy."""
+    from src.adapters.thetadata.live_behavior import CaptureRateIntent
+
+    economic = float(vendor.declared_economic_rate or 0.0)
+    return CaptureRateIntent(
+        economic_rate_percent=economic * 100.0,
+        economic_rate_decimal=economic,
+        local_model_rate=economic,
+        vendor_request_rate_value=vendor.wire_rate_value,
+        vendor_observed_rate_unit=vendor.rate_unit,
+        documented_rate_unit=vendor.documented_rate_unit,
+    )
+
+
+def _approval(vendor: SyntheticVendor) -> Any:
+    """An approval that actually binds the intent, as a real preflight would."""
+    from datetime import date as _date
+
+    from src.adapters.thetadata.preflight_approval import CapturePreflightApproval
+
+    return CapturePreflightApproval(
+        market_session_date=_date(2026, 8, 10),
+        request_plan_hash="b" * 64,
+        capture_plan_fingerprint="c" * 64,
+        pipeline_fingerprint="d" * 64,
+        documentation_bundle_fingerprint=BUNDLE_FINGERPRINT,
+        effective_transport_fingerprint="e" * 64,
+        instrument_mapping_fingerprint="f" * 64,
+        subscription_tier="standard",
+        rate_intent_fingerprint=_rate_intent(vendor).fingerprint,
+    )
 
 
 def rewrite_manifest(root: pathlib.Path, mutate: Any) -> None:

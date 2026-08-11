@@ -68,11 +68,11 @@ __all__ = [
 ]
 
 #: Bumped when the *shape of the operator report* changes.
-RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.23"
+RAW_CAPTURE_RUN_SCHEMA_VERSION = "raw-capture-run/2.1.24"
 
 #: The document written before the first request, so a run that dies mid-flight
 #: still says what it was trying to do.
-RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.23"
+RUN_INTENT_SCHEMA_VERSION = "raw-capture-intent/2.1.24"
 
 
 class ContractListEvidenceState(str, Enum):
@@ -1045,53 +1045,16 @@ def _approval_difference(
 
 
 def _rate_semantics(pipeline: Any, config: Any) -> Any:
-    """The economic rate, and the three different numbers that can express it.
+    """The economic rate, and the numbers that can express it.
 
-    Derived from the configuration rather than restated beside it: the operator
-    edits ``rate_value`` and ``rate_units``, and the economic rate those two
-    imply is what the report has to show. Stating the percentage independently
-    would let the pair drift apart, which is the class of defect that produced
-    a 420% capture.
+    A thin alias since v2.1.24. The derivation moved beside the type it builds
+    so the preflight approval can bind a fingerprint over exactly what this
+    report prints -- two derivations of one statement is how an approval and
+    the thing it approves drift apart.
     """
-    from src.adapters.thetadata.live_behavior import VendorRateSemantics
-    from src.adapters.thetadata.vendor_documentation import DocumentedRule
-    from src.config.pipeline import OBSERVED_RATE_UNITS, RateUnit
+    from src.adapters.thetadata.live_behavior import rate_semantics_for
 
-    unit = config.rate_units
-    raw = config.rate_value
-    factor = 0.01 if unit is RateUnit.PERCENT_ANNUAL_RATE else 1.0
-    economic_percent = 0.0 if raw is None else raw * factor * 100.0
-
-    documented: Any = None
-    bundle = pipeline.documentation_bundle
-    if bundle is not None:
-        documented = bundle.value_for(DocumentedRule.RATE_UNITS)
-
-    return VendorRateSemantics(
-        economic_rate_percent=economic_percent,
-        # Measured, never read off the configuration being reported on. A
-        # config that could supply its own "observed" unit would be marking
-        # its own homework.
-        vendor_observed_rate_unit=OBSERVED_RATE_UNITS.value,
-        documented_rate_unit=(
-            documented.value if isinstance(documented, RateUnit) else "UNKNOWN"
-        ),
-        # The literal value that will go on the wire, and the rate the local
-        # model prices with, taken from their own places rather than
-        # re-derived. Passing them in is what makes
-        # ``predicted_effective_rate_matches_intended_rate`` a real check: a
-        # profile whose vendor block and model block disagree reports a
-        # mismatch instead of a number that agrees with itself.
-        configured_wire_value=(None if raw is None else float(raw)),
-        configured_local_model_rate=_local_model_rate(pipeline),
-    )
-
-
-def _local_model_rate(pipeline: Any) -> float | None:
-    """The decimal rate the local Black-Scholes will use, if it is stated."""
-    spec = getattr(pipeline, "model_spec", None)
-    rate = getattr(spec, "risk_free_rate", None)
-    return float(rate) if isinstance(rate, (int, float)) else None
+    return rate_semantics_for(pipeline, config)
 
 
 def _settlement_for_run(

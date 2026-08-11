@@ -46,7 +46,7 @@ __all__ = [
 #: Bumped when what an approval covers changes. An approval computed under
 #: older rules must not match a live run checked under newer ones: the digest
 #: would agree while the two sides disagreed about what it promised.
-CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION = "capture-preflight-approval/2.1.20"
+CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION = "capture-preflight-approval/2.1.24"
 
 
 class PreflightApprovalError(ValueError):
@@ -87,6 +87,7 @@ APPROVAL_TRANSPORT_FIELDS: Final[tuple[str, ...]] = (
 #: hunting through a diff for something they already know.
 _DIFFERENCE_ORDER: Final[tuple[tuple[str, str], ...]] = (
     ("market_session_date", "market session date changed"),
+    ("rate_intent_fingerprint", "the capture's intended rate changed"),
     ("instrument_mapping_fingerprint", "instrument mapping changed"),
     ("subscription_tier", "subscription tier changed"),
     ("effective_transport_fingerprint", "effective transport settings changed"),
@@ -116,6 +117,19 @@ class CapturePreflightApproval:
     effective_transport_fingerprint: str
     instrument_mapping_fingerprint: str
     subscription_tier: str
+    #: Digest of what this capture *means* by its rate, from v2.1.24.
+    #:
+    #: The request plan already binds the ``rate_value`` that goes on the wire.
+    #: This binds the other half: the economic rate that number is supposed to
+    #: express, and the unit under which it does. Until v2.1.24 that lived in a
+    #: plain dictionary in the run intent and nothing checked it, so editing one
+    #: number after the fact changed whether a capture was economically valid
+    #: without disturbing a single hash.
+    #:
+    #: Being *here* is what fixes it. The approval hash is inside the operation
+    #: fingerprint, and both are stamped on every manifest record, whose digest
+    #: certification recomputes from its own descriptors.
+    rate_intent_fingerprint: str = ""
     schema_version: str = CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION
     #: Derived, and recomputed here. A field because it round-trips through the
     #: run evidence; a supplied value that disagrees with the contents is
@@ -148,6 +162,7 @@ class CapturePreflightApproval:
             "effective_transport_fingerprint": self.effective_transport_fingerprint,
             "instrument_mapping_fingerprint": self.instrument_mapping_fingerprint,
             "subscription_tier": self.subscription_tier,
+            "rate_intent_fingerprint": self.rate_intent_fingerprint,
         }
 
     def _compute_hash(self) -> str:
@@ -187,12 +202,16 @@ def approval_for(
     preflight. Two derivations that could drift would put the operator back
     where they started, approving one thing and sending another.
     """
+    from src.adapters.thetadata.live_behavior import rate_semantics_for
     from src.config.thetadata import effective_transport_settings
     from src.domain.digests import digest_of
     from src.gex.sessions import market_session_date
 
     settings = effective_transport_settings(config)
     return CapturePreflightApproval(
+        rate_intent_fingerprint=rate_semantics_for(pipeline, config)
+        .to_intent()
+        .fingerprint,
         market_session_date=market_session_date(moment),
         request_plan_hash=pipeline.raw_request_plan(as_of=moment).request_plan_hash,
         capture_plan_fingerprint=pipeline.capture_plan.fingerprint,

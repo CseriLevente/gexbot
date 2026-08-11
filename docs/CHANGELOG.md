@@ -1,5 +1,49 @@
 ﻿# Changelog
 
+## 2.1.24 - certification authority and inference identifiability
+
+Seven defects found reviewing v2.1.23 before capture #2. No capture was taken.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `VALIDATED_AGAINST_ONE_LIVE_THETADATA_CAPTURE` |
+`NOT_READY_FOR_ANALYTICAL_DATASET`.
+
+### Defects fixed
+
+| S | Defect in v2.1.23 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | `rate_semantics.economic_rate_decimal` was read from the run intent and believed | Editing 0.042 to 4.2 -- touching no response, request plan or manifest -- flipped a capture from economically valid to invalid and certification reported the new answer | `CaptureRateIntent` with internal consistency and a fingerprint bound into the preflight approval, whose hash is inside the operation fingerprint and stamped on every manifest record |
+| 2 | `_implied_years` returned the first positive root | 148 of 162 two-root rows in the synthetic capture took the wrong one -- nine years for a two-day option -- while clock spreads of 2,737 days passed unnoticed. The real capture has 818 two-root rows | All positive roots are kept and resolved against the window an instant on the known expiration date could occupy; single/disambiguated/ambiguous/inconsistent counts are published |
+| 3 | The lowest score was the answer | With `rate_value=0` both hypotheses are `r=0` and score identically; v2.1.23 reported `DECIMAL_ANNUAL_RATE` and a documentation conflict because decimal was first in the tuple | `InferenceDecision` derived from the reporting precision of `delta` and `implied_vol`; only a discriminated comparison may produce a resolved status |
+| 4 | Only slices through the rate/day-count search were published | No way to audit whether another pair was nearly equivalent | The full 2x4 grid is emitted |
+| 5 | `trusted_for_gex = not self.gex_blockers` | A correct-rate, zero-missing-OI capture reported `trusted_for_gex = true` beside `ADAPTER_CERTIFICATION_EVIDENCE` -- the report contradicting its own docstring | Constant `False`; blockers are disqualifying, never qualifying |
+| 6 | A caller's 64 hex characters were reported as archive identity | Nothing opened a file | `archive_path` is hashed here; a naked digest is `UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM` and never known identity |
+| 7 | Set equality survived duplicate identities | 551 listing rows against 550 snapshots still earned the strongest universe state | Per-endpoint row/identity/duplicate counts; duplicates block the strongest state; open interest is parsed as an exact integer |
+
+### Dimensions and documentary evidence
+
+`UNDERLYING_TIMESTAMP` is now its own dimension with a typed mapping to
+`PricingDimension`, and behaviour dimensions are reported separately from
+pricing dimensions -- an empty behaviour list no longer reads as analytical
+completeness.
+
+Documented readings come from the capture's own recorded extractions rather
+than from constants in the certification code. The first capture records a
+`RATE_UNITS` extraction, so its legacy intent is derived from that. No capture
+records an `IV_PRICE_BASIS` extraction, so the `TRADE_PRICE` reading is listed
+in `unbound_documentary_claims` as a repository constant and the live NBBO-mid
+finding stands on its own as `LIVE_ONLY` rather than conflicting with it.
+
+### The first capture is unchanged where the evidence still supports it
+
+`ACT_365`, 16:00 ET front-week, whole days beyond, rate conflict retained,
+vendor `r = 4.2` against a legacy intent of `0.042`, economically invalid, 426
+OI-missing identities, 3,692 explicit zeros, embedded underlying 7759.27 at
+10:01:34 against the index 7759.54 at 10:01:33, sequential quote/Greeks.
+
+Clock-reading spreads fell from 2,737 days to 0.005. Of its 818 two-root rows,
+812 disambiguate, 6 stay ambiguous and none is inconsistent.
+
 ## 2.1.23 - certification stops assuming the first capture
 
     v2.1.22 inversion       rate = 4.2

@@ -3,22 +3,38 @@
     "Derived certification evidence from the first live ThetaData capture.",
     "",
     "The raw vendor payloads are NOT committed. They are paid market data",
-    "under a ThetaData subscription, and redistributing 5 MB of it in a git",
-    "repository is a licensing question this project has no answer to. What",
-    "is committed is everything needed to check that a capture in hand is",
-    "the same capture: the archive digest, the manifest hash, the per-record",
-    "payload hashes, the identity-set hashes, and the statistics the",
-    "reconstruction produced.",
+    "under a ThetaData subscription. What is committed is everything needed",
+    "to check that a capture in hand is the same capture, and every finding",
+    "derived from it.",
     "",
     "To re-derive all of it:",
     "  python -m src.tools.certify_thetadata_capture <capture-root> \\",
-    "      --archive-sha256 5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+    "      --archive-path <archive.zip>",
     "",
-    "Every number below came out of that command. None was typed in."
+    "Every number below came out of that command. None was typed in.",
+    "",
+    "The archive digest here is an UNVERIFIED external claim: the archive",
+    "was not present when this fixture was generated, so certification",
+    "recorded the claim and refused to call it a known identity."
   ],
   "access_mode": "THETA_TERMINAL_REST_V3",
   "analytical_readiness": "ADAPTER_CERTIFICATION_EVIDENCE",
+  "behavior_dimensions_resolved": [
+    "RATE_UNITS",
+    "DAY_COUNT",
+    "EXPIRATION_TIMESTAMP",
+    "IV_PRICE_BASIS",
+    "UNDERLYING_SOURCE",
+    "UNDERLYING_TIMESTAMP",
+    "DIVIDEND_CONVENTION",
+    "CONTRACT_LIST_UNIVERSE"
+  ],
+  "behavior_dimensions_unresolved": [],
   "capture": {
+    "archive_byte_length": 0,
+    "archive_contains_capture_manifest": false,
+    "archive_digest_provenance": "UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM",
+    "archive_identity_known": false,
     "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
     "captured_at": "2026-08-10T14:01:29.616899+00:00",
     "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
@@ -63,16 +79,6 @@
       "rows": 7348
     }
   ],
-  "dimensions_resolved": [
-    "RATE_UNITS",
-    "DAY_COUNT",
-    "EXPIRATION_TIMESTAMP",
-    "IV_PRICE_BASIS",
-    "UNDERLYING_SOURCE",
-    "DIVIDEND_CONVENTION",
-    "CONTRACT_LIST_UNIVERSE"
-  ],
-  "dimensions_unresolved": [],
   "endpoint_synchrony": {
     "identical_ask_ratio": 0.9699093157460841,
     "identical_bid_ratio": 0.9689475130530365,
@@ -211,17 +217,23 @@
   ],
   "fitting_method": {
     "comparand": "vendor-reported delta, against delta recomputed from vendor-reported implied_vol",
-    "implied_vol_reporting_tick": 0.0001,
+    "delta_reporting_quantum": 0.0001,
+    "implied_vol_reporting_quantum": 0.0001,
     "population": "implied_vol > 0 and 0 < |delta| < 1",
     "pricer": "src.gex.pricing (Black-Scholes, the engine's own)",
-    "rows": 7348,
-    "time_to_expiry": "read by inverting the vendor's own delta and implied_vol for T, then scored per hypothesis",
+    "time_to_expiry": "all positive roots of the delta inversion, resolved against the window an instant on the known expiration date could occupy",
     "underlying": "the underlying price embedded in the greeks response"
   },
   "gex_blockers": [
     "the vendor priced this capture at r=4.2 and the request meant r=0.042, a factor of 100. Every implied volatility and every delta in it describes a market that does not exist. The capture remains the evidence that established the rate semantics and must not be discarded.",
     "426 contract identities have no open-interest row. Open interest is the linear weight on every GEX term and there is no evidence-backed policy for an absent one, so an aggregate would be choosing silently."
   ],
+  "inference_decisions": {
+    "DAY_COUNT": "RESOLVED",
+    "EXPIRATION_TIMESTAMP": "RESOLVED",
+    "IV_PRICE_BASIS": "RESOLVED",
+    "RATE_UNITS": "RESOLVED"
+  },
   "iv_basis_comparison": [
     {
       "basis": "NBBO_MID",
@@ -361,16 +373,112 @@
     "permits_trusted_aggregate": false,
     "universe_count": 14556
   },
+  "pricing_dimensions_still_unresolved": [
+    "DIVIDEND_VALUE",
+    "MINIMUM_TIME_FLOOR",
+    "RISK_FREE_RATE",
+    "SOLVER_VERSION"
+  ],
+  "pricing_dimensions_supported_by_evidence": [
+    "DAY_COUNT",
+    "DIVIDEND_CONVENTION",
+    "EXPIRATION_TIMESTAMP",
+    "IV_PRICE_BASIS",
+    "RATE_UNITS",
+    "UNDERLYING_SOURCE",
+    "UNDERLYING_TIMESTAMP"
+  ],
+  "rate_day_count_grid": [
+    {
+      "day_count": "ACT/365",
+      "delta_rmse": 0.0001584804637398003,
+      "effective_rate": 4.2,
+      "median_abs_delta_error": 4.434673004381621e-05,
+      "rate_interpretation": "DECIMAL_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": true
+    },
+    {
+      "day_count": "ACT/365.25",
+      "delta_rmse": 0.013961639481461724,
+      "effective_rate": 4.2,
+      "median_abs_delta_error": 0.00018963728248269467,
+      "rate_interpretation": "DECIMAL_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    },
+    {
+      "day_count": "ACT/360",
+      "delta_rmse": 0.013486576120886202,
+      "effective_rate": 4.2,
+      "median_abs_delta_error": 0.00044613922678004084,
+      "rate_interpretation": "DECIMAL_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    },
+    {
+      "day_count": "ACT/252",
+      "delta_rmse": 0.09021003920376473,
+      "effective_rate": 4.2,
+      "median_abs_delta_error": 0.011399364434035436,
+      "rate_interpretation": "DECIMAL_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    },
+    {
+      "day_count": "ACT/365",
+      "delta_rmse": 0.23244930523404025,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.22084373046392233,
+      "rate_interpretation": "PERCENT_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    },
+    {
+      "day_count": "ACT/365.25",
+      "delta_rmse": 0.23244715330582305,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.22084031731396334,
+      "rate_interpretation": "PERCENT_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    },
+    {
+      "day_count": "ACT/360",
+      "delta_rmse": 0.23249413083725876,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.2212105653096965,
+      "rate_interpretation": "PERCENT_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    },
+    {
+      "day_count": "ACT/252",
+      "delta_rmse": 0.2337947905119352,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.22671208823612865,
+      "rate_interpretation": "PERCENT_ANNUAL_RATE",
+      "rows": 7348,
+      "selected": false
+    }
+  ],
   "rate_economics": {
     "capture_effective_rate_matches_intended_rate": false,
     "documented_rate_unit": "PERCENT_ANNUAL_RATE",
     "intended_economic_rate": 0.042,
-    "intended_rate_source": "DERIVED_FROM_DOCUMENTED_UNIT",
+    "intended_rate_source": "LEGACY_CAPTURE_DOCUMENTATION_DERIVED",
     "magnitude_ratio": 100.0,
     "observed_vendor_rate_unit": "DECIMAL_ANNUAL_RATE",
     "rate_units_documentation_live_conflict": true,
     "vendor_effective_rate": 4.2,
     "wire_rate_value": 4.2
+  },
+  "rate_intent_binding": {
+    "bound": false,
+    "capture_records_binding_schema": false,
+    "intent_schema_version": "raw-capture-intent/2.1.19",
+    "rate_intent_fingerprint": "",
+    "source": "LEGACY_CAPTURE_DOCUMENTATION_DERIVED"
   },
   "rate_semantics": [
     {
@@ -380,7 +488,7 @@
       "rows": 7348
     },
     {
-      "delta_rmse": 0.23246474693160993,
+      "delta_rmse": 0.23244930523404025,
       "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
       "median_abs_delta_error": 0.22084373046392233,
       "rows": 7348
@@ -396,15 +504,32 @@
     },
     "records_verified": 5
   },
-  "report_hash": "2c7d673b0f2fcbf05654b194a13510154f205529e01ffd5ab4a088337bb55738",
+  "report_hash": "025129637cb7508cbd150797be1b78a87826d9da167b28d7ca59be44d393666b",
   "resolved_day_count": "ACT_365",
   "resolved_expiration_clock": "16:00 America/New_York",
-  "schema_version": "capture-certification/2.1.22",
+  "root_resolution": {
+    "ambiguous_root_rows": 6,
+    "disambiguated_multi_root_rows": 812,
+    "inconsistent_root_rows": 0,
+    "single_root_rows": 2050,
+    "usable_rows": 2862
+  },
+  "rows_reconstructed": 7348,
+  "schema_version": "capture-certification/2.1.24",
   "theta_terminal_version": {
     "carried_in_capture": false,
-    "note": "No response and no manifest field records the Theta Terminal build. The local installation at capture time was ThetaTerminalv3.jar with lib/202608071.jar, observed on the capture machine rather than in the capture, so it is recorded here as context and is not capture-bound evidence."
+    "note": "No response and no manifest field records the Theta Terminal build. Observed on the capture machine rather than in the capture, so it is context and not capture-bound evidence."
   },
   "trusted_for_gex": false,
+  "unbound_documentary_claims": [
+    {
+      "claim": "TRADE_PRICE",
+      "dimension": "IV_PRICE_BASIS",
+      "note": "no capture records an IV_PRICE_BASIS extraction, so this reading cannot be compared against a live finding as documentary evidence. The live finding stands on its own.",
+      "origin": "REPOSITORY_CONSTANT_NOT_CAPTURE_BOUND",
+      "reference": "components/schemas/first_order_greeks/properties/implied_vol"
+    }
+  ],
   "underlying_synchronization": {
     "authoritative_for_vendor_model": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
     "index_snapshot_price": 7759.54,
@@ -417,6 +542,37 @@
   "universe": {
     "contract_list_count": 14556,
     "contract_list_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "duplicate_identity_count": 0,
+    "endpoint_identities": [
+      {
+        "duplicate_identity_count": 0,
+        "duplicate_identity_hash": "",
+        "endpoint": "/v3/option/list/contracts/quote",
+        "row_count": 14556,
+        "unique_identity_count": 14556
+      },
+      {
+        "duplicate_identity_count": 0,
+        "duplicate_identity_hash": "",
+        "endpoint": "/v3/option/snapshot/quote",
+        "row_count": 14556,
+        "unique_identity_count": 14556
+      },
+      {
+        "duplicate_identity_count": 0,
+        "duplicate_identity_hash": "",
+        "endpoint": "/v3/option/snapshot/greeks/first_order",
+        "row_count": 14556,
+        "unique_identity_count": 14556
+      },
+      {
+        "duplicate_identity_count": 0,
+        "duplicate_identity_hash": "",
+        "endpoint": "/v3/option/snapshot/open_interest",
+        "row_count": 14130,
+        "unique_identity_count": 14130
+      }
+    ],
     "greeks_count": 14556,
     "greeks_matches_list": true,
     "greeks_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
@@ -429,18 +585,18 @@
   },
   "vendor_behavior": {
     "conflicts": [
-      "RATE_UNITS",
-      "IV_PRICE_BASIS"
+      "RATE_UNITS"
     ],
     "observations": [
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "archive_identity_known": false,
+          "archive_sha256": "",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
+        "decision": "RESOLVED",
         "dimension": "RATE_UNITS",
         "documentation_matched": false,
         "documentation_reference": "components/parameters/rate_value/description",
@@ -459,11 +615,12 @@
             "rows": 7348,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.23246474693160993
+            "value": 0.23244930523404025
           }
         ],
         "notes": "The document says percent and the implementation reads a decimal. Both records are kept; the observed reading governs request construction because the request is answered by the implementation.",
         "observed_value": "DECIMAL_ANNUAL_RATE",
+        "pricing_dimension": "RATE_UNITS",
         "rows_used": 7348,
         "scope": "/v3/option/snapshot/greeks/first_order, greeks_version=latest",
         "status": "DOCUMENTATION_LIVE_CONFLICT"
@@ -471,11 +628,12 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "archive_identity_known": false,
+          "archive_sha256": "",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
+        "decision": "RESOLVED",
         "dimension": "DAY_COUNT",
         "documentation_matched": false,
         "documentation_reference": "",
@@ -513,6 +671,7 @@
         ],
         "notes": "",
         "observed_value": "ACT_365",
+        "pricing_dimension": "DAY_COUNT",
         "rows_used": 7348,
         "scope": "SPXW first-order greeks in this capture",
         "status": "LIVE_ONLY"
@@ -520,11 +679,12 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "archive_identity_known": false,
+          "archive_sha256": "",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
+        "decision": "RESOLVED",
         "dimension": "EXPIRATION_TIMESTAMP",
         "documentation_matched": false,
         "documentation_reference": "",
@@ -625,6 +785,7 @@
         ],
         "notes": "Read by inverting delta and implied volatility for the vendor's own time-to-expiry, not by scoring a global hypothesis. The structured scope is in expiration_clock_evidence; this string is a summary of it and never the only copy.",
         "observed_value": "16:00 America/New_York",
+        "pricing_dimension": "EXPIRATION_TIMESTAMP",
         "rows_used": 1592,
         "scope": "SPXW expirations up to and including 2026-08-14. Beyond that boundary 26 expirations in this capture price on whole calendar days instead, so this rule is NOT established for longer maturities and must not be applied to them. The exact transition is OPEN: the nearest contradicting expiration is 2026-08-17, 3 calendar days later, and nothing was captured in between.",
         "status": "LIVE_ONLY"
@@ -632,15 +793,16 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "archive_identity_known": false,
+          "archive_sha256": "",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
+        "decision": "RESOLVED",
         "dimension": "IV_PRICE_BASIS",
         "documentation_matched": false,
         "documentation_reference": "components/schemas/first_order_greeks/properties/implied_vol",
-        "documented_value": "TRADE_PRICE",
+        "documented_value": "",
         "governing_value": "NBBO_MID",
         "metrics": [
           {
@@ -667,18 +829,20 @@
         ],
         "notes": "The residual under NBBO mid is half the reporting tick of implied_vol, which is the floor -- there is nothing left to explain. Bid and ask are two orders of magnitude worse.",
         "observed_value": "NBBO_MID",
+        "pricing_dimension": "IV_PRICE_BASIS",
         "rows_used": 2868,
         "scope": "SPXW first-order greeks in this capture",
-        "status": "DOCUMENTATION_LIVE_CONFLICT"
+        "status": "LIVE_ONLY"
       },
       {
         "basis": "LIVE_FIELD_READ",
         "capture": {
-          "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "archive_identity_known": false,
+          "archive_sha256": "",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
+        "decision": "RESOLVED",
         "dimension": "UNDERLYING_SOURCE",
         "documentation_matched": false,
         "documentation_reference": "",
@@ -687,6 +851,29 @@
         "metrics": [],
         "notes": "The Greeks response carries one underlying print (7759.27 at 2026-08-10T10:01:34.000). The separately captured index snapshot returned 7759.54 at 2026-08-10T10:01:33.000, which is a different state. The index response is not what these Greeks were computed from and must not be described as synchronized.",
         "observed_value": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
+        "pricing_dimension": "UNDERLYING_SOURCE",
+        "rows_used": 14556,
+        "scope": "reproduction of the vendor's own model",
+        "status": "LIVE_ONLY"
+      },
+      {
+        "basis": "LIVE_FIELD_READ",
+        "capture": {
+          "archive_identity_known": false,
+          "archive_sha256": "",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "decision": "RESOLVED",
+        "dimension": "UNDERLYING_TIMESTAMP",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "GREEKS_RESPONSE_EMBEDDED_UNDERLYING_TIMESTAMP",
+        "metrics": [],
+        "notes": "The Greeks response stamps one underlying instant (2026-08-10T10:01:34.000) across every row. The separately captured index snapshot is stamped 2026-08-10T10:01:33.000, so the two are different observations of the underlying and the embedded one is what these Greeks were computed against. Recorded as its own dimension because the analytical compatibility layer treats source and timestamp separately, and until v2.1.24 this ledger carried only the source -- so an empty unresolved list read as though every pricing dimension were settled.",
+        "observed_value": "GREEKS_RESPONSE_EMBEDDED_UNDERLYING_TIMESTAMP",
+        "pricing_dimension": "UNDERLYING_TIMESTAMP",
         "rows_used": 14556,
         "scope": "reproduction of the vendor's own model",
         "status": "LIVE_ONLY"
@@ -694,6 +881,7 @@
       {
         "basis": "REQUEST_BOUND",
         "capture": null,
+        "decision": "RESOLVED",
         "dimension": "DIVIDEND_CONVENTION",
         "documentation_matched": true,
         "documentation_reference": "ThetaData greeks article, annual_div",
@@ -702,6 +890,7 @@
         "metrics": [],
         "notes": "effective dividend 0, effective q 0 for this capture.",
         "observed_value": "",
+        "pricing_dimension": "DIVIDEND_CONVENTION",
         "rows_used": 0,
         "scope": "annual_dividend=0.0 was requested, so this capture exercises only the zero case and cannot speak to non-zero handling",
         "status": "DOCUMENTATION_ONLY"
@@ -709,11 +898,12 @@
       {
         "basis": "LIVE_SET_COMPARISON",
         "capture": {
-          "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "archive_identity_known": false,
+          "archive_sha256": "",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
+        "decision": "RESOLVED",
         "dimension": "CONTRACT_LIST_UNIVERSE",
         "documentation_matched": false,
         "documentation_reference": "",
@@ -722,24 +912,25 @@
         "metrics": [],
         "notes": "contract list e8d189b6ade90686, quote e8d189b6ade90686, greeks e8d189b6ade90686",
         "observed_value": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE",
+        "pricing_dimension": "",
         "rows_used": 14556,
         "scope": "SPXW, session 2026-08-10, max_dte=60, quote and first-order greeks snapshots only",
         "status": "LIVE_ONLY"
       }
     ],
-    "schema_version": "pricing-evidence/2.1.22",
+    "schema_version": "pricing-evidence/2.1.24",
     "unresolved": []
   },
   "vendor_clock_by_expiration": [
     {
       "calendar_days": 0,
       "expiration": "2026-08-10",
-      "implied_days": 0.2490246287204837,
+      "implied_days": 0.24901923503361983,
       "is_intraday_regime": true,
       "is_whole_day_regime": false,
-      "offset_from_calendar": 0.2490246287204837,
-      "rows": 93,
-      "spread": 0.3391543276907141
+      "offset_from_calendar": 0.24901923503361983,
+      "rows": 87,
+      "spread": 0.0003832573205411749
     },
     {
       "calendar_days": 1,

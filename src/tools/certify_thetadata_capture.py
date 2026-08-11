@@ -129,11 +129,36 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
             else ""
         )
     )
+    lines.append(
+        "inference:      "
+        + " | ".join(
+            f"{name} {verdict}"
+            for name, verdict in sorted(data["inference_decisions"].items())
+        )
+    )
+    roots = data["root_resolution"]
+    lines.append(
+        f"root choice     {roots['single_root_rows']} single, "
+        f"{roots['disambiguated_multi_root_rows']} disambiguated, "
+        f"{roots['ambiguous_root_rows']} ambiguous, "
+        f"{roots['inconsistent_root_rows']} inconsistent"
+    )
+    binding = data["rate_intent_binding"]
+    lines.append(f"rate intent     bound={binding['bound']} ({binding['source']})")
     conflicts = ", ".join(data["documentation_live_conflicts"]) or "none"
     lines.append(f"conflicts:      {conflicts}")
-    lines.append("resolved:       " + ", ".join(data["dimensions_resolved"]))
+    lines.append("behaviour:      " + ", ".join(data["behavior_dimensions_resolved"]))
     lines.append(
-        "unresolved:     " + (", ".join(data["dimensions_unresolved"]) or "none")
+        "  unresolved:   "
+        + (", ".join(data["behavior_dimensions_unresolved"]) or "none")
+    )
+    lines.append(
+        "pricing:        "
+        + (", ".join(data["pricing_dimensions_supported_by_evidence"]) or "none")
+    )
+    lines.append(
+        "  unresolved:   "
+        + (", ".join(data["pricing_dimensions_still_unresolved"]) or "none")
     )
     lines.append(f"readiness       {data['analytical_readiness']}")
     lines.append(f"trusted for gex {data['trusted_for_gex']}")

@@ -356,8 +356,12 @@ def test_the_documentation_conflict_and_the_economic_error_are_separate(capture)
     assert economics["rate_units_documentation_live_conflict"] is True
     # ... and separately, this capture did not buy the rate it meant to.
     assert economics["capture_effective_rate_matches_intended_rate"] is False
-    # The first capture predates the run intent recording its own intent.
-    assert economics["intended_rate_source"] == "DERIVED_FROM_DOCUMENTED_UNIT"
+    # The first capture predates the bound intent, and says so explicitly. The
+    # documented unit it is read under comes from the capture's *own* recorded
+    # extraction, not from a constant in today's certification code.
+    assert economics["intended_rate_source"] == "LEGACY_CAPTURE_DOCUMENTATION_DERIVED"
+    assert capture["rate_intent_binding"]["bound"] is False
+    assert capture["rate_intent_binding"]["capture_records_binding_schema"] is False
 
 
 def test_the_resolved_labels_are_the_winning_hypotheses(capture):
@@ -503,7 +507,10 @@ def test_the_first_capture_is_evidence_and_not_a_gex_input(capture):
 def test_every_dimension_the_capture_touched_is_recorded(capture):
     recorded = {o["dimension"] for o in capture["vendor_behavior"]["observations"]}
     assert recorded == {d.value for d in BehaviorDimension}
-    assert not capture["dimensions_unresolved"]
+    assert not capture["behavior_dimensions_unresolved"]
+    # And the behaviour vocabulary is *not* the pricing vocabulary, so an empty
+    # unresolved list here says nothing about analytical readiness.
+    assert capture["pricing_dimensions_still_unresolved"]
 
 
 def test_a_ledger_refuses_two_answers_for_one_dimension():

@@ -46,7 +46,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 from src.adapters.errors import ThetaDataProvenanceError
 
@@ -54,7 +54,9 @@ __all__ = [
     "PRICING_EVIDENCE_SCHEMA_VERSION",
     "BehaviorDimension",
     "CaptureIdentity",
+    "CaptureRateIntent",
     "EvidenceStatus",
+    "InferenceDecision",
     "LiveBehaviorObservation",
     "ObservationBasis",
     "ReconstructionMetric",
@@ -65,7 +67,46 @@ __all__ = [
 #: Bumped when what a pricing-evidence record must carry changes. v2.1.22 adds
 #: the observed-implementation side, so a v2.1.21 reader that saw only the
 #: documented value would report agreement where there is a conflict.
-PRICING_EVIDENCE_SCHEMA_VERSION = "pricing-evidence/2.1.23"
+PRICING_EVIDENCE_SCHEMA_VERSION = "pricing-evidence/2.1.24"
+
+
+#: Rate units this repository can express. A closed set: a unit nobody named
+#: cannot be checked, and "UNKNOWN" is a state rather than a spelling mistake.
+RATE_UNITS = ("PERCENT_ANNUAL_RATE", "DECIMAL_ANNUAL_RATE", "UNKNOWN")
+
+
+class InferenceDecision(str, Enum):
+    """Whether a numerical comparison actually settled anything.
+
+    v2.1.23 took the lowest score and called it the answer. That is not the same
+    question. With ``rate_value=0`` the decimal and percent hypotheses are the
+    same computation -- both give ``r = 0`` -- and score identically to the last
+    bit; v2.1.23 nonetheless reported ``DECIMAL_ANNUAL_RATE`` and a
+    documentation conflict, because ``min()`` returns the first of equals and
+    decimal happened to be listed first. The verdict came from the ordering of a
+    tuple.
+
+    So the winner and the *decision* are separate. A score table always has a
+    smallest entry; only some of them mean something.
+    """
+
+    #: One hypothesis fits adequately and is separated from the next.
+    RESOLVED = "RESOLVED"
+    #: A best exists but the runner-up is not distinguishable from it at the
+    #: precision the source fields are reported to.
+    AMBIGUOUS = "AMBIGUOUS"
+    #: The hypotheses are the same computation. No amount of data separates
+    #: them, because there is nothing to separate.
+    NOT_IDENTIFIABLE = "NOT_IDENTIFIABLE"
+    #: Every hypothesis reproduces the vendor badly. The best of a bad set is
+    #: not evidence for anything.
+    NO_ADEQUATE_FIT = "NO_ADEQUATE_FIT"
+    #: Too few usable rows to distinguish anything.
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+
+    @property
+    def is_resolved(self) -> bool:
+        return self is InferenceDecision.RESOLVED
 
 
 class BehaviorDimension(str, Enum):
@@ -88,8 +129,43 @@ class BehaviorDimension(str, Enum):
     UNDERLYING_SOURCE = "UNDERLYING_SOURCE"
     #: What ``annual_dividend`` means to the vendor.
     DIVIDEND_CONVENTION = "DIVIDEND_CONVENTION"
+    #: Which instant the vendor's own underlying print carries.
+    #:
+    #: Separate from ``UNDERLYING_SOURCE`` because the analytical compatibility
+    #: layer treats them separately, and a live response establishes both. With
+    #: only the source recorded, ``dimensions_unresolved == []`` read as "every
+    #: pricing dimension is settled" while one of them was not in the ledger at
+    #: all.
+    UNDERLYING_TIMESTAMP = "UNDERLYING_TIMESTAMP"
     #: Whether the dedicated contract listing matches the snapshot universe.
     CONTRACT_LIST_UNIVERSE = "CONTRACT_LIST_UNIVERSE"
+
+    @property
+    def pricing_dimension(self) -> str:
+        """The analytical ``PricingDimension`` this evidence speaks to.
+
+        Empty when it speaks to none. A typed mapping rather than a name match:
+        the two enums were written for different purposes and only mostly
+        agree, and guessing by string would make a rename look like a
+        resolution.
+        """
+        return PRICING_DIMENSION_FOR.get(self, "")
+
+
+#: Certification evidence -> the analytical pricing dimension it supports, by
+#: value rather than by importing the enum (the compatibility layer lives above
+#: this one). ``CONTRACT_LIST_UNIVERSE`` is deliberately absent: universe
+#: coverage is not a pricing convention, and mapping it to one would let a
+#: universe finding satisfy a pricing requirement.
+PRICING_DIMENSION_FOR: dict[BehaviorDimension, str] = {
+    BehaviorDimension.RATE_UNITS: "RATE_UNITS",
+    BehaviorDimension.DAY_COUNT: "DAY_COUNT",
+    BehaviorDimension.EXPIRATION_TIMESTAMP: "EXPIRATION_TIMESTAMP",
+    BehaviorDimension.IV_PRICE_BASIS: "IV_PRICE_BASIS",
+    BehaviorDimension.UNDERLYING_SOURCE: "UNDERLYING_SOURCE",
+    BehaviorDimension.UNDERLYING_TIMESTAMP: "UNDERLYING_TIMESTAMP",
+    BehaviorDimension.DIVIDEND_CONVENTION: "DIVIDEND_CONVENTION",
+}
 
 
 class ObservationBasis(str, Enum):
@@ -281,6 +357,13 @@ class LiveBehaviorObservation:
     dimension: BehaviorDimension
     status: EvidenceStatus
     basis: ObservationBasis
+    #: Whether the numerical comparison behind this observation discriminated.
+    #:
+    #: Separate from ``status``, which describes how two *readings* stand to
+    #: each other. A comparison can produce a smallest score and still have
+    #: settled nothing -- identical hypotheses, a tie inside the reporting
+    #: precision, or nothing fitting at all -- and v2.1.23 had no way to say so.
+    decision: InferenceDecision = InferenceDecision.RESOLVED
     #: Exactly as extracted from the pinned document. Empty when it is silent.
     documented_value: str = ""
     #: What the capture showed the implementation actually does.
@@ -303,6 +386,15 @@ class LiveBehaviorObservation:
         object.__setattr__(self, "dimension", BehaviorDimension(self.dimension))
         object.__setattr__(self, "status", EvidenceStatus(self.status))
         object.__setattr__(self, "basis", ObservationBasis(self.basis))
+        object.__setattr__(self, "decision", InferenceDecision(self.decision))
+
+        if self.status.is_resolved and not self.decision.is_resolved:
+            raise ThetaDataProvenanceError(
+                f"{self.dimension.value} carries status {self.status.value} on "
+                f"a comparison that came out {self.decision.value}. A dimension "
+                "cannot be settled by a comparison that settled nothing; that "
+                "is the ordering-of-a-tuple verdict this field exists to stop."
+            )
 
         if self.status.is_conflict:
             if not (self.documented_value and self.observed_value):
@@ -343,7 +435,10 @@ class LiveBehaviorObservation:
                     "names no capture. Live evidence that cannot be traced to "
                     "immutable bytes is an assertion with a confident label."
                 )
-            if self.rows_used <= 0:
+            # Only a *resolved* observation has to rest on rows. An unresolved
+            # one may have none precisely because there were too few to
+            # discriminate, and refusing to record that would lose the finding.
+            if self.rows_used <= 0 and self.decision.is_resolved:
                 raise ThetaDataProvenanceError(
                     f"{self.dimension.value} rests on {self.basis.value} over "
                     f"{self.rows_used} rows"
@@ -383,7 +478,9 @@ class LiveBehaviorObservation:
     def as_dict(self) -> dict[str, Any]:
         return {
             "dimension": self.dimension.value,
+            "pricing_dimension": self.dimension.pricing_dimension,
             "status": self.status.value,
+            "decision": self.decision.value,
             "basis": self.basis.value,
             "documented_value": self.documented_value,
             "observed_value": self.observed_value,
@@ -449,6 +546,177 @@ class VendorBehaviorLedger:
             "observations": [o.as_dict() for o in self.observations],
             "conflicts": [o.dimension.value for o in self.conflicts],
             "unresolved": [o.dimension.value for o in self.unresolved],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureRateIntent:
+    """What a capture means by its rate, in a form that cannot be edited later.
+
+    v2.1.23 bound the ``rate_value`` on the wire correctly -- recomputed against
+    the manifest's stamped request digest -- and then read the capture's
+    *intended* economic rate out of a plain dictionary in ``run-intent.json``
+    and believed it. Changing one number there:
+
+        rate_semantics.economic_rate_decimal: 0.042 -> 4.2
+
+    left every raw response, the request plan and the manifest untouched, and
+    flipped ``capture_effective_rate_matches_intended_rate`` from true to false.
+    The field that decides whether a capture is economically valid was the one
+    field nothing checked.
+
+    So the intent is a typed object with a fingerprint, and the fingerprint goes
+    into the preflight approval *before the first request*. The approval hash is
+    inside the operation fingerprint, and both are stamped on every manifest
+    record, whose digest certification already recomputes. Editing any field
+    here changes the fingerprint, which no longer matches the approval, whose
+    hash no longer matches the records -- three independent refusals from one
+    edit.
+
+    The derived quantities are checked rather than trusted. Supplying
+    ``economic_rate_percent=4.2`` beside ``economic_rate_decimal=0.5`` is not a
+    capture with an unusual convention, it is a capture whose own statement of
+    intent is incoherent, and it is refused at construction.
+    """
+
+    economic_rate_percent: float
+    economic_rate_decimal: float
+    local_model_rate: float
+    vendor_request_rate_value: float
+    vendor_observed_rate_unit: str
+    documented_rate_unit: str
+    schema_version: str = PRICING_EVIDENCE_SCHEMA_VERSION
+
+    #: Float round-trips through JSON and through a percent/hundred conversion.
+    #: Far tighter than the factor of a hundred this exists to catch.
+    TOLERANCE: ClassVar[float] = 1e-12
+
+    def __post_init__(self) -> None:
+        for name in (
+            "economic_rate_percent",
+            "economic_rate_decimal",
+            "local_model_rate",
+            "vendor_request_rate_value",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ThetaDataProvenanceError(
+                    f"CaptureRateIntent.{name} is {value!r}; a rate that is not "
+                    "a finite number states no intent"
+                )
+        for name in ("vendor_observed_rate_unit", "documented_rate_unit"):
+            if str(getattr(self, name)) not in RATE_UNITS:
+                raise ThetaDataProvenanceError(
+                    f"CaptureRateIntent.{name} is {getattr(self, name)!r}; "
+                    f"expected one of {RATE_UNITS}"
+                )
+        if (
+            abs(self.economic_rate_decimal - self.economic_rate_percent / 100.0)
+            > self.TOLERANCE
+        ):
+            raise ThetaDataProvenanceError(
+                f"CaptureRateIntent states {self.economic_rate_percent}% and "
+                f"{self.economic_rate_decimal} as a decimal, which are not the "
+                "same rate. A statement of intent that disagrees with itself "
+                "cannot establish what a capture meant to buy."
+            )
+        if abs(self.local_model_rate - self.economic_rate_decimal) > self.TOLERANCE:
+            raise ThetaDataProvenanceError(
+                f"CaptureRateIntent prices the local model at "
+                f"{self.local_model_rate} and states an economic rate of "
+                f"{self.economic_rate_decimal}. The comparison certification "
+                "makes is between the vendor and the local model; if those two "
+                "already differ there is nothing to compare against."
+            )
+        expected = (
+            self.economic_rate_percent
+            if self.vendor_observed_rate_unit == "PERCENT_ANNUAL_RATE"
+            else self.economic_rate_decimal
+        )
+        if (
+            self.vendor_observed_rate_unit != "UNKNOWN"
+            and abs(self.vendor_request_rate_value - expected) > self.TOLERANCE
+        ):
+            raise ThetaDataProvenanceError(
+                f"CaptureRateIntent sends {self.vendor_request_rate_value} for an "
+                f"economic {self.economic_rate_percent}% under "
+                f"{self.vendor_observed_rate_unit}, where {expected} is the "
+                "value that expresses it. This is the arithmetic the first "
+                "capture got wrong, and an intent object that could carry it "
+                "would be recording the defect rather than preventing it."
+            )
+
+    @property
+    def predicted_vendor_effective_rate(self) -> float:
+        """The ``r`` the vendor's Black-Scholes will receive."""
+        if self.vendor_observed_rate_unit == "PERCENT_ANNUAL_RATE":
+            return self.vendor_request_rate_value / 100.0
+        return self.vendor_request_rate_value
+
+    @property
+    def documentation_live_conflict(self) -> bool:
+        return (
+            self.vendor_observed_rate_unit != self.documented_rate_unit
+            and "UNKNOWN"
+            not in (
+                self.vendor_observed_rate_unit,
+                self.documented_rate_unit,
+            )
+        )
+
+    def semantic_payload(self) -> dict[str, Any]:
+        """Everything the fingerprint covers. Derived values included.
+
+        The derived numbers are *in* the digest even though they follow from the
+        others, because they are what a later reader consumes. A fingerprint
+        that covered only the inputs would let somebody edit the output.
+        """
+        return {
+            "schema_version": self.schema_version,
+            "economic_rate_percent": self.economic_rate_percent,
+            "economic_rate_decimal": self.economic_rate_decimal,
+            "local_model_rate": self.local_model_rate,
+            "vendor_request_rate_value": self.vendor_request_rate_value,
+            "vendor_observed_rate_unit": self.vendor_observed_rate_unit,
+            "documented_rate_unit": self.documented_rate_unit,
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        from src.domain.digests import digest_of
+
+        return digest_of(self.semantic_payload())
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> CaptureRateIntent:
+        """Rebuild from a stored ``rate_semantics`` block.
+
+        Every field is required. A missing one cannot be defaulted, because a
+        default would be this code deciding what a capture meant.
+        """
+        try:
+            return cls(
+                economic_rate_percent=float(payload["economic_rate_percent"]),
+                economic_rate_decimal=float(payload["economic_rate_decimal"]),
+                local_model_rate=float(payload["local_model_rate"]),
+                vendor_request_rate_value=float(payload["vendor_request_rate_value"]),
+                vendor_observed_rate_unit=str(payload["vendor_observed_rate_unit"]),
+                documented_rate_unit=str(payload["documented_rate_unit"]),
+                schema_version=str(
+                    payload.get("schema_version", PRICING_EVIDENCE_SCHEMA_VERSION)
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ThetaDataProvenanceError(
+                f"the recorded rate intent is not a complete CaptureRateIntent: {error}"
+            ) from error
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.semantic_payload(),
+            "predicted_vendor_effective_rate": self.predicted_vendor_effective_rate,
+            "documentation_live_conflict": self.documentation_live_conflict,
+            "rate_intent_fingerprint": self.fingerprint,
         }
 
 
@@ -580,18 +848,72 @@ class VendorRateSemantics:
             return self.configured_local_model_rate
         return self.economic_rate_decimal
 
+    def to_intent(self) -> CaptureRateIntent:
+        """The bindable form of the same statement.
+
+        Built from the wire value the configuration will really send, not the
+        value that *should* be sent, so a profile whose ``rate_value``
+        disagrees with its own declared unit is refused here rather than
+        quietly corrected into a coherent-looking intent.
+        """
+        return CaptureRateIntent(
+            economic_rate_percent=self.economic_rate_percent,
+            economic_rate_decimal=self.economic_rate_decimal,
+            local_model_rate=self.local_model_rate,
+            vendor_request_rate_value=self.wire_value,
+            vendor_observed_rate_unit=self.vendor_observed_rate_unit,
+            documented_rate_unit=self.documented_rate_unit,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
-            "economic_rate_percent": self.economic_rate_percent,
-            "economic_rate_decimal": self.economic_rate_decimal,
-            "local_model_rate": self.local_model_rate,
-            "vendor_request_rate_value": self.vendor_request_rate_value,
+            **self.to_intent().semantic_payload(),
             "wire_value": self.wire_value,
-            "vendor_observed_rate_unit": self.vendor_observed_rate_unit,
-            "documented_rate_unit": self.documented_rate_unit,
             "documentation_live_conflict": self.conflict,
             "predicted_vendor_effective_rate": (self.predicted_vendor_effective_rate),
             "predicted_effective_rate_matches_intended_rate": (
                 self.predicted_effective_rate_matches_intended
             ),
+            "rate_intent_fingerprint": self.to_intent().fingerprint,
         }
+
+
+def rate_semantics_for(pipeline: Any, config: Any) -> VendorRateSemantics:
+    """The one derivation of a session's rate semantics.
+
+    Called by the dry run, by the live run's intent record, and by
+    :func:`~src.adapters.thetadata.preflight_approval.approval_for`. One
+    function because the approval binds a fingerprint over exactly what the dry
+    run printed, and two derivations that could drift would put an operator
+    back to approving one thing and sending another.
+    """
+    from src.adapters.thetadata.vendor_documentation import DocumentedRule
+    from src.config.pipeline import OBSERVED_RATE_UNITS, RateUnit
+
+    unit = config.rate_units
+    raw = config.rate_value
+    factor = 0.01 if unit is RateUnit.PERCENT_ANNUAL_RATE else 1.0
+    economic_percent = 0.0 if raw is None else float(raw) * factor * 100.0
+
+    documented: Any = None
+    bundle = getattr(pipeline, "documentation_bundle", None)
+    if bundle is not None:
+        documented = bundle.value_for(DocumentedRule.RATE_UNITS)
+
+    spec = getattr(pipeline, "model_spec", None)
+    local = getattr(spec, "risk_free_rate", None)
+
+    return VendorRateSemantics(
+        economic_rate_percent=economic_percent,
+        # Measured, never read off the configuration being reported on. A
+        # config that could supply its own "observed" unit would be marking its
+        # own homework.
+        vendor_observed_rate_unit=OBSERVED_RATE_UNITS.value,
+        documented_rate_unit=(
+            documented.value if isinstance(documented, RateUnit) else "UNKNOWN"
+        ),
+        configured_wire_value=(None if raw is None else float(raw)),
+        configured_local_model_rate=(
+            float(local) if isinstance(local, (int, float)) else None
+        ),
+    )

@@ -22,6 +22,7 @@ a constant, which is exactly the defect this release fixes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 from datetime import time
@@ -187,7 +188,7 @@ def test_a_conflicting_vendor_can_still_price_the_intended_rate(tmp_path):
     assert economics.effective_rate_matches_intended is True
     assert economics.vendor_effective_rate == pytest.approx(0.042)
     assert economics.intended_economic_rate == pytest.approx(0.042)
-    assert economics.intended_rate_source == "DECLARED_BY_CAPTURE"
+    assert economics.intended_rate_source == "BOUND_TO_PREFLIGHT_APPROVAL"
     # The conflict is still recorded as a conflict ...
     assert (
         report.ledger.for_dimension(BehaviorDimension.RATE_UNITS).status.value
@@ -204,7 +205,7 @@ def test_a_capture_priced_at_the_wrong_magnitude_is_blocked(tmp_path):
     assert economics.documentation_live_conflict is True
     assert economics.effective_rate_matches_intended is False
     assert economics.magnitude_ratio == pytest.approx(100.0)
-    assert economics.intended_rate_source == "DERIVED_FROM_DOCUMENTED_UNIT"
+    assert economics.intended_rate_source == "LEGACY_CAPTURE_DOCUMENTATION_DERIVED"
     assert any("factor of 100" in blocker for blocker in report.gex_blockers)
     assert report.trusted_for_gex is False
 
@@ -230,7 +231,9 @@ def test_certification_takes_no_rate_from_its_caller(tmp_path):
     import inspect
 
     parameters = set(inspect.signature(certify_capture).parameters)
-    assert parameters == {"root", "archive_sha256"}
+    assert parameters == {"root", "archive_path", "archive_sha256"}
+    # Nothing resembling a rate, a unit or an economic intent.
+    assert not any("rate" in name or "intent" in name for name in parameters)
 
 
 def test_editing_the_recorded_rate_breaks_the_binding(tmp_path):
@@ -343,10 +346,49 @@ def test_an_absent_archive_digest_stays_absent(tmp_path):
     assert report.as_dict()["capture"]["archive_sha256"] != report.manifest_hash
 
 
-def test_a_supplied_archive_digest_is_carried_verbatim(tmp_path):
+def test_a_supplied_archive_digest_is_never_treated_as_identity(tmp_path):
+    """Sixty-four hex characters from a caller are not evidence.
+
+    v2.1.23 reported ``archive_sha256="d"*64`` as the capture's archive
+    identity without opening a file, so a reader checking a download against it
+    would have been checking it against an assertion.
+    """
     root = write_capture(tmp_path / "cap", SyntheticVendor())
     report = certify_capture(root, archive_sha256="d" * 64)
-    assert report.archive_sha256 == "d" * 64
+    assert report.archive.provenance == "UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM"
+    assert report.archive.known is False
+    # The claim is visible, and it is not the identity.
+    assert report.archive.sha256 == "d" * 64
+    assert report.archive_sha256 == ""
+    assert report.as_dict()["capture"]["archive_identity_known"] is False
+
+
+def test_an_archive_is_hashed_from_its_own_bytes(tmp_path):
+    """Supply the file and certification computes the digest itself."""
+    import zipfile
+
+    root = write_capture(tmp_path / "cap", SyntheticVendor())
+    archive = tmp_path / "capture.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.write(root / "manifest.json", "capture/manifest.json")
+
+    report = certify_capture(root, archive_path=archive)
+    assert report.archive.provenance == "VERIFIED_FROM_BYTES"
+    assert report.archive.known is True
+    assert report.archive.contains_capture_manifest is True
+    assert report.archive_sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def test_an_archive_that_disagrees_with_the_caller_is_refused(tmp_path):
+    import zipfile
+
+    root = write_capture(tmp_path / "cap", SyntheticVendor())
+    archive = tmp_path / "capture.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.write(root / "manifest.json", "capture/manifest.json")
+
+    with pytest.raises(CaptureCertificationError, match="hashes to"):
+        certify_capture(root, archive_path=archive, archive_sha256="e" * 64)
 
 
 def test_an_archive_digest_equal_to_the_manifest_is_refused():
@@ -472,6 +514,7 @@ def test_the_command_reports_a_conflict_with_its_own_exit_code(tmp_path, capsys)
     written = json.loads(out.read_text(encoding="utf-8"))
     assert "RATE_UNITS" in written["documentation_live_conflicts"]
     assert written["capture"]["archive_sha256"] == "e" * 64
+    assert written["capture"]["archive_identity_known"] is False
     printed = capsys.readouterr().out
     assert "trusted for gex False" in printed
     assert "blocked by" in printed
@@ -480,19 +523,20 @@ def test_the_command_reports_a_conflict_with_its_own_exit_code(tmp_path, capsys)
 def test_a_cleared_conflict_leaves_the_conflict_list(tmp_path, capsys):
     """Exit 3 is earned per dimension, not fixed.
 
-    A percent-reading vendor agrees with the documentation about the rate, so
-    ``RATE_UNITS`` leaves the list. The IV basis stays on it, because the
-    pinned description still says a trade price and every reconstruction says
-    the midpoint -- so this capture is still certified-and-conflicting, for a
-    reason it actually has.
+    A percent-reading vendor agrees with its own recorded documentation about
+    the rate, so ``RATE_UNITS`` leaves the list -- and since v2.1.24 nothing
+    else is on it. The IV basis used to sit there against a ``TRADE_PRICE``
+    constant living in the certification code; no capture records an
+    ``IV_PRICE_BASIS`` extraction, so that comparison was a repository
+    statement dressed as capture-time documentation. The live finding stands
+    on its own as ``LIVE_ONLY``.
     """
     root = write_capture(
         tmp_path / "cap", SyntheticVendor(rate_unit="PERCENT_ANNUAL_RATE")
     )
-    assert main([str(root)]) == EXIT_CONFLICT
+    assert main([str(root)]) == EXIT_OK
     conflicts = json.loads(capsys.readouterr().out)["documentation_live_conflicts"]
-    assert "RATE_UNITS" not in conflicts
-    assert conflicts == ["IV_PRICE_BASIS"]
+    assert conflicts == []
 
 
 def test_exit_zero_is_reachable_when_nothing_conflicts(tmp_path, monkeypatch, capsys):

@@ -56,11 +56,29 @@ OPTION_CONTRACT_LIST = "/v3/option/list/contracts/quote"
 #: identical on both sides of the binding, which is what the binding checks.
 SPEC_FINGERPRINT = "a" * 64
 
-#: Stand-ins for the documentation bundle a real capture records. Arbitrary
-#: values, consistent between the extraction and the bundle that carries it --
-#: which is the relationship certification checks.
-DOCUMENT_SHA256 = "1" * 64
-BUNDLE_FINGERPRINT = "2" * 64
+#: **A real document, written per capture.**
+#:
+#: Until v2.1.25 these were ``"1" * 64`` and ``"2" * 64`` -- placeholders,
+#: internally consistent, referring to nothing. That was enough while
+#: certification only checked that an extraction's digest matched its bundle's,
+#: and it stopped being enough the moment certification started re-deriving the
+#: readings from the document's own bytes. A synthetic vendor that documents its
+#: rate as a decimal now has to bring a document that says so.
+#:
+#: Which is the better test anyway: the tampering regressions can edit a
+#: recorded reading away from a real document and watch the re-derivation catch
+#: it, and that is not expressible against a placeholder.
+DOCUMENT_URL = "https://synthetic.invalid/openapi.yaml"
+DOCUMENT_RETRIEVED_AT = "2026-08-09T12:00:00+00:00"
+
+_RATE_SENTENCE = {
+    "PERCENT_ANNUAL_RATE": "The interest rate, as a percent.",
+    "DECIMAL_ANNUAL_RATE": "The interest rate, as a decimal.",
+}
+_RATE_FRAGMENT = {
+    "PERCENT_ANNUAL_RATE": "The interest rate, as a percent",
+    "DECIMAL_ANNUAL_RATE": "The interest rate, as a decimal",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,12 +278,113 @@ def _parameters(vendor: SyntheticVendor, endpoint: str) -> dict[str, Any]:
     return params
 
 
+def _document_body(vendor: SyntheticVendor) -> bytes:
+    """A minimal OpenAPI document this vendor's readings really come out of.
+
+    Only the three paths the production extraction specs walk, because a
+    document is evidence for exactly the statements somebody extracted from it.
+    """
+    return (
+        "openapi: 3.1.0\n"
+        "info:\n"
+        "  title: Synthetic vendor API\n"
+        "  version: '1'\n"
+        "paths:\n"
+        "  /option/snapshot/open_interest:\n"
+        "    get:\n"
+        "      description: >-\n"
+        "        Returns the open interest at the of the previous trading day.\n"
+        "components:\n"
+        "  parameters:\n"
+        "    rate_value:\n"
+        f"      description: {_RATE_SENTENCE[vendor.documented_rate_unit]}\n"
+        "    greeks_version:\n"
+        "      description: >-\n"
+        "        Time to expiry is floored down to a minimum of 1 hour.\n"
+    ).encode()
+
+
+def _documentation(root: pathlib.Path, vendor: SyntheticVendor) -> dict[str, Any]:
+    """Store the document content-addressed and derive a genuine bundle.
+
+    Written *inside the capture*, which is where certification looks first. A
+    real capture resolves its document out of the repository checkout instead;
+    both are content-addressed and rehashed, so neither location confers
+    authority -- the digest does.
+    """
+    from src.adapters.thetadata.openapi_evidence import (
+        ExtractionSpec,
+        PinnedDocument,
+        load_vendor_documentation_bundle,
+    )
+    from src.adapters.thetadata.vendor_documentation import (
+        DocumentedRule,
+        store_document,
+    )
+
+    body = _document_body(vendor)
+    holder = root / "vendor_documentation"
+    digest, location = store_document(body, root=holder, suffix=".yaml")
+    bundle = load_vendor_documentation_bundle(
+        root=holder,
+        document=PinnedDocument(
+            source_url=DOCUMENT_URL,
+            retrieved_at=datetime.fromisoformat(DOCUMENT_RETRIEVED_AT),
+            http_status=200,
+            content_type="application/yaml",
+            byte_length=len(body),
+            document_sha256=digest,
+            content_location=location,
+            document_schema_version="3.1.0",
+        ),
+        specs=(
+            ExtractionSpec(
+                rule=DocumentedRule.OPEN_INTEREST_SETTLEMENT,
+                yaml_path=(
+                    "paths",
+                    "/option/snapshot/open_interest",
+                    "get",
+                    "description",
+                ),
+                expected_source_fragment=(
+                    "the open interest at the of the previous trading day"
+                ),
+                normalizer="settlement_session/1",
+            ),
+            ExtractionSpec(
+                rule=DocumentedRule.RATE_UNITS,
+                yaml_path=("components", "parameters", "rate_value", "description"),
+                expected_source_fragment=_RATE_FRAGMENT[vendor.documented_rate_unit],
+                normalizer="rate_units/1",
+            ),
+            ExtractionSpec(
+                rule=DocumentedRule.MINIMUM_TIME_FLOOR,
+                yaml_path=("components", "parameters", "greeks_version", "description"),
+                expected_source_fragment="down to a minimum of 1 hour",
+                normalizer="minimum_time_floor_minutes/1",
+            ),
+        ),
+    )
+    return {
+        "source_url": DOCUMENT_URL,
+        "retrieved_at": DOCUMENT_RETRIEVED_AT,
+        "http_status": 200,
+        "content_type": "application/yaml",
+        "byte_length": len(body),
+        "document_sha256": digest,
+        "document_schema_version": "3.1.0",
+        "bundle_fingerprint": bundle.bundle_hash,
+        "extractions": [e.as_dict() for e in bundle.extractions],
+    }
+
+
 def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
     """Write a capture directory that passes every verification in load_capture."""
     (root / "raw").mkdir(parents=True, exist_ok=True)
     bodies = _bodies(vendor)
     session_id = "capture-synthetic"
     stamp = vendor.valuation.astimezone(ZoneInfo("UTC"))
+    documentation = _documentation(root, vendor)
 
     records: list[ManifestRecord] = []
     planned: list[dict[str, Any]] = []
@@ -294,12 +413,13 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
                 planned_request_hash=stamped,
                 effective_valuation_timestamp=stamp,
                 # The approval every record is taken under. Carrying it is what
-                # ties the rate intent inside that approval to these bytes.
-                preflight_approval_hash=(
-                    _approval(vendor).approval_hash
-                    if vendor.declared_economic_rate is not None
-                    else ""
-                ),
+                # ties the rate intent *and* the documentation bundle inside
+                # that approval to these bytes. Always present from v2.1.25: a
+                # legacy capture had no bound rate intent, but the real one did
+                # carry an approval, and its documentation hangs off that.
+                preflight_approval_hash=_approval(
+                    vendor, documentation["bundle_fingerprint"]
+                ).approval_hash,
             )
         )
         planned.append(
@@ -327,27 +447,18 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
         "schema_version": "raw-capture-intent/2.1.23",
         "session_id": session_id,
         "request_plan": {"requests": planned, "request_count": len(planned)},
-        # The documentary readings a capture carries with it. Certification
-        # derives the documented unit from *these*, not from a constant in the
-        # certification code, so a synthetic capture has to bring its own.
-        "vendor_documentation": {
-            "document_sha256": DOCUMENT_SHA256,
-            "bundle_fingerprint": BUNDLE_FINGERPRINT,
-            "extractions": [
-                {
-                    "rule": "RATE_UNITS",
-                    "normalized_value": vendor.documented_rate_unit,
-                    "document_sha256": DOCUMENT_SHA256,
-                    "expected_source_fragment": "The interest rate, as a percent",
-                    "normalizer": "rate_units/1",
-                }
-            ],
-        },
+        # The documentary readings a capture carries with it, and the document
+        # they were read out of. Certification re-derives them from those bytes
+        # rather than believing this block, so a synthetic capture has to bring
+        # a document its readings genuinely follow from.
+        "vendor_documentation": documentation,
+        "preflight_approval": _approval(
+            vendor, documentation["bundle_fingerprint"]
+        ).as_dict(),
     }
     if vendor.declared_economic_rate is not None:
         intent["schema_version"] = "raw-capture-intent/2.1.24"
         intent["rate_semantics"] = _rate_intent(vendor).as_dict()
-        intent["preflight_approval"] = _approval(vendor).as_dict()
     (root / "run-intent.json").write_text(json.dumps(intent), encoding="utf-8")
     return root
 
@@ -367,8 +478,13 @@ def _rate_intent(vendor: SyntheticVendor) -> Any:
     )
 
 
-def _approval(vendor: SyntheticVendor) -> Any:
-    """An approval that actually binds the intent, as a real preflight would."""
+def _approval(vendor: SyntheticVendor, bundle_fingerprint: str) -> Any:
+    """An approval that binds the intent and the document, as a preflight would.
+
+    A vendor with no declared economic rate reproduces a legacy capture: the
+    approval binds the documentation bundle but carries no rate-intent
+    fingerprint, which is exactly the shape of the real first capture's.
+    """
     from datetime import date as _date
 
     from src.adapters.thetadata.preflight_approval import CapturePreflightApproval
@@ -378,11 +494,15 @@ def _approval(vendor: SyntheticVendor) -> Any:
         request_plan_hash="b" * 64,
         capture_plan_fingerprint="c" * 64,
         pipeline_fingerprint="d" * 64,
-        documentation_bundle_fingerprint=BUNDLE_FINGERPRINT,
+        documentation_bundle_fingerprint=bundle_fingerprint,
         effective_transport_fingerprint="e" * 64,
         instrument_mapping_fingerprint="f" * 64,
         subscription_tier="standard",
-        rate_intent_fingerprint=_rate_intent(vendor).fingerprint,
+        rate_intent_fingerprint=(
+            _rate_intent(vendor).fingerprint
+            if vendor.declared_economic_rate is not None
+            else ""
+        ),
     )
 
 

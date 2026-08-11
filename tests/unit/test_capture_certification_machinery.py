@@ -364,7 +364,12 @@ def test_a_supplied_archive_digest_is_never_treated_as_identity(tmp_path):
 
 
 def test_an_archive_is_hashed_from_its_own_bytes(tmp_path):
-    """Supply the file and certification computes the digest itself."""
+    """Supply the file and certification computes the digest itself.
+
+    Hashing is separate from identity from v2.1.25: this manifest-only ZIP is
+    hashed, and it does carry this capture's manifest, and it is still not the
+    capture's archive -- nothing in it could be re-verified by a recipient.
+    """
     import zipfile
 
     root = write_capture(tmp_path / "cap", SyntheticVendor())
@@ -374,9 +379,13 @@ def test_an_archive_is_hashed_from_its_own_bytes(tmp_path):
 
     report = certify_capture(root, archive_path=archive)
     assert report.archive.provenance == "VERIFIED_FROM_BYTES"
-    assert report.archive.known is True
+    assert report.archive.bytes_hashed is True
     assert report.archive.contains_capture_manifest is True
-    assert report.archive_sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert report.archive.matches_capture is False
+    assert report.archive.known is False
+    assert report.archive.sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+    # ... and something that incomplete never reaches the observation identity.
+    assert report.archive_sha256 == ""
 
 
 def test_an_archive_that_disagrees_with_the_caller_is_refused(tmp_path):

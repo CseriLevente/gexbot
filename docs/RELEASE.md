@@ -215,6 +215,11 @@ thing that has gone wrong somewhere, and the session costs money.
 - [ ] sufficient disk space for **five responses plus retry bodies** — the
       dry run prints the arithmetic under `disk`
 
+Afterwards, archive the capture directory whole — manifest, run intent and
+every raw payload — and certify with `--archive-path`. An archive missing any
+of them is hashed and reported, and is not recorded as the capture's archive
+identity, because a recipient holding it could re-verify nothing.
+
 **What this session actually captures.** Five requests, not a full chain:
 
 | # | Endpoint | Symbol |
@@ -268,15 +273,28 @@ the captured bytes.
 
 ```bash
 python -m src.tools.certify_thetadata_capture /absolute/path/to/capture \
-    --archive-sha256 <digest of the archive you distributed> \
+    --archive-path /absolute/path/to/capture-archive.zip \
     --json certification.json
 ```
 
+**Pass the archive, not a digest of it.** `--archive-path` hashes the file
+here, opens it, and checks it holds this capture's manifest, its run intent and
+every raw payload the manifest names, rehashing each one. Only then does the
+digest become the capture's archive identity and reach the observations.
+
+`--archive-sha256` still exists and is still only a claim: sixty-four hex
+characters from a caller are recorded as
+`UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM` and never as identity, because
+nothing opened a file. Use it when you are recording what somebody else told
+you and want that fact on the report. Supplied *alongside* `--archive-path` it
+becomes an assertion the bytes are checked against, and a mismatch refuses.
+
 Offline. It re-verifies every payload against the manifest before computing
-anything, then derives the rate semantics, the day count, the expiration clock,
-the implied-volatility basis, the underlying the Greeks were computed against,
-universe coverage and open-interest coverage — each as a table of scored
-hypotheses rather than a verdict.
+anything, re-derives the capture's documentary readings from the pinned
+document's own bytes, then derives the rate semantics, the day count, the
+expiration clock, the implied-volatility basis, the underlying the Greeks were
+computed against, universe coverage and open-interest coverage — each as a
+table of scored hypotheses rather than a verdict.
 
 | exit | meaning |
 |---|---|

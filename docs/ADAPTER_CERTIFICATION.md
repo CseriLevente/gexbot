@@ -1439,11 +1439,28 @@ rather than typed in. Re-derive the lot with:
 
 ```bash
 python -m src.tools.certify_thetadata_capture <capture-root> \
-    --archive-sha256 5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638
+    --archive-path <capture-archive.zip>
 ```
 
 It makes no network request, and two runs over an untouched capture produce the
 same `report_hash`.
+
+**The archive digest in the fixture is verified from v2.1.25.** Until then it
+was `UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM` — sixty-four hex characters
+somebody had recorded, with nothing having opened a file. The archive was
+present after all, and passing `--archive-path` produced:
+
+    archive_sha256                    5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638
+    archive_digest_provenance         VERIFIED_FROM_BYTES
+    archive_contains_capture_manifest true
+    archive_matches_capture           true
+    archive_payloads_verified         5
+
+It hashes to the digest that had been claimed, and it holds this capture's
+manifest, its run intent and all five raw payloads, each rehashing to what the
+manifest records. Both halves are required: a ZIP that hashes correctly and
+holds somebody else's data is not this capture's archive, and until v2.1.25
+hashing alone was enough to be recorded as identity.
 
 ## Rate units
 
@@ -1597,14 +1614,27 @@ snapshots. Not generalised across dates, symbols, tiers or endpoint families.
     OI rows            14,130   (97.073%)
     explicit zero       3,692
     missing               426
+    unexpected              0
 
-Three states, and the middle one is not the last one:
+Four states, and neither middle one is the last one:
 
 | state | meaning |
 |---|---|
 | `OI_PRESENT` | the vendor answered with a positive figure |
 | `OI_EXPLICIT_ZERO` | the vendor answered zero. A real observation |
 | `OI_MISSING` | no row. Could be zero, could be ten thousand |
+| `OI_UNEXPECTED` | a row for a contract the listing never named |
+
+`OI_UNEXPECTED` is counted from v2.1.25. Until then coverage measured
+`expected − answered` and stopped, so an extra identity went into the numerator:
+567 answers against a 566-contract universe produced a `coverage_ratio` of
+1.0018 and `permits_trusted_aggregate = true`, reporting better-than-complete
+coverage of a universe it did not cover. An unexpected identity is not a bonus —
+it means the listing and the open-interest response disagree about what the
+universe *is*. The ratio now counts the intersection, so it is in `[0, 1]` by
+definition rather than by clipping an invalid number afterwards.
+
+This capture has none. The check exists because nothing was looking.
 
 **A missing row is not a proven zero.** Filling one with zero converts the third
 state into the second and deletes the contract from the aggregate without

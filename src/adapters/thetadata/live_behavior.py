@@ -51,7 +51,9 @@ from typing import Any, ClassVar
 from src.adapters.errors import ThetaDataProvenanceError
 
 __all__ = [
+    "CAPTURE_RATE_INTENT_SCHEMA_VERSION",
     "PRICING_EVIDENCE_SCHEMA_VERSION",
+    "SUPPORTED_CAPTURE_RATE_INTENT_SCHEMAS",
     "BehaviorDimension",
     "CaptureIdentity",
     "CaptureRateIntent",
@@ -66,8 +68,34 @@ __all__ = [
 
 #: Bumped when what a pricing-evidence record must carry changes. v2.1.22 adds
 #: the observed-implementation side, so a v2.1.21 reader that saw only the
-#: documented value would report agreement where there is a conflict.
-PRICING_EVIDENCE_SCHEMA_VERSION = "pricing-evidence/2.1.24"
+#: documented value would report agreement where there is a conflict. v2.1.25
+#: changes what an observation may claim: an unresolved inference no longer
+#: yields a documented/observed verdict, and ``DIVIDEND_CONVENTION`` stops being
+#: reported as documentation-resolved on evidence no capture carries.
+PRICING_EVIDENCE_SCHEMA_VERSION = "pricing-evidence/2.1.25"
+
+#: **Deliberately not ``PRICING_EVIDENCE_SCHEMA_VERSION``.**
+#:
+#: One constant was versioning two things with different lifetimes. The ledger
+#: schema describes what an *observation* may claim, and v2.1.25 changes that.
+#: This one is inside :attr:`CaptureRateIntent.fingerprint`, which is a binding
+#: carried across the dry-run -> approve -> capture boundary: an operator reads
+#: the fingerprint, approves it, and the capture is refused later if it moved.
+#:
+#: The intent's field set and their meanings are unchanged in v2.1.25 -- only
+#: the strictness of the reader is, and a reader getting stricter is not the
+#: record meaning something new. Bumping this would have moved every declared
+#: intent's fingerprint, including the one already accepted for capture #2,
+#: to say that a *different* record had changed.
+CAPTURE_RATE_INTENT_SCHEMA_VERSION = "pricing-evidence/2.1.24"
+
+#: The intent schemas this release can read. Explicit rather than open-ended:
+#: from v2.1.25 a recorded intent must *name* its schema and that name must be
+#: in here, because a bound semantic object whose version was defaulted is one
+#: whose meaning was assumed. See :meth:`CaptureRateIntent.from_payload`.
+SUPPORTED_CAPTURE_RATE_INTENT_SCHEMAS: tuple[str, ...] = (
+    CAPTURE_RATE_INTENT_SCHEMA_VERSION,
+)
 
 
 #: Rate units this repository can express. A closed set: a unit nobody named
@@ -137,6 +165,21 @@ class BehaviorDimension(str, Enum):
     #: pricing dimension is settled" while one of them was not in the ledger at
     #: all.
     UNDERLYING_TIMESTAMP = "UNDERLYING_TIMESTAMP"
+    #: The economic rate the capture was approved to buy, as a decimal.
+    #:
+    #: Distinct from ``RATE_UNITS``, which is about how the vendor *reads* the
+    #: number. This is the number itself, and a capture can settle it only when
+    #: an approval bound the intent and the live reading resolved -- both, since
+    #: an intent nobody checked against the vendor's behaviour is a declaration.
+    RISK_FREE_RATE = "RISK_FREE_RATE"
+    #: The dividend amount the request actually carried.
+    #:
+    #: Separate from ``DIVIDEND_CONVENTION``. The request proves the *value*
+    #: exactly -- it is in the verified request binding -- and proves nothing
+    #: about how a non-zero one would be interpreted.
+    DIVIDEND_VALUE = "DIVIDEND_VALUE"
+    #: The floor the vendor applies to time-to-expiry, from its documentation.
+    MINIMUM_TIME_FLOOR = "MINIMUM_TIME_FLOOR"
     #: Whether the dedicated contract listing matches the snapshot universe.
     CONTRACT_LIST_UNIVERSE = "CONTRACT_LIST_UNIVERSE"
 
@@ -165,6 +208,9 @@ PRICING_DIMENSION_FOR: dict[BehaviorDimension, str] = {
     BehaviorDimension.UNDERLYING_SOURCE: "UNDERLYING_SOURCE",
     BehaviorDimension.UNDERLYING_TIMESTAMP: "UNDERLYING_TIMESTAMP",
     BehaviorDimension.DIVIDEND_CONVENTION: "DIVIDEND_CONVENTION",
+    BehaviorDimension.RISK_FREE_RATE: "RISK_FREE_RATE",
+    BehaviorDimension.DIVIDEND_VALUE: "DIVIDEND_VALUE",
+    BehaviorDimension.MINIMUM_TIME_FLOOR: "MINIMUM_TIME_FLOOR",
 }
 
 
@@ -585,13 +631,21 @@ class CaptureRateIntent:
     vendor_request_rate_value: float
     vendor_observed_rate_unit: str
     documented_rate_unit: str
-    schema_version: str = PRICING_EVIDENCE_SCHEMA_VERSION
+    schema_version: str = CAPTURE_RATE_INTENT_SCHEMA_VERSION
 
     #: Float round-trips through JSON and through a percent/hundred conversion.
     #: Far tighter than the factor of a hundred this exists to catch.
     TOLERANCE: ClassVar[float] = 1e-12
 
     def __post_init__(self) -> None:
+        if str(self.schema_version) not in SUPPORTED_CAPTURE_RATE_INTENT_SCHEMAS:
+            raise ThetaDataProvenanceError(
+                f"CaptureRateIntent names schema {self.schema_version!r}, which "
+                f"this release cannot read. Known: "
+                f"{list(SUPPORTED_CAPTURE_RATE_INTENT_SCHEMAS)}. An intent read "
+                "under rules it was not written under is a record being "
+                "interpreted by a stranger."
+            )
         for name in (
             "economic_rate_percent",
             "economic_rate_decimal",
@@ -691,9 +745,24 @@ class CaptureRateIntent:
     def from_payload(cls, payload: dict[str, Any]) -> CaptureRateIntent:
         """Rebuild from a stored ``rate_semantics`` block.
 
-        Every field is required. A missing one cannot be defaulted, because a
-        default would be this code deciding what a capture meant.
+        Every field is required, **including the schema version**. Until v2.1.25
+        a missing ``schema_version`` was defaulted to the current constant, so
+        deleting that one line from a capture left the fingerprint reconstructing
+        to exactly the same value and certification never noticed the field had
+        gone. For a bound semantic object a missing schema is not the current
+        schema -- it is a record that never said how to read it, and supplying
+        the answer is this code deciding what the capture meant.
+
+        Which is the whole reason the intent is bound at all. The defaulting
+        undid it for one field.
         """
+        if "schema_version" not in payload:
+            raise ThetaDataProvenanceError(
+                "the recorded rate intent names no schema_version. A bound "
+                "semantic object must say which rules it was written under; "
+                "defaulting it to the current release would let a record from "
+                "any era be read as though it were this one."
+            )
         try:
             return cls(
                 economic_rate_percent=float(payload["economic_rate_percent"]),
@@ -702,9 +771,7 @@ class CaptureRateIntent:
                 vendor_request_rate_value=float(payload["vendor_request_rate_value"]),
                 vendor_observed_rate_unit=str(payload["vendor_observed_rate_unit"]),
                 documented_rate_unit=str(payload["documented_rate_unit"]),
-                schema_version=str(
-                    payload.get("schema_version", PRICING_EVIDENCE_SCHEMA_VERSION)
-                ),
+                schema_version=str(payload["schema_version"]),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ThetaDataProvenanceError(

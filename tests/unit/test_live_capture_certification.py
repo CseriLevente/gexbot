@@ -507,10 +507,112 @@ def test_the_first_capture_is_evidence_and_not_a_gex_input(capture):
 def test_every_dimension_the_capture_touched_is_recorded(capture):
     recorded = {o["dimension"] for o in capture["vendor_behavior"]["observations"]}
     assert recorded == {d.value for d in BehaviorDimension}
-    assert not capture["behavior_dimensions_unresolved"]
-    # And the behaviour vocabulary is *not* the pricing vocabulary, so an empty
-    # unresolved list here says nothing about analytical readiness.
+    # And the behaviour vocabulary is *not* the pricing vocabulary, so the
+    # unresolved list here says nothing about analytical readiness either way.
     assert capture["pricing_dimensions_still_unresolved"]
+
+
+def test_the_first_capture_leaves_the_dividend_convention_open(capture):
+    """v2.1.24 called this documentation-resolved. Nothing established it.
+
+    The claim came from an article that is not pinned, not hashed and not
+    carried by the capture, and the capture requested ``annual_dividend=0.0``,
+    under which every convention produces the same zero. Two independent
+    reasons it cannot be settled here, and it was reported as settled.
+    """
+    assert "DIVIDEND_CONVENTION" in capture["behavior_dimensions_unresolved"]
+    assert "DIVIDEND_CONVENTION" in capture["pricing_dimensions_still_unresolved"]
+    observation = next(
+        o
+        for o in capture["vendor_behavior"]["observations"]
+        if o["dimension"] == "DIVIDEND_CONVENTION"
+    )
+    assert observation["status"] == "UNRESOLVED"
+    assert observation["documented_value"] == ""
+    claim = next(
+        c
+        for c in capture["unbound_documentary_claims"]
+        if c["dimension"] == "DIVIDEND_CONVENTION"
+    )
+    assert claim["origin"] == "REPOSITORY_CONSTANT_NOT_CAPTURE_BOUND"
+
+
+def test_the_first_capture_proves_the_dividend_value_it_requested(capture):
+    """The amount is request-bound evidence even though its meaning is not."""
+    observation = next(
+        o
+        for o in capture["vendor_behavior"]["observations"]
+        if o["dimension"] == "DIVIDEND_VALUE"
+    )
+    assert observation["observed_value"] == "0"
+    assert observation["status"] == "LIVE_ONLY"
+    assert capture["capture_request"]["greeks_annual_dividend"] == 0.0
+    assert "DIVIDEND_VALUE" in capture["pricing_dimensions_supported_by_evidence"]
+
+
+def test_the_first_capture_cannot_establish_its_own_economic_rate(capture):
+    """A legacy capture declared no intent, so RISK_FREE_RATE stays open.
+
+    The wire value is known and the vendor's reading of it is known. What is
+    missing is an approval-bound statement of what the capture *meant*, and the
+    documentary fallback that recovers 0.042 is labelled as the inference it is
+    rather than promoted to established evidence.
+    """
+    assert "RISK_FREE_RATE" in capture["behavior_dimensions_unresolved"]
+    assert "RISK_FREE_RATE" in capture["pricing_dimensions_still_unresolved"]
+    assert capture["rate_intent_binding"]["bound"] is False
+    assert (
+        capture["rate_economics"]["intended_rate_source"]
+        == "LEGACY_CAPTURE_DOCUMENTATION_DERIVED"
+    )
+
+
+def test_the_first_capture_archive_is_verified_not_claimed(capture):
+    """The digest was a claim until v2.1.25. The archive was there all along.
+
+    Both halves matter. Hashing proves the digest belongs to those bytes;
+    opening the archive proves those bytes are *this capture*. v2.1.24 recorded
+    identity on the first alone, which is how the v2.1.24 source release ZIP
+    came to be stamped onto the first capture's observations.
+    """
+    archive = capture["capture"]
+    assert archive["archive_sha256"] == FIRST_CAPTURE_ARCHIVE
+    assert archive["archive_digest_provenance"] == "VERIFIED_FROM_BYTES"
+    assert archive["archive_bytes_hashed"] is True
+    assert archive["archive_contains_capture_manifest"] is True
+    assert archive["archive_matches_capture"] is True
+    assert archive["archive_identity_known"] is True
+    assert archive["archive_payloads_verified"] == 5
+    assert archive["archive_mismatch_reasons"] == []
+    # And it is not the manifest hash wearing the archive's name.
+    assert archive["archive_sha256"] != archive["manifest_hash"]
+
+
+def test_the_first_capture_documentation_is_rederived_not_recorded(capture):
+    """The documented reading came out of the pinned document, on that run."""
+    evidence = capture["documentary_evidence"]
+    assert evidence["documentary_authority"] == "REDERIVED_FROM_PINNED_DOCUMENT_BYTES"
+    assert evidence["rules_rederived"] == [
+        "MINIMUM_TIME_FLOOR",
+        "OPEN_INTEREST_SETTLEMENT",
+        "RATE_UNITS",
+    ]
+    # The reading that decides the whole economic verdict, and where it is from.
+    assert capture["rate_economics"]["documented_rate_unit"] == "PERCENT_ANNUAL_RATE"
+    assert evidence["document_sha256"] == (
+        "1b65f93c879a5ca4477a0ff9177235138e0c81840e0c7dddfbd9e34164b40b50"
+    )
+
+
+def test_the_first_capture_open_interest_is_closed_in_both_directions(capture):
+    """Nothing answered that the listing did not name, and the ratio is bounded."""
+    coverage = capture["open_interest_coverage"]
+    assert coverage["unexpected_oi_count"] == 0
+    assert coverage["duplicate_oi_identity_count"] == 0
+    assert coverage["oi_missing"] == 426
+    assert coverage["coverage_state"] == "OI_MISSING"
+    assert 0.0 <= coverage["coverage_ratio"] <= 1.0
+    assert coverage["oi_covered"] == coverage["universe_count"] - 426
 
 
 def test_a_ledger_refuses_two_answers_for_one_dimension():

@@ -84,7 +84,7 @@ __all__ = [
     "load_capture",
 ]
 
-CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.24"
+CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.25"
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -302,11 +302,10 @@ class LoadedCapture:
     #: manifest record. ``None`` for captures taken before v2.1.24, which
     #: recorded no bound intent.
     bound_rate_intent: Any | None = None
-    #: The documentary readings this capture was taken under, as it recorded
-    #: them. Not the readings the repository holds today.
-    documentation_extractions: tuple[dict[str, Any], ...] = ()
-    documentation_document_sha256: str = ""
-    documentation_bundle_fingerprint: str = ""
+    #: The documentary readings this capture was taken under, **re-derived from
+    #: the pinned document's own bytes** rather than read out of the run intent.
+    #: ``None`` for a capture that carries no documentary extractions.
+    documentation: VerifiedDocumentation | None = None
     #: The run-intent schema this capture was written under, which is what says
     #: whether a bound rate intent *should* have been present.
     intent_schema_version: str = ""
@@ -495,12 +494,7 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
             "them; without it neither can be established."
         )
     intent = json.loads(intent_path.read_bytes())
-    documentation = intent.get("vendor_documentation") or {}
-    extractions = tuple(
-        dict(entry)
-        for entry in documentation.get("extractions", [])
-        if isinstance(entry, dict)
-    )
+    approval = _verified_approval(intent, manifest)
 
     return LoadedCapture(
         root=root,
@@ -516,17 +510,20 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
         verified_records=verified,
         parser_version=str(manifest.get("parser_version", "")),
         request=_bind_request(root, manifest),
-        bound_rate_intent=_bind_rate_intent(intent, manifest),
-        documentation_extractions=extractions,
-        documentation_document_sha256=str(documentation.get("document_sha256", "")),
-        documentation_bundle_fingerprint=str(
-            documentation.get("bundle_fingerprint", "")
+        bound_rate_intent=_bind_rate_intent(intent, manifest, approval=approval),
+        documentation=_verified_documentation(
+            intent, approval=approval, capture_root=root
         ),
         intent_schema_version=str(intent.get("schema_version", "")),
     )
 
 
-def _bind_rate_intent(intent: dict[str, Any], manifest: dict[str, Any]) -> Any | None:
+def _bind_rate_intent(
+    intent: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    approval: dict[str, Any] | None,
+) -> Any | None:
     """Prove the capture's declared economic intent, or refuse it.
 
     Four links, and breaking any one refuses the capture:
@@ -534,11 +531,16 @@ def _bind_rate_intent(intent: dict[str, Any], manifest: dict[str, Any]) -> Any |
     1. the recorded ``rate_semantics`` rebuild into a coherent
        :class:`~src.adapters.thetadata.live_behavior.CaptureRateIntent` --
        so 4.2% beside 0.5 as a decimal is refused as incoherent rather than
-       fingerprinted as unusual;
+       fingerprinted as unusual, and since v2.1.25 a block that names no
+       schema version is refused rather than defaulted into this release's;
     2. its fingerprint matches the one inside the recorded approval;
     3. the approval's own contents hash to the ``approval_hash`` it carries;
     4. that hash is the one stamped on the manifest records, whose digest the
        caller has already recomputed from its own descriptors.
+
+    Links 3 and 4 are :func:`_verified_approval`, done by the caller because the
+    documentation bundle hangs off the same approval and both must be checked
+    against the *same* proved artifact.
 
     v2.1.23 had none of these. Editing ``economic_rate_decimal`` from 0.042 to
     4.2 in the run intent -- touching no response, no request plan and no
@@ -562,8 +564,7 @@ def _bind_rate_intent(intent: dict[str, Any], manifest: dict[str, Any]) -> Any |
             f"consistent: {error}"
         ) from error
 
-    approval = intent.get("preflight_approval") or {}
-    bound = str(approval.get("rate_intent_fingerprint", ""))
+    bound = str((approval or {}).get("rate_intent_fingerprint", ""))
     if not bound:
         raise CaptureCertificationError(
             "the capture records a rate intent but its preflight approval does "
@@ -578,35 +579,21 @@ def _bind_rate_intent(intent: dict[str, Any], manifest: dict[str, Any]) -> Any |
             f"{bound}. The capture's statement of what it meant to buy has "
             "changed since it was approved."
         )
-
-    stated_hash = str(approval.get("approval_hash", ""))
-    recomputed = _recomputed_approval_hash(approval)
-    if recomputed != stated_hash:
-        raise CaptureCertificationError(
-            f"the recorded approval carries hash {stated_hash} and its own "
-            f"contents hash to {recomputed}"
-        )
-    stamped = {
-        str(record.get("preflight_approval_hash", ""))
-        for record in manifest.get("records", [])
-    }
-    if stamped and stamped != {stated_hash}:
-        raise CaptureCertificationError(
-            f"the run intent's approval is {stated_hash} and the manifest "
-            f"records were stamped {sorted(stamped)}. The approval that bound "
-            "the rate intent is not the approval this capture was taken under."
-        )
     return rate_intent
 
 
 def _recomputed_approval_hash(approval: dict[str, Any]) -> str:
-    """Rehash a recorded approval from its own semantic fields."""
-    from src.adapters.thetadata.preflight_approval import (
-        CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION,
-    )
+    """Rehash a recorded approval from its own semantic fields.
+
+    **Under the field set its own declared schema covered**, which is not
+    necessarily the current one. ``rate_intent_fingerprint`` joined the digest in
+    v2.1.24; hashing a v2.1.20 approval with that key present -- as ``None``, or
+    as ``""`` -- produces a value the original run could not have computed, and
+    the first live capture would be refused for carrying a correct approval.
+    """
     from src.domain.digests import digest_of
 
-    covered = (
+    covered = [
         "schema_version",
         "market_session_date",
         "request_plan_hash",
@@ -616,11 +603,266 @@ def _recomputed_approval_hash(approval: dict[str, Any]) -> str:
         "effective_transport_fingerprint",
         "instrument_mapping_fingerprint",
         "subscription_tier",
-        "rate_intent_fingerprint",
+    ]
+    declared = str(approval.get("schema_version", ""))
+    if not declared:
+        raise CaptureCertificationError(
+            "the recorded preflight approval names no schema_version, so there "
+            "is no way to know which fields its hash was taken over. An "
+            "approval that cannot be recomputed approves nothing."
+        )
+    if _schema_release(declared) >= (2, 1, 24):
+        covered.append("rate_intent_fingerprint")
+    return digest_of({name: approval.get(name) for name in covered})
+
+
+def _verified_approval(
+    intent: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The capture's preflight approval, proved against the manifest stamps.
+
+    Extracted from ``_bind_rate_intent`` in v2.1.25 because the rate intent is
+    no longer the only thing that hangs off it: the documentation bundle
+    fingerprint does too, and both need the *same* approval to have been proved
+    manifest-bound before either is believed.
+
+    ``None`` when the capture recorded no approval at all.
+    """
+    approval = intent.get("preflight_approval") or {}
+    if not isinstance(approval, dict) or not approval:
+        return None
+    stated = str(approval.get("approval_hash", ""))
+    recomputed = _recomputed_approval_hash(approval)
+    if recomputed != stated:
+        raise CaptureCertificationError(
+            f"the recorded approval carries hash {stated} and its own "
+            f"contents hash to {recomputed}"
+        )
+    stamped = {
+        str(record.get("preflight_approval_hash", ""))
+        for record in manifest.get("records", [])
+    }
+    if stamped and stamped != {stated}:
+        raise CaptureCertificationError(
+            f"the run intent's approval is {stated} and the manifest records "
+            f"were stamped {sorted(stamped)}. The approval in the run intent is "
+            "not the approval this capture was taken under."
+        )
+    return approval
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedDocumentation:
+    """A capture's documentary evidence, re-derived from the bytes it names.
+
+    Not the dictionaries out of ``run-intent.json``. Those are what v2.1.24
+    believed, and believing them was the defect: the only thing it checked was
+    that each extraction's ``document_sha256`` matched the bundle's, so editing
+
+        extractions[RATE_UNITS].normalized_value:
+            PERCENT_ANNUAL_RATE -> DECIMAL_ANNUAL_RATE
+
+    in a text editor changed the first capture's recovered intent from 0.042 to
+    4.2 and made its documentation/live conflict disappear -- without touching a
+    payload, a manifest or a digest anywhere.
+
+    So the readings here came out of the pinned document itself, on this run,
+    through the same normalizers, and the bundle they form was required to
+    fingerprint to the value the manifest-bound approval carries. A reading that
+    survives that is one the capture is genuinely evidence of.
+    """
+
+    bundle: Any
+    bundle_fingerprint: str
+    document_sha256: str
+    content_location: str
+    #: Where the bytes were found. Recorded so a report says which checkout
+    #: answered, not merely that something did.
+    documentation_root: str
+    rules: tuple[str, ...]
+
+    def value_for(self, rule: str) -> str:
+        """The re-derived reading for a rule, as a string, or ``""``."""
+        from src.adapters.thetadata.vendor_documentation import DocumentedRule
+
+        try:
+            typed = DocumentedRule(rule)
+        except ValueError:
+            return ""
+        value = self.bundle.value_for(typed)
+        if value is None:
+            return ""
+        return str(getattr(value, "value", value))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "documentary_authority": "REDERIVED_FROM_PINNED_DOCUMENT_BYTES",
+            "document_sha256": self.document_sha256,
+            "content_location": self.content_location,
+            "documentation_root": self.documentation_root,
+            "bundle_fingerprint": self.bundle_fingerprint,
+            "rules_rederived": list(self.rules),
+        }
+
+
+def _locate_document(
+    digest: str, roots: tuple[pathlib.Path, ...]
+) -> tuple[pathlib.Path, str]:
+    """Find content-addressed bytes that actually hash to ``digest``.
+
+    The filename is a hint and nothing more -- every candidate is reread and
+    rehashed before it is accepted. Content addressing makes a swapped file
+    detectable; it is the rehash that detects it.
+    """
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for candidate in sorted(root.rglob(f"{digest}.*")):
+            if not candidate.is_file():
+                continue
+            if hashlib.sha256(candidate.read_bytes()).hexdigest() == digest:
+                return root, str(candidate.relative_to(root)).replace("\\", "/")
+    raise CaptureCertificationError(
+        f"no document hashing to {digest} was found under "
+        f"{[str(r) for r in roots]}. The capture names documentary evidence "
+        "this checkout does not hold, so the readings it recorded cannot be "
+        "re-derived and must not be used as documentary authority."
     )
-    payload = {name: approval.get(name) for name in covered}
-    payload.setdefault("schema_version", CAPTURE_PREFLIGHT_APPROVAL_SCHEMA_VERSION)
-    return digest_of(payload)
+
+
+def _verified_documentation(
+    intent: dict[str, Any],
+    *,
+    approval: dict[str, Any] | None,
+    capture_root: pathlib.Path,
+) -> VerifiedDocumentation | None:
+    """Rebuild the capture's documentation bundle from the document itself.
+
+    The chain, and every link is checked:
+
+    1. the approval is manifest-bound -- the caller proved that already;
+    2. the approval's ``documentation_bundle_fingerprint`` is what the run
+       intent's bundle claims to be;
+    3. the bytes named by ``document_sha256`` are found and rehashed;
+    4. the recorded extraction specifications are rerun against them;
+    5. the rebuilt bundle fingerprints to the approval-bound value;
+    6. every re-derived reading equals the one the capture recorded.
+
+    Step 5 catches a swapped document. Step 6 catches an edited reading whose
+    ``extraction_hash`` was recomputed to match -- the tampering that step 5
+    alone would sail past, because the document is untouched and therefore
+    re-derives to exactly the fingerprint the approval names.
+
+    ``None`` when the capture carries no documentary extractions at all.
+    """
+    from src.adapters.thetadata.openapi_evidence import (
+        ExtractionSpec,
+        OpenApiEvidenceExtraction,
+        PinnedDocument,
+        load_vendor_documentation_bundle,
+        repository_documentation_root,
+    )
+    from src.adapters.thetadata.vendor_documentation import (
+        DocumentedRule,
+        VendorDocumentationError,
+    )
+
+    recorded = intent.get("vendor_documentation") or {}
+    entries = [e for e in recorded.get("extractions", []) if isinstance(e, dict)]
+    if not entries:
+        return None
+
+    if approval is None:
+        raise CaptureCertificationError(
+            "the capture carries documentary extractions and no preflight "
+            "approval binds them. Documentation nothing was approved against "
+            "can be edited afterwards without disturbing a digest, which is "
+            "exactly how a historical capture acquires a different intent."
+        )
+    bound = str(approval.get("documentation_bundle_fingerprint", ""))
+    claimed = str(recorded.get("bundle_fingerprint", ""))
+    if not bound or bound != claimed:
+        raise CaptureCertificationError(
+            f"the capture's documentation bundle claims fingerprint {claimed!r} "
+            f"and the approval it was taken under binds {bound!r}. The readings "
+            "in this run intent are not the readings the capture was approved "
+            "under."
+        )
+
+    digest = str(recorded.get("document_sha256", ""))
+    roots = (capture_root / "vendor_documentation", repository_documentation_root())
+    holder, location = _locate_document(digest, roots)
+
+    try:
+        # Rebuilt as typed objects first, which recomputes each extraction_hash
+        # against its own contents: an edited value with a stale hash is refused
+        # here, before anything is re-derived.
+        rebuilt_records = tuple(
+            OpenApiEvidenceExtraction(
+                rule=DocumentedRule(str(entry["rule"])),
+                document_sha256=str(entry["document_sha256"]),
+                yaml_path=tuple(str(p) for p in entry["yaml_path"]),
+                expected_source_fragment=str(entry["expected_source_fragment"]),
+                normalized_value=entry["normalized_value"],
+                normalizer=str(entry.get("normalizer", "")),
+                extractor_version=str(entry["extractor_version"]),
+                schema_version=str(entry["schema_version"]),
+                extraction_hash=str(entry.get("extraction_hash", "")),
+            )
+            for entry in entries
+        )
+        pinned = PinnedDocument(
+            source_url=str(recorded["source_url"]),
+            retrieved_at=datetime.fromisoformat(str(recorded["retrieved_at"])),
+            http_status=int(recorded.get("http_status", 200)),
+            content_type=str(recorded.get("content_type", "application/octet-stream")),
+            byte_length=int(recorded["byte_length"]),
+            document_sha256=digest,
+            content_location=location,
+            document_schema_version=str(recorded["document_schema_version"]),
+        )
+        derived = load_vendor_documentation_bundle(
+            root=holder,
+            document=pinned,
+            specs=tuple(
+                ExtractionSpec(
+                    rule=record.rule,
+                    yaml_path=record.yaml_path,
+                    expected_source_fragment=record.expected_source_fragment,
+                    normalizer=record.normalizer,
+                )
+                for record in rebuilt_records
+            ),
+        )
+    except (KeyError, TypeError, ValueError, VendorDocumentationError) as error:
+        raise CaptureCertificationError(
+            f"the capture's documentary evidence could not be re-derived from "
+            f"{digest[:12]}...: {error}"
+        ) from error
+
+    if derived.bundle_hash != bound:
+        raise CaptureCertificationError(
+            f"re-reading {location} produces documentation bundle "
+            f"{derived.bundle_hash} and the manifest-bound approval names "
+            f"{bound}. The document behind this capture's readings is not the "
+            "document it was approved under."
+        )
+    for was, now in zip(rebuilt_records, derived.extractions, strict=True):
+        if was.semantic_payload() != now.semantic_payload():
+            raise CaptureCertificationError(
+                f"the capture records {was.rule.value} as "
+                f"{was.normalized_value!r} and the pinned document re-reads it "
+                f"as {now.normalized_value!r}. The stored reading has been "
+                "edited away from the document it claims to come from."
+            )
+    return VerifiedDocumentation(
+        bundle=derived,
+        bundle_fingerprint=derived.bundle_hash,
+        document_sha256=digest,
+        content_location=location,
+        documentation_root=str(holder),
+        rules=tuple(sorted(r.rule.value for r in derived.extractions)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -645,25 +887,132 @@ class ArchiveIdentity:
 
     sha256: str = ""
     #: ``VERIFIED_FROM_BYTES``, ``UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM`` or
-    #: ``ABSENT``.
+    #: ``ABSENT``. Whether anybody hashed anything, and nothing more.
     provenance: str = "ABSENT"
     byte_length: int = 0
     #: Whether the archive was opened and found to contain *this* capture.
     contains_capture_manifest: bool = False
+    #: Whether it contains the *whole* capture: the manifest, the run intent,
+    #: and every raw payload the manifest names, each hashing to the digest the
+    #: manifest records for it.
+    matches_capture: bool = False
+    #: Why not, when not. Empty when the archive matched.
+    mismatch_reasons: tuple[str, ...] = ()
+    payloads_verified: int = 0
+
+    @property
+    def bytes_hashed(self) -> bool:
+        """True only when this process hashed the bytes itself."""
+        return self.provenance == "VERIFIED_FROM_BYTES"
 
     @property
     def known(self) -> bool:
-        """True only when this process hashed the bytes itself."""
-        return self.provenance == "VERIFIED_FROM_BYTES"
+        """Whether this digest may be recorded as *this capture's* archive.
+
+        **Both halves, and v2.1.24 had only the first.** Hashing a file proves
+        the digest belongs to those bytes; it says nothing about whose bytes
+        they are. Certifying the real capture while passing the v2.1.24 *source*
+        ZIP produced ``archive_identity_known = true`` with
+        ``archive_contains_capture_manifest = false``, and that unrelated
+        digest was stamped onto every live observation as the artifact they
+        were traceable to.
+
+        A digest is the capture's archive identity only when the archive was
+        opened and found to hold the capture.
+        """
+        return self.bytes_hashed and self.matches_capture
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "archive_sha256": self.sha256,
             "archive_identity_known": self.known,
+            "archive_bytes_hashed": self.bytes_hashed,
+            "archive_matches_capture": self.matches_capture,
             "archive_digest_provenance": self.provenance,
             "archive_byte_length": self.byte_length,
             "archive_contains_capture_manifest": self.contains_capture_manifest,
+            "archive_payloads_verified": self.payloads_verified,
+            "archive_mismatch_reasons": list(self.mismatch_reasons),
         }
+
+
+def _archive_contents(
+    path: pathlib.Path, *, session_id: str, manifest_hash: str
+) -> tuple[bool, bool, int, tuple[str, ...]]:
+    """Open the archive and decide whether it holds *the whole capture*.
+
+    Returns ``(contains_manifest, matches, payloads_verified, reasons)``.
+
+    A matching manifest is where the search starts, not where it ends. A ZIP
+    holding one ``manifest.json`` and nothing else satisfies "contains the
+    capture manifest" completely, and is not an archive of the capture -- a
+    reader handed it could re-verify nothing. So the archive must also carry the
+    run intent and *every* payload the manifest names, each hashing to the
+    digest the manifest records. That is the minimum at which "this is the
+    archive of that capture" is a checkable statement rather than a label.
+    """
+    reasons: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            # **Separators are normalised.** The ZIP specification says forward
+            # slashes and ``zipfile.write`` produces them, but the real first
+            # capture was archived by a Windows tool that wrote ``raw\name``.
+            # Comparing those against a path this code joins with ``/`` finds
+            # nothing, and "every payload is absent" is indistinguishable from
+            # a genuinely incomplete archive.
+            held = {name.replace("\\", "/"): name for name in bundle.namelist()}
+            prefix = ""
+            found = False
+            for normalised, actual_name in sorted(held.items()):
+                if not normalised.endswith("manifest.json"):
+                    continue
+                try:
+                    payload = json.loads(bundle.read(actual_name))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+                if (
+                    str(payload.get("session_id", "")) == session_id
+                    and str(payload.get("manifest_hash", "")) == manifest_hash
+                ):
+                    found = True
+                    prefix = normalised[: -len("manifest.json")]
+                    break
+            if not found:
+                return False, False, 0, ("no manifest for this capture session",)
+
+            manifest = json.loads(bundle.read(held[f"{prefix}manifest.json"]))
+            if f"{prefix}run-intent.json" not in held:
+                reasons.append("run-intent.json is absent")
+            verified = 0
+            for record in manifest.get("records", []):
+                location = str(record.get("payload_location", "")).replace("\\", "/")
+                entry = f"{prefix}raw/{location}"
+                if entry not in held:
+                    reasons.append(f"raw payload {location} is absent")
+                    continue
+                actual = hashlib.sha256(bundle.read(held[entry])).hexdigest()
+                if actual != str(record.get("payload_hash", "")):
+                    reasons.append(f"raw payload {location} hashes differently")
+                    continue
+                verified += 1
+            # Present when a capture writes them, and worth reporting -- but a
+            # capture is re-verifiable without them, so their absence is noted
+            # rather than disqualifying. Named as the capture writer actually
+            # writes them: the attempt index is ``attempts/index.jsonl``, and
+            # looking for an ``attempt-index.json`` that has never existed
+            # reports every archive as missing a file none of them has.
+            for optional in (
+                "attempts/index.jsonl",
+                "capture-summary.json",
+                "parser-report.json",
+            ):
+                if f"{prefix}{optional}" not in held:
+                    reasons.append(f"{optional} is absent (not required)")
+    except (zipfile.BadZipFile, json.JSONDecodeError, KeyError, ValueError) as error:
+        return False, False, 0, (f"the archive could not be read: {error}",)
+
+    disqualifying = tuple(r for r in reasons if "not required" not in r)
+    return True, not disqualifying, verified, tuple(reasons)
 
 
 def _archive_identity(
@@ -673,7 +1022,7 @@ def _archive_identity(
     session_id: str,
     manifest_hash: str,
 ) -> ArchiveIdentity:
-    """Hash the archive, or record that nobody did."""
+    """Hash the archive, check it is *this* capture's, or record that nobody did."""
     if archive_path is None:
         if not archive_sha256:
             return ArchiveIdentity()
@@ -687,6 +1036,10 @@ def _archive_identity(
         return ArchiveIdentity(
             sha256=archive_sha256,
             provenance="UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM",
+            mismatch_reasons=(
+                "no archive was opened; a caller's digest cannot be tied to "
+                "this capture",
+            ),
         )
 
     path = pathlib.Path(archive_path)
@@ -698,28 +1051,17 @@ def _archive_identity(
         raise CaptureCertificationError(
             f"{path} hashes to {digest} and the caller expected {archive_sha256}"
         )
-    # Does the archive actually hold *this* capture? An archive of some other
-    # session hashed correctly is still the wrong archive.
-    contains = False
-    try:
-        with zipfile.ZipFile(path) as bundle:
-            for name in bundle.namelist():
-                if not name.endswith("manifest.json"):
-                    continue
-                payload = json.loads(bundle.read(name))
-                if (
-                    str(payload.get("session_id", "")) == session_id
-                    and str(payload.get("manifest_hash", "")) == manifest_hash
-                ):
-                    contains = True
-                    break
-    except (zipfile.BadZipFile, json.JSONDecodeError, KeyError):
-        contains = False
+    contains, matches, verified, reasons = _archive_contents(
+        path, session_id=session_id, manifest_hash=manifest_hash
+    )
     return ArchiveIdentity(
         sha256=digest,
         provenance="VERIFIED_FROM_BYTES",
         byte_length=len(body),
         contains_capture_manifest=contains,
+        matches_capture=matches,
+        payloads_verified=verified,
+        mismatch_reasons=reasons,
     )
 
 
@@ -836,7 +1178,19 @@ class UniverseCertification:
 
 @dataclass(frozen=True, slots=True)
 class OpenInterestCoverage:
-    """How much of the universe the open-interest endpoint actually answered."""
+    """How much of the universe the open-interest endpoint actually answered.
+
+    **Both directions.** v2.1.24 computed ``expected - answered`` and stopped,
+    which measures only one of the two ways the sets can differ. An
+    open-interest row for a contract the listing never named went straight into
+    the numerator: 567 answered identities against a 566-contract universe gave
+    a ``coverage_ratio`` of 1.0018 and ``permits_trusted_aggregate = true``,
+    reporting better-than-complete coverage of a universe it did not cover.
+
+    An unexpected identity is not a bonus. It means the listing and the
+    open-interest response disagree about what the universe *is*, and a weight
+    for a contract outside the universe is a weight nothing will consume.
+    """
 
     universe_count: int
     present_count: int
@@ -845,24 +1199,61 @@ class OpenInterestCoverage:
     missing_by_expiration: tuple[tuple[str, int, int], ...]
     missing_identities_hash: str
     fully_missing_expirations: tuple[str, ...]
+    #: Answered by open interest, absent from the expected universe.
+    unexpected_count: int = 0
+    unexpected_identities_hash: str = ""
+    unexpected_by_expiration: tuple[tuple[str, int], ...] = ()
+    #: Identities the open-interest response returned more than once.
+    duplicate_count: int = 0
+
+    @property
+    def covered_count(self) -> int:
+        """Expected identities the response actually answered.
+
+        Bounded by construction: it counts members of the *intersection*, so it
+        cannot exceed ``universe_count`` and the ratio below cannot exceed 1.
+        v2.1.24 divided the raw answered count by the universe size, which is a
+        different quantity that merely coincides when the sets agree.
+        """
+        return self.universe_count - self.missing_count
 
     @property
     def coverage_ratio(self) -> float:
+        """In ``[0, 1]`` by definition rather than by clipping."""
         if not self.universe_count:
             return 0.0
-        return (self.present_count + self.explicit_zero_count) / self.universe_count
+        return self.covered_count / self.universe_count
 
     @property
     def permits_trusted_aggregate(self) -> bool:
         """Whether a trusted aggregate GEX may be computed over this universe.
 
-        False while any identity is ``OI_MISSING``. There is no evidence-backed
-        policy for an absent open-interest row -- the honest options are to
-        exclude the contract and report reduced coverage, or to refuse -- and
-        until one is chosen and justified, computing an aggregate would be
-        choosing silently.
+        False while any identity is ``OI_MISSING``, ``OI_UNEXPECTED`` or
+        duplicated. There is no evidence-backed policy for an absent
+        open-interest row -- the honest options are to exclude the contract and
+        report reduced coverage, or to refuse -- and until one is chosen and
+        justified, computing an aggregate would be choosing silently. An
+        unexpected identity is worse than absent: the two endpoints disagree
+        about the universe, and neither is authoritative over the other here.
         """
-        return self.missing_count == 0
+        return (
+            self.missing_count == 0
+            and self.unexpected_count == 0
+            and self.duplicate_count == 0
+        )
+
+    @property
+    def state(self) -> str:
+        """The coverage relationship, named rather than inferred from counts."""
+        if self.duplicate_count:
+            return "OI_DUPLICATE_IDENTITIES"
+        if self.missing_count and self.unexpected_count:
+            return "OI_MISSING_AND_UNEXPECTED"
+        if self.missing_count:
+            return "OI_MISSING"
+        if self.unexpected_count:
+            return "OI_UNEXPECTED"
+        return "OI_MATCHES_EXPECTED_UNIVERSE"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -870,13 +1261,22 @@ class OpenInterestCoverage:
             "oi_present": self.present_count,
             "oi_explicit_zero": self.explicit_zero_count,
             "oi_missing": self.missing_count,
+            "oi_covered": self.covered_count,
             "coverage_ratio": self.coverage_ratio,
+            "coverage_state": self.state,
             "missing_by_expiration": [
                 {"expiration": e, "listed": listed, "missing": missing}
                 for e, listed, missing in self.missing_by_expiration
             ],
             "fully_missing_expirations": list(self.fully_missing_expirations),
             "missing_identities_hash": self.missing_identities_hash,
+            "unexpected_oi_count": self.unexpected_count,
+            "unexpected_oi_identities_hash": self.unexpected_identities_hash,
+            "unexpected_oi_by_expiration": [
+                {"expiration": e, "unexpected": count}
+                for e, count in self.unexpected_by_expiration
+            ],
+            "duplicate_oi_identity_count": self.duplicate_count,
             "permits_trusted_aggregate": self.permits_trusted_aggregate,
         }
 
@@ -1545,34 +1945,63 @@ class CaptureRateEconomics:
     """
 
     wire_rate_value: float
-    vendor_effective_rate: float
     intended_economic_rate: float
     #: How the intended rate was established. A capture that declared its own
     #: is believed; one that did not is read under the vendor's documented unit,
     #: which is what an operator following the documentation would have meant.
     intended_rate_source: str
-    observed_unit: str
     documented_unit: str
+    #: **Only when the live comparison actually discriminated.**
+    #:
+    #: v2.1.24 filled these from the numerical minimum whatever the inference
+    #: decision was, so a synthetic capture whose ``RATE_UNITS`` came out
+    #: ``AMBIGUOUS`` still published an observed unit, an effective rate of
+    #: 0.001, ``matches intended = true`` and a documentation conflict -- four
+    #: definite economic claims resting on a comparison the same report
+    #: described as undecided.
+    observed_unit: str = ""
+    vendor_effective_rate: float | None = None
 
     #: Same rate to within a rounding of the wire text. Nowhere near the factor
     #: of a hundred this exists to catch.
     TOLERANCE: ClassVar[float] = 1e-9
 
     @property
-    def documentation_live_conflict(self) -> bool:
-        """Does the vendor read its own parameter as it documents it?"""
+    def vendor_rate_identified(self) -> bool:
+        """Whether the vendor's effective rate was established at all.
+
+        Everything below is a question *about* that rate. With it unidentified
+        they have no answers -- not false ones.
+        """
+        return bool(self.observed_unit) and self.vendor_effective_rate is not None
+
+    @property
+    def documentation_live_conflict(self) -> bool | None:
+        """Does the vendor read its own parameter as it documents it?
+
+        ``None`` when the observed reading was not established, or when the
+        capture carries no documentary reading to compare against. Deliberately
+        three-valued: a ``False`` here would say the vendor agrees with its
+        documentation, which is a finding, and "we could not tell" is not one.
+        """
+        if not self.vendor_rate_identified or not self.documented_unit:
+            return None
         return self.observed_unit != self.documented_unit
 
     @property
-    def effective_rate_matches_intended(self) -> bool:
+    def effective_rate_matches_intended(self) -> bool | None:
         """Did the vendor price the rate this capture meant to buy?"""
+        if self.vendor_effective_rate is None:
+            return None
         return (
             abs(self.vendor_effective_rate - self.intended_economic_rate)
             <= self.TOLERANCE
         )
 
     @property
-    def magnitude_ratio(self) -> float:
+    def magnitude_ratio(self) -> float | None:
+        if self.vendor_effective_rate is None:
+            return None
         if self.intended_economic_rate == 0.0:
             return 1.0 if self.vendor_effective_rate == 0.0 else float("inf")
         return self.vendor_effective_rate / self.intended_economic_rate
@@ -1580,8 +2009,18 @@ class CaptureRateEconomics:
     @property
     def blocker(self) -> str:
         """Why this capture's Greeks cannot support a GEX, if they cannot."""
-        if self.effective_rate_matches_intended:
+        if not self.vendor_rate_identified:
+            return (
+                "the rate this vendor actually priced with was not identified "
+                "from this capture: the reconstruction could not distinguish "
+                "the candidate readings of rate_value. Without it there is no "
+                "way to say whether the Greeks describe the intended market, "
+                "and an unverified rate is not a working one."
+            )
+        matches = self.effective_rate_matches_intended
+        if matches:
             return ""
+        assert self.vendor_effective_rate is not None  # implied by identified
         return (
             f"the vendor priced this capture at r={self.vendor_effective_rate:g} "
             f"and the request meant r={self.intended_economic_rate:g}, a factor "
@@ -1594,6 +2033,7 @@ class CaptureRateEconomics:
     def as_dict(self) -> dict[str, Any]:
         return {
             "wire_rate_value": self.wire_rate_value,
+            "vendor_rate_identified": self.vendor_rate_identified,
             "vendor_effective_rate": self.vendor_effective_rate,
             "intended_economic_rate": self.intended_economic_rate,
             "intended_rate_source": self.intended_rate_source,
@@ -1613,7 +2053,7 @@ def _rate_economics(
     capture: LoadedCapture,
     *,
     wire_rate: float,
-    effective_rate: float,
+    effective_rate: float | None,
     observed_unit: str,
     documented_unit: str,
 ) -> CaptureRateEconomics:
@@ -1635,6 +2075,20 @@ def _rate_economics(
     if bound is not None:
         source = "BOUND_TO_PREFLIGHT_APPROVAL"
         intended_rate = float(bound.economic_rate_decimal)
+        # The intent's own documented unit is inside its fingerprint, which the
+        # approval binds -- so it is the authority here. But an intent declaring
+        # a documented unit the pinned document does not say is a capture whose
+        # two documentary statements disagree, and picking either would be
+        # choosing. Refuse instead.
+        if documented_unit and str(bound.documented_rate_unit) != documented_unit:
+            raise CaptureCertificationError(
+                f"the bound rate intent declares the documentation reads "
+                f"rate_value as {bound.documented_rate_unit} and the pinned "
+                f"document re-derives to {documented_unit}. The capture's "
+                "approved statement of intent and the document it names do not "
+                "agree about what the vendor documents."
+            )
+        documented_unit = str(bound.documented_rate_unit) or documented_unit
     elif capture.records_are_post_binding:
         # A capture taken *after* the binding existed and carrying no intent is
         # not a legacy capture, it is an incomplete one. The fallback is for
@@ -1657,6 +2111,111 @@ def _rate_economics(
         observed_unit=observed_unit,
         documented_unit=documented_unit,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissibleModels:
+    """The rate/day-count pairs still standing after an inference decision.
+
+    v2.1.24 took the global minimum of the joint grid and used its rate, its
+    denominator and the regime split that followed from them to infer the
+    expiration clock and the IV price basis -- and then, separately, decided
+    whether the rate comparison had discriminated at all. When the answer was
+    ``AMBIGUOUS`` the downstream conclusions had already been computed from one
+    arbitrary member of an undecided set, and nothing said so.
+
+    A minimum always exists. Whether it is *the* model is a different question,
+    and the honest downstream answer is: evaluate across everything still
+    admissible, resolve only if they agree, and otherwise say they do not.
+    """
+
+    #: Every ``(unit, day_count_label)`` an inference cannot rule out.
+    keys: tuple[tuple[str, str], ...]
+    #: The single lowest-scoring pair, always defined, never authoritative on
+    #: its own. Published beside the resolved answer so a reader can see the
+    #: difference between "the best fit" and "the established model".
+    numerical_best: tuple[str, str]
+
+    @property
+    def is_unique(self) -> bool:
+        return len(self.keys) == 1
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "numerical_best": {
+                "rate_interpretation": self.numerical_best[0],
+                "day_count": self.numerical_best[1],
+            },
+            "resolved_selected": (
+                {
+                    "rate_interpretation": self.keys[0][0],
+                    "day_count": self.keys[0][1],
+                }
+                if self.is_unique
+                else None
+            ),
+            "admissible_model_count": len(self.keys),
+            "admissible_models": [
+                {"rate_interpretation": unit, "day_count": label}
+                for unit, label in self.keys
+            ],
+        }
+
+
+def _admissible(
+    grid: dict[tuple[str, str], _Reconstruction],
+    *,
+    best: tuple[str, str],
+    rate_decision: Any,
+    day_count_decision: Any,
+) -> AdmissibleModels:
+    """Which grid entries survive the upstream decisions.
+
+    A resolved dimension pins its own coordinate; an unresolved one leaves every
+    value of it open. So an ambiguous rate with a resolved day count admits both
+    readings at that denominator, and two unresolved dimensions admit the whole
+    grid.
+    """
+    units = {best[0]} if rate_decision.is_resolved else {unit for unit, _ in grid}
+    labels = (
+        {best[1]} if day_count_decision.is_resolved else {label for _, label in grid}
+    )
+    keys = tuple(sorted(key for key in grid if key[0] in units and key[1] in labels))
+    return AdmissibleModels(keys=keys or (best,), numerical_best=best)
+
+
+def _collapse(outcomes: tuple[tuple[Any, str], ...]) -> tuple[Any, str]:
+    """Collapse one downstream dimension across the admissible upstream paths.
+
+    ``outcomes`` is one ``(decision, value)`` per path. Resolved only when every
+    path resolved *and* they agree on the value: a conclusion that depends on
+    which upstream model you believed is not established by data that could not
+    choose between those models.
+
+    Module-level so its branches can be exercised directly. A capture whose
+    admissible paths genuinely *disagree* downstream is not something this
+    repository can manufacture honestly -- the paths that survive an
+    undiscriminated rate are numerically identical computations, so they agree
+    by construction -- and a branch that has never run is a branch nobody has
+    checked.
+    """
+    if not outcomes:
+        return InferenceDecision.INSUFFICIENT_DATA, ""
+    decisions = {decision for decision, _ in outcomes}
+    values = {value for _, value in outcomes}
+    if decisions == {InferenceDecision.RESOLVED}:
+        # Every path settled it. Whether that is an answer depends on whether
+        # they settled it the same way.
+        return (
+            (InferenceDecision.RESOLVED, next(iter(values)))
+            if len(values) == 1
+            else (InferenceDecision.AMBIGUOUS, "")
+        )
+    # Otherwise the weakest verdict wins, named rather than flattened to a
+    # generic "unresolved", so a reader can tell insufficient data from a fit
+    # that was adequate but undiscriminating.
+    unresolved = sorted(d.value for d in decisions if not d.is_resolved)
+    return InferenceDecision(unresolved[0]), ""
 
 
 # ---------------------------------------------------------------------------
@@ -1702,6 +2261,11 @@ class CaptureCertificationReport:
     roots: RootResolution
     #: How the capture's economic intent was established, and against what.
     rate_intent_binding: dict[str, Any]
+    #: The numerical minimum beside the model that was actually established --
+    #: which are not the same thing when an upstream inference did not resolve.
+    models: AdmissibleModels
+    #: Where the documentary readings came from, and that they were re-derived.
+    documentation: dict[str, Any]
 
     @property
     def archive_sha256(self) -> str:
@@ -1783,12 +2347,27 @@ class CaptureCertificationReport:
         # still carries stays exactly as recorded.
         if self.rate_economics.blocker:
             blockers.append(self.rate_economics.blocker)
-        if not self.open_interest.permits_trusted_aggregate:
+        if self.open_interest.missing_count:
             blockers.append(
                 f"{self.open_interest.missing_count} contract identities have "
                 "no open-interest row. Open interest is the linear weight on "
                 "every GEX term and there is no evidence-backed policy for an "
                 "absent one, so an aggregate would be choosing silently."
+            )
+        if self.open_interest.unexpected_count:
+            blockers.append(
+                f"{self.open_interest.unexpected_count} open-interest "
+                "identities are not in the expected universe. The contract "
+                "listing and the open-interest response disagree about which "
+                "contracts exist, and neither is authoritative over the other "
+                "here, so the universe an aggregate would run over is not "
+                "established."
+            )
+        if self.open_interest.duplicate_count:
+            blockers.append(
+                f"{self.open_interest.duplicate_count} identities appear more "
+                "than once in the open-interest response, which does not say "
+                "which weight each contract carries."
             )
         return tuple(blockers)
 
@@ -1873,9 +2452,11 @@ class CaptureCertificationReport:
                 dict(claim) for claim in UNBOUND_DOCUMENTARY_CLAIMS
             ],
             "inference_decisions": dict(sorted(self.decisions.items())),
+            "inference_models": self.models.as_dict(),
             "rate_day_count_grid": [dict(entry) for entry in self.joint_grid],
             "root_resolution": self.roots.as_dict(),
             "rate_intent_binding": self.rate_intent_binding,
+            "documentary_evidence": self.documentation,
             "analytical_readiness": self.analytical_readiness,
             "trusted_for_gex": self.trusted_for_gex,
             "gex_blockers": list(self.gex_blockers),
@@ -1914,54 +2495,45 @@ def _status_for(decision: Any, *, observed: str, documented: str) -> Any:
     )
 
 
-def _captured_extraction(capture: LoadedCapture, rule: str) -> dict[str, Any] | None:
-    """One documentary reading, as *this capture* recorded it.
+def _documented_rate_unit(capture: LoadedCapture) -> str:
+    """How the capture's *own* pinned document reads ``rate_value``.
 
     v2.1.23 compared every live finding against a documented value written into
     the certification code: ``documented_rate_unit = "PERCENT_ANNUAL_RATE"``.
     That constant describes the document as it reads today, and it was being
-    used to establish what a capture taken months earlier had intended. If
-    ThetaData corrects the description, the constant follows it and the
-    historical capture silently acquires a different intent.
+    used to establish what a capture taken months earlier had intended.
 
-    The capture recorded its own extractions -- rule, normalized value,
-    extraction hash, document digest -- so the reading it was taken under is
-    recoverable from the capture itself. Verified against the bundle identity
-    the same run intent records, so an edited extraction block is not evidence.
+    v2.1.24 replaced the constant with the capture's own recorded extraction,
+    which fixed the anachronism and introduced a softer version of the same
+    problem: the recorded value was believed. Editing that one string in
+    ``run-intent.json`` moved the first capture's recovered intent by a factor
+    of a hundred and made its documentation conflict vanish.
+
+    So this reads the value the pinned document *re-derives to* on this run,
+    through a bundle whose fingerprint had to match the manifest-bound approval.
+    Empty when the capture carries no documentary evidence -- which is a state,
+    not a default.
     """
-    for entry in capture.documentation_extractions:
-        if str(entry.get("rule", "")) != rule:
-            continue
-        if (
-            str(entry.get("document_sha256", ""))
-            != capture.documentation_document_sha256
-        ):
-            raise CaptureCertificationError(
-                f"the recorded {rule} extraction names document "
-                f"{entry.get('document_sha256')} and the capture's "
-                f"documentation bundle names "
-                f"{capture.documentation_document_sha256}. An extraction that "
-                "belongs to another document establishes nothing about this "
-                "capture."
-            )
-        return entry
-    return None
-
-
-def _documented_rate_unit(capture: LoadedCapture) -> str:
-    """How the capture's *own* documentation bundle read ``rate_value``."""
-    entry = _captured_extraction(capture, "RATE_UNITS")
-    if entry is None:
+    if capture.documentation is None:
         return ""
-    return str(entry.get("normalized_value", ""))
+    return capture.documentation.value_for("RATE_UNITS")
 
 
-#: The first-order OpenAPI description refers to a trade price, and this
-#: repository has read it -- but never *extracted* it into the pinned bundle as
-#: a ``DocumentedRule``, so no capture carries it. It is recorded here as what
-#: it is: a statement in the repository, not capture-bound documentary evidence.
-#: Presenting it as the latter is how a current code constant would come to
-#: masquerade as something a capture proved.
+#: **Readings this repository holds that no capture is evidence of.**
+#:
+#: Both entries name a sentence somebody read in vendor material and wrote down
+#: here. Neither was ever *extracted* into the pinned bundle as a
+#: ``DocumentedRule``, so no capture carries one, so nothing re-derives them and
+#: nothing can check them. They are listed rather than deleted because the
+#: reading may well be right -- and listed *here* rather than in the ledger
+#: because presenting them beside re-derived evidence is how a repository
+#: constant comes to look like something a capture proved.
+#:
+#: ``DIVIDEND_CONVENTION`` joined the list in v2.1.25. Until then the ledger
+#: recorded it as ``DOCUMENTATION_ONLY`` with ``documentation_matched=true``,
+#: citing "ThetaData greeks article, annual_div" -- an article that is not
+#: pinned, not hashed, and not in any capture. It read as settled documentary
+#: evidence and was a repository claim wearing that costume.
 UNBOUND_DOCUMENTARY_CLAIMS: tuple[dict[str, str], ...] = (
     {
         "dimension": "IV_PRICE_BASIS",
@@ -1972,6 +2544,21 @@ UNBOUND_DOCUMENTARY_CLAIMS: tuple[dict[str, str], ...] = (
             "no capture records an IV_PRICE_BASIS extraction, so this reading "
             "cannot be compared against a live finding as documentary evidence. "
             "The live finding stands on its own."
+        ),
+    },
+    {
+        "dimension": "DIVIDEND_CONVENTION",
+        "claim": "ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
+        "reference": "ThetaData greeks article, annual_div",
+        "origin": "REPOSITORY_CONSTANT_NOT_CAPTURE_BOUND",
+        "note": (
+            "the pinned document settles OPEN_INTEREST_SETTLEMENT, RATE_UNITS "
+            "and MINIMUM_TIME_FLOOR, and nothing else. There is no "
+            "DIVIDEND_CONVENTION extraction to re-derive, and the capture "
+            "requested annual_dividend=0.0, under which every convention "
+            "produces the same zero -- so the capture cannot distinguish them "
+            "either. Resolving it would need a pinned extraction or a non-zero "
+            "dividend, and this release has neither."
         ),
     },
 )
@@ -1985,8 +2572,9 @@ def _documented_iv_basis(capture: LoadedCapture) -> str:
     ``LIVE_ONLY`` rather than a conflict with a claim the capture never made.
     See :data:`UNBOUND_DOCUMENTARY_CLAIMS`.
     """
-    entry = _captured_extraction(capture, "IV_PRICE_BASIS")
-    return "" if entry is None else str(entry.get("normalized_value", ""))
+    if capture.documentation is None:
+        return ""
+    return capture.documentation.value_for("IV_PRICE_BASIS")
 
 
 def certify_capture(
@@ -2072,14 +2660,22 @@ def certify_capture(
                 "not a small position"
             )
         oi_by_key[ContractKey.from_row(row)] = value
+    # Both differences, because the sets can disagree in both directions and
+    # only one of them was being measured. ``unexpected`` is never discarded:
+    # an open-interest row for a contract the listing does not name means the
+    # two endpoints disagree about the universe, which is a finding.
     missing = list_set - set(oi_by_key)
+    unexpected = set(oi_by_key) - list_set
     explicit_zero = sum(1 for v in oi_by_key.values() if v == 0)
     listed_by_exp: dict[str, int] = defaultdict(int)
     missing_by_exp: dict[str, int] = defaultdict(int)
+    unexpected_by_exp: dict[str, int] = defaultdict(int)
     for key in list_set:
         listed_by_exp[key.expiration.isoformat()] += 1
     for key in missing:
         missing_by_exp[key.expiration.isoformat()] += 1
+    for key in unexpected:
+        unexpected_by_exp[key.expiration.isoformat()] += 1
     coverage = OpenInterestCoverage(
         universe_count=len(list_set),
         present_count=len(oi_by_key) - explicit_zero,
@@ -2092,6 +2688,12 @@ def certify_capture(
         fully_missing_expirations=tuple(
             e for e in sorted(missing_by_exp) if missing_by_exp[e] == listed_by_exp[e]
         ),
+        unexpected_count=len(unexpected),
+        unexpected_identities_hash=_set_hash(unexpected),
+        unexpected_by_expiration=tuple(
+            (e, unexpected_by_exp[e]) for e in sorted(unexpected_by_exp)
+        ),
+        duplicate_count=oi_identities.duplicate_identity_count,
     )
 
     # -- quote/greeks synchrony --------------------------------------------
@@ -2231,8 +2833,11 @@ def certify_capture(
     effective_rate = winner.rate
     readings = winner.readings
     clock_evidence = winner.evidence
-    boundary = winner.boundary
-    clock = _clock_time(clock_evidence)
+    # No ``boundary``/``clock`` unpacked here any more. They were the winner's,
+    # and every downstream computation reached for them regardless of whether
+    # the winner had been established -- which is precisely how an undecided
+    # upstream choice became silent authority. The regime split and the close
+    # now travel with the path being evaluated, inside the two functions below.
 
     # The two published tables are slices through that grid, relabelled for
     # the dimension each one is about: rates compared at the winning day count,
@@ -2250,98 +2855,114 @@ def certify_capture(
         for _basis, label in DAY_COUNT_HYPOTHESES
         if (observed_rate_unit, label) in grid
     )
-    front = [
-        r
-        for r in usable
-        if boundary is not None
-        and date.fromisoformat(r["expiration"].strip().strip('"')) <= boundary
-    ]
-    # Candidates built around the derived clock rather than a fixed list, so
-    # the comparison is informative for any close the vendor might use and the
-    # winner cannot be right by coincidence of the list.
-    expiration_time_scores = tuple(
-        s
-        for s in (
-            _score(
-                front,
-                spot=spot,
-                valuation=valuation,
-                rate=effective_rate,
-                # The winning denominator, not a constant. Scoring a clock at
-                # the wrong day count lets the fit trade one against the other
-                # -- an ACT/360 vendor read at 365 is short on time, and the
-                # search buys it back by moving the close later.
-                days_per_year=winner.days_per_year,
-                expiry_time=candidate,
-                label=f"{candidate.hour:02d}:{candidate.minute:02d} America/New_York",
+
+    def expiration_scores_for(entry: _Reconstruction) -> tuple[HypothesisScore, ...]:
+        """Score the closing clock along one upstream path.
+
+        Candidates built around that path's own derived clock rather than a
+        fixed list, so the comparison is informative for any close the vendor
+        might use and the winner cannot be right by coincidence of the list.
+        """
+        edge = entry.boundary
+        front = [
+            r
+            for r in usable
+            if edge is not None
+            and date.fromisoformat(r["expiration"].strip().strip('"')) <= edge
+        ]
+        return tuple(
+            s
+            for s in (
+                _score(
+                    front,
+                    spot=spot,
+                    valuation=valuation,
+                    rate=entry.rate,
+                    # This path's denominator, not a constant. Scoring a clock
+                    # at the wrong day count lets the fit trade one against the
+                    # other -- an ACT/360 vendor read at 365 is short on time,
+                    # and the search buys it back by moving the close later.
+                    days_per_year=entry.days_per_year,
+                    expiry_time=candidate,
+                    label=(
+                        f"{candidate.hour:02d}:{candidate.minute:02d} America/New_York"
+                    ),
+                )
+                for candidate in _clock_candidates(_clock_time(entry.evidence))
             )
-            for candidate in _clock_candidates(clock)
+            if s is not None
         )
-        if s is not None
-    )
 
-    # -- IV price basis -----------------------------------------------------
-    #
-    # A zero bid/ask spread makes BID, ASK and the midpoint the same number, so
-    # every hypothesis reprices identically and none of them is established.
-    # Counted rather than assumed: a capture where the book happens to be
-    # locked cannot prove the vendor chose the midpoint specifically.
-    zero_spread = comparable = 0
-    for row in usable:
-        try:
-            if 0.05 <= abs(float(row["delta"])) <= 0.95:
-                comparable += 1
-                if float(row["ask"]) - float(row["bid"]) == 0.0:
-                    zero_spread += 1
-        except (KeyError, ValueError):
-            continue
-    iv_spread_is_degenerate = comparable > 0 and zero_spread == comparable
+    def iv_scores_for(
+        entry: _Reconstruction,
+    ) -> tuple[list[tuple[str, int, float, float]], bool]:
+        """Score the IV price basis along one upstream path.
 
-    iv_basis_scores: list[tuple[str, int, float, float]] = []
-    for basis_name in ("NBBO_MID", "BID", "ASK"):
-        errors: list[float] = []
-        within = 0
+        A zero bid/ask spread makes BID, ASK and the midpoint the same number,
+        so every hypothesis reprices identically and none is established.
+        Counted rather than assumed: a capture where the book happens to be
+        locked cannot prove the vendor chose the midpoint specifically.
+        """
+        edge, clock_at = entry.boundary, _clock_time(entry.evidence)
+        zero_spread = comparable = 0
         for row in usable:
-            key = ContractKey.from_row(row)
-            if not (0.05 <= abs(float(row["delta"])) <= 0.95):
-                continue
-            exp_d = key.expiration
-            if boundary is not None and exp_d > boundary:
-                days = float((exp_d - valuation.date()).days)
-            else:
-                days = (
-                    datetime.combine(exp_d, clock, tzinfo=EASTERN) - valuation
-                ).total_seconds() / 86400.0
-            if days <= 0.0:
-                continue
             try:
-                bid, ask = float(row["bid"]), float(row["ask"])
+                if 0.05 <= abs(float(row["delta"])) <= 0.95:
+                    comparable += 1
+                    if float(row["ask"]) - float(row["bid"]) == 0.0:
+                        zero_spread += 1
             except (KeyError, ValueError):
                 continue
-            target = {"NBBO_MID": (bid + ask) / 2.0, "BID": bid, "ASK": ask}[basis_name]
-            solved = _solve_iv(
-                target,
-                spot=spot,
-                strike=float(row["strike"]),
-                years=days / winner.days_per_year,
-                rate=effective_rate,
-                right=key.option_right,
-            )
-            if solved is None:
-                continue
-            err = abs(solved - float(row["implied_vol"]))
-            errors.append(err)
-            if err <= IMPLIED_VOL_TICK / 2:
-                within += 1
-        if errors:
-            iv_basis_scores.append(
-                (
-                    basis_name,
-                    len(errors),
-                    statistics.median(errors),
-                    within / len(errors),
+        degenerate = comparable > 0 and zero_spread == comparable
+
+        scores: list[tuple[str, int, float, float]] = []
+        for basis_name in ("NBBO_MID", "BID", "ASK"):
+            errors: list[float] = []
+            within = 0
+            for row in usable:
+                key = ContractKey.from_row(row)
+                if not (0.05 <= abs(float(row["delta"])) <= 0.95):
+                    continue
+                exp_d = key.expiration
+                if edge is not None and exp_d > edge:
+                    days = float((exp_d - valuation.date()).days)
+                else:
+                    days = (
+                        datetime.combine(exp_d, clock_at, tzinfo=EASTERN) - valuation
+                    ).total_seconds() / 86400.0
+                if days <= 0.0:
+                    continue
+                try:
+                    bid, ask = float(row["bid"]), float(row["ask"])
+                except (KeyError, ValueError):
+                    continue
+                target = {"NBBO_MID": (bid + ask) / 2.0, "BID": bid, "ASK": ask}[
+                    basis_name
+                ]
+                solved = _solve_iv(
+                    target,
+                    spot=spot,
+                    strike=float(row["strike"]),
+                    years=days / entry.days_per_year,
+                    rate=entry.rate,
+                    right=key.option_right,
                 )
-            )
+                if solved is None:
+                    continue
+                err = abs(solved - float(row["implied_vol"]))
+                errors.append(err)
+                if err <= IMPLIED_VOL_TICK / 2:
+                    within += 1
+            if errors:
+                scores.append(
+                    (
+                        basis_name,
+                        len(errors),
+                        statistics.median(errors),
+                        within / len(errors),
+                    )
+                )
+        return scores, degenerate
 
     # -- the ledger ---------------------------------------------------------
     archive = _archive_identity(
@@ -2362,12 +2983,6 @@ def certify_capture(
     best_day = (
         min(day_count_scores, key=lambda s: s.delta_rmse) if day_count_scores else None
     )
-    best_exp = (
-        min(expiration_time_scores, key=lambda s: s.delta_rmse)
-        if expiration_time_scores
-        else None
-    )
-    best_iv = min(iv_basis_scores, key=lambda s: s[2]) if iv_basis_scores else None
     documented_rate_unit = _documented_rate_unit(capture)
     documented_iv_basis = _documented_iv_basis(capture)
 
@@ -2389,33 +3004,101 @@ def certify_capture(
         rows=best_day.rows if best_day else 0,
         identical_hypotheses=False,
     )
-    expiration_decision = _decide(
-        sorted(s.delta_rmse for s in expiration_time_scores),
-        rows=best_exp.rows if best_exp else 0,
-        identical_hypotheses=False,
-    )
-    iv_decision = _decide(
-        sorted(row[2] for row in iv_basis_scores),
-        rows=best_iv[1] if best_iv else 0,
-        identical_hypotheses=iv_spread_is_degenerate,
-        floor=IMPLIED_VOL_HALF_QUANTUM,
-        # A solved volatility cannot land closer than half a reporting quantum
-        # to the reported one, so adequacy is measured against that and not
-        # against the delta noise floor, which belongs to a different field.
-        adequate=ADEQUATE_FIT_NOISE_FLOORS * IMPLIED_VOL_HALF_QUANTUM,
-    )
 
+    # -- downstream, across every upstream path still admissible ------------
+    #
+    # v2.1.24 derived the clock and the IV basis from the global minimum and
+    # only afterwards asked whether the rate or the day count had been settled
+    # at all. When the answer was no, the downstream conclusions had already
+    # been computed from one arbitrary member of an undecided set, and were
+    # published as findings. An unresolved winner was hidden authority.
+    #
+    # So each surviving path is carried all the way through, and a downstream
+    # dimension resolves only when every one of them lands on the same answer.
+    admissible = _admissible(
+        grid,
+        best=(observed_rate_unit, day_count_label),
+        rate_decision=rate_decision,
+        day_count_decision=day_count_decision,
+    )
+    paths = {key: grid[key] for key in admissible.keys}
+    exp_by_path = {key: expiration_scores_for(entry) for key, entry in paths.items()}
+    iv_by_path = {key: iv_scores_for(entry) for key, entry in paths.items()}
+
+    def _per_path_decision(
+        key: tuple[str, str],
+    ) -> tuple[InferenceDecision, str, InferenceDecision, str]:
+        """The two downstream verdicts along one upstream path."""
+        scores = exp_by_path[key]
+        top = min(scores, key=lambda s: s.delta_rmse) if scores else None
+        exp_dec = _decide(
+            sorted(s.delta_rmse for s in scores),
+            rows=top.rows if top else 0,
+            identical_hypotheses=False,
+        )
+        iv_rows, degenerate = iv_by_path[key]
+        iv_top = min(iv_rows, key=lambda s: s[2]) if iv_rows else None
+        iv_dec = _decide(
+            sorted(row[2] for row in iv_rows),
+            rows=iv_top[1] if iv_top else 0,
+            identical_hypotheses=degenerate,
+            floor=IMPLIED_VOL_HALF_QUANTUM,
+            # A solved volatility cannot land closer than half a reporting
+            # quantum to the reported one, so adequacy is measured against that
+            # and not against the delta noise floor, which is a different field.
+            adequate=ADEQUATE_FIT_NOISE_FLOORS * IMPLIED_VOL_HALF_QUANTUM,
+        )
+        return (
+            exp_dec,
+            top.hypothesis if top and exp_dec.is_resolved else "",
+            iv_dec,
+            iv_top[0] if iv_top and iv_dec.is_resolved else "",
+        )
+
+    per_path = {key: _per_path_decision(key) for key in admissible.keys}
+
+    def _agreed(index: int) -> tuple[InferenceDecision, str]:
+        return _collapse(
+            tuple(
+                (per_path[key][index], per_path[key][index + 1])
+                for key in admissible.keys
+            )
+        )
+
+    expiration_decision, agreed_expiration = _agreed(0)
+    iv_decision, agreed_iv_basis = _agreed(2)
+
+    # The published tables are the numerical-best path's, so a reader sees real
+    # numbers; the verdicts above are the cross-path ones. Where they differ,
+    # the grid and ``inference_models`` show why.
+    expiration_time_scores = exp_by_path[admissible.numerical_best]
+    iv_basis_scores, _degenerate = iv_by_path[admissible.numerical_best]
+    best_exp = (
+        min(expiration_time_scores, key=lambda s: s.delta_rmse)
+        if expiration_time_scores
+        else None
+    )
+    best_iv = min(iv_basis_scores, key=lambda s: s[2]) if iv_basis_scores else None
+
+    # The observed unit is a *finding* only when the comparison discriminated.
+    # Everything economic hangs off it, so it is emptied here once rather than
+    # guarded at each of the four places that used to read it regardless.
+    observed_unit = observed_rate_unit if rate_decision.is_resolved else ""
     rate_status = _status_for(
-        rate_decision, observed=observed_rate_unit, documented=documented_rate_unit
+        rate_decision, observed=observed_unit, documented=documented_rate_unit
     )
     rate_economics = _rate_economics(
         capture,
         wire_rate=wire_rate,
-        effective_rate=effective_rate,
-        observed_unit=observed_rate_unit,
+        # ``None``, not the minimum's rate. With the reading undecided there is
+        # no established effective rate, and reporting the better-fitting of two
+        # indistinguishable candidates as *the* rate the vendor priced with is
+        # the report contradicting its own inference decision.
+        effective_rate=effective_rate if rate_decision.is_resolved else None,
+        observed_unit=observed_unit,
         documented_unit=documented_rate_unit,
     )
-    observed_iv_basis = best_iv[0] if best_iv else ""
+    observed_iv_basis = agreed_iv_basis
     iv_status = _status_for(
         iv_decision, observed=observed_iv_basis, documented=documented_iv_basis
     )
@@ -2428,8 +3111,8 @@ def certify_capture(
         else day_count_decision.value
     )
     expiration_label = (
-        best_exp.hypothesis
-        if best_exp and expiration_decision.is_resolved
+        agreed_expiration
+        if expiration_decision.is_resolved
         else expiration_decision.value
     )
     # The whole search, published. The dimension tables above are slices, and a
@@ -2457,7 +3140,7 @@ def certify_capture(
             status=rate_status,
             basis=ObservationBasis.LIVE_NUMERICAL_RECONSTRUCTION,
             documented_value=documented_rate_unit,
-            observed_value=(observed_rate_unit if rate_decision.is_resolved else ""),
+            observed_value=observed_unit,
             decision=rate_decision,
             documentation_reference="components/parameters/rate_value/description",
             capture=identity,
@@ -2481,7 +3164,21 @@ def certify_capture(
                     "answered by the implementation."
                 )
                 if rate_status.is_conflict
-                else "The implementation reads rate_value as documented."
+                else (
+                    "The implementation reads rate_value as documented."
+                    if rate_decision.is_resolved
+                    # Saying it "reads rate_value as documented" was the else
+                    # branch of a two-way test, so an undiscriminated comparison
+                    # produced a confident statement of agreement about the
+                    # thing it had just failed to determine.
+                    else (
+                        f"This capture does not establish how the vendor reads "
+                        f"rate_value: the comparison came out "
+                        f"{rate_decision.value}. Nothing here says the "
+                        "implementation agrees with the documentation, or that "
+                        "it disagrees."
+                    )
+                )
             ),
         ),
         LiveBehaviorObservation(
@@ -2512,9 +3209,7 @@ def certify_capture(
                 expiration_decision, observed=expiration_label, documented=""
             ),
             basis=ObservationBasis.LIVE_NUMERICAL_RECONSTRUCTION,
-            observed_value=(
-                expiration_label if expiration_decision.is_resolved else ""
-            ),
+            observed_value=agreed_expiration,
             decision=expiration_decision,
             capture=identity,
             rows_used=best_exp.rows if best_exp else 0,
@@ -2555,7 +3250,7 @@ def certify_capture(
             status=iv_status,
             basis=ObservationBasis.LIVE_NUMERICAL_RECONSTRUCTION,
             documented_value=documented_iv_basis,
-            observed_value=observed_iv_basis if iv_decision.is_resolved else "",
+            observed_value=observed_iv_basis,
             decision=iv_decision,
             documentation_reference=(
                 "components/schemas/first_order_greeks/properties/implied_vol"
@@ -2619,15 +3314,110 @@ def certify_capture(
         ),
         LiveBehaviorObservation(
             dimension=BehaviorDimension.DIVIDEND_CONVENTION,
-            status=EvidenceStatus.DOCUMENTATION_ONLY,
+            # **Unresolved, and it always was.** v2.1.24 recorded this as
+            # DOCUMENTATION_ONLY with documentation_matched=true, citing an
+            # article that is not pinned, not hashed and not carried by any
+            # capture. That is the same defect the IV price basis had, and it
+            # gets the same answer: the claim moves to
+            # UNBOUND_DOCUMENTARY_CLAIMS and the dimension stays open.
+            status=EvidenceStatus.UNRESOLVED,
             basis=ObservationBasis.REQUEST_BOUND,
-            documented_value="ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
-            documentation_reference="ThetaData greeks article, annual_div",
+            decision=InferenceDecision.NOT_IDENTIFIABLE,
             scope=(
-                "annual_dividend=0.0 was requested, so this capture exercises "
-                "only the zero case and cannot speak to non-zero handling"
+                "annual_dividend=0.0 was requested, so every dividend "
+                "convention produces the same zero and none is distinguishable "
+                "from the others by this capture"
             ),
-            notes="effective dividend 0, effective q 0 for this capture.",
+            notes=(
+                "No pinned documentary extraction establishes what "
+                "annual_dividend means to the vendor, and a zero-dividend "
+                "request cannot establish it either. Resolving this needs an "
+                "extraction in the pinned bundle or a capture with a non-zero "
+                "dividend; see unbound_documentary_claims."
+            ),
+        ),
+        LiveBehaviorObservation(
+            dimension=BehaviorDimension.DIVIDEND_VALUE,
+            # Separate from the convention, and genuinely settled: the value is
+            # in the request binding, which was recomputed against the digest
+            # stamped on the manifest records. What it *means* is the other
+            # dimension's question, and that one is open.
+            status=EvidenceStatus.LIVE_ONLY,
+            basis=ObservationBasis.REQUEST_BOUND,
+            observed_value=f"{capture.request.greeks_annual_dividend:g}",
+            decision=InferenceDecision.RESOLVED,
+            capture=identity,
+            rows_used=len(greeks),
+            scope="the verified greeks request for this capture",
+            notes=(
+                "The dividend amount the request carried, proved by the same "
+                "binding that proves the rate value. Its interpretation is "
+                "DIVIDEND_CONVENTION, which this capture does not settle."
+            ),
+        ),
+        LiveBehaviorObservation(
+            dimension=BehaviorDimension.RISK_FREE_RATE,
+            # Needs *both*: an approval-bound declaration of what rate was
+            # meant, and a live reading that says the vendor consumed it that
+            # way. A declaration alone is a statement about our own request.
+            status=(
+                EvidenceStatus.LIVE_ONLY
+                if capture.bound_rate_intent is not None
+                and rate_economics.vendor_rate_identified
+                else EvidenceStatus.UNRESOLVED
+            ),
+            basis=ObservationBasis.REQUEST_BOUND,
+            observed_value=(
+                f"{rate_economics.intended_economic_rate:g}"
+                if capture.bound_rate_intent is not None
+                and rate_economics.vendor_rate_identified
+                else ""
+            ),
+            decision=(
+                InferenceDecision.RESOLVED
+                if capture.bound_rate_intent is not None
+                and rate_economics.vendor_rate_identified
+                else InferenceDecision.INSUFFICIENT_DATA
+            ),
+            capture=identity,
+            rows_used=len(greeks) if capture.bound_rate_intent is not None else 0,
+            scope="the economic rate this capture was approved to buy",
+            notes=(
+                "Established by an approval-bound rate intent read together "
+                "with a resolved live rate reading. A capture with only one of "
+                "the two leaves this open: an intent nobody checked against "
+                "the vendor is a declaration, and a reading with no declared "
+                "intent has nothing to be the rate *of*."
+            ),
+        ),
+        *(
+            [
+                LiveBehaviorObservation(
+                    dimension=BehaviorDimension.MINIMUM_TIME_FLOOR,
+                    status=EvidenceStatus.DOCUMENTATION_ONLY,
+                    basis=ObservationBasis.PINNED_DOCUMENTATION,
+                    documented_value=capture.documentation.value_for(
+                        "MINIMUM_TIME_FLOOR"
+                    ),
+                    decision=InferenceDecision.RESOLVED,
+                    documentation_reference=(
+                        "components/parameters/greeks_version/description"
+                    ),
+                    scope=(
+                        "greeks_version=latest, which is what this capture requested"
+                    ),
+                    notes=(
+                        "Re-derived from the pinned document's bytes on this "
+                        "run, through a bundle whose fingerprint matched the "
+                        "manifest-bound approval. Documentary, not live: no "
+                        "row in this capture sits close enough to expiry to "
+                        "exercise the floor."
+                    ),
+                )
+            ]
+            if capture.documentation is not None
+            and capture.documentation.value_for("MINIMUM_TIME_FLOOR")
+            else []
         ),
         LiveBehaviorObservation(
             dimension=BehaviorDimension.CONTRACT_LIST_UNIVERSE,
@@ -2690,5 +3480,19 @@ def certify_capture(
             ),
             "capture_records_binding_schema": capture.records_are_post_binding,
             "intent_schema_version": capture.intent_schema_version,
+            "rate_intent_schema_version": (
+                capture.bound_rate_intent.schema_version
+                if capture.bound_rate_intent is not None
+                else ""
+            ),
         },
+        models=admissible,
+        documentation=(
+            capture.documentation.as_dict()
+            if capture.documentation is not None
+            else {
+                "documentary_authority": "NONE_CARRIED_BY_THIS_CAPTURE",
+                "rules_rederived": [],
+            }
+        ),
     )

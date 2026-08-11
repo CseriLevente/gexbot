@@ -1,5 +1,80 @@
 ﻿# Changelog
 
+## 2.1.25 - certification evidence integrity
+
+Nine defects found reviewing v2.1.24 before capture #2. No capture was taken.
+
+Every one has the same shape. v2.1.24 checked that a record was *internally
+consistent* and treated that as proof the record was *true*. An extraction whose
+digest matched its bundle, an archive whose bytes hashed, a rate intent whose
+fields agreed with each other, an open-interest response whose rows parsed --
+each was self-consistent, and each could still be describing something other
+than the capture it was filed under.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `VALIDATED_AGAINST_ONE_LIVE_THETADATA_CAPTURE` |
+`NOT_READY_FOR_ANALYTICAL_DATASET`.
+
+### Defects fixed
+
+| S | Defect in v2.1.24 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | Documentary readings were taken from `run-intent.json` and believed | Editing `RATE_UNITS` from `PERCENT_ANNUAL_RATE` to `DECIMAL_ANNUAL_RATE` in a text editor moved the first capture's recovered intent from 0.042 to 4.2, made its documentation conflict vanish and dropped the "priced at 420%" blocker -- touching no payload, no manifest and no digest, and certification still succeeded | The bundle is rebuilt from the pinned document's own bytes on every run, through a chain the manifest already binds: approval -> `documentation_bundle_fingerprint` -> run-intent bundle -> content-addressed bytes -> rehash -> rerun the extractors -> the rebuilt fingerprint must equal the approval-bound one, and every re-derived reading must equal the recorded one |
+| 2 | `DIVIDEND_CONVENTION` was `DOCUMENTATION_ONLY` with `documentation_matched = true` | The citation is an article that is not pinned, not hashed and not in any capture; and `annual_dividend=0.0` makes every convention produce the same zero, so the capture could not distinguish them either | The claim moves to `unbound_documentary_claims`, the dimension is `UNRESOLVED`, and `DIVIDEND_VALUE` is added as separate request-bound evidence -- the amount is proved, its meaning is not |
+| 3 | Economics were derived from the numerical minimum whatever the inference decision was | A capture whose `RATE_UNITS` came out undecided still published an observed unit, an effective rate, a documentation conflict and an economic verdict | `vendor_effective_rate` is `None` and the three verdicts are tri-state when the reading was not established; `gex_blockers` says the rate was not identified; the unresolved prose no longer claims the implementation "reads rate_value as documented" |
+| 4 | The clock and the IV basis were derived from the global minimum before anything asked whether it had been established | An undecided upstream choice became silent authority over two downstream conclusions | Downstream is evaluated along every admissible upstream path and resolves only when they all agree; `numerical_best` and `resolved_selected` are published separately |
+| 5 | Coverage measured `expected - answered` only | 567 answers for a 566-contract universe gave `coverage_ratio = 1.0018` and `permits_trusted_aggregate = true` | Both differences are computed; `unexpected_oi_count`, its identity hash and its per-expiration breakdown are reported; the ratio is bounded by counting the intersection rather than by clipping an invalid one |
+| 6 | An archive became identity because its bytes hashed | Certifying the real capture with the v2.1.24 *source* ZIP gave `archive_identity_known = true` with `archive_contains_capture_manifest = false`, and that unrelated digest was stamped onto every observation | `archive_bytes_hashed` and `archive_matches_capture` are separate and identity needs both. A matching archive must hold the manifest, the run intent and every raw payload, each rehashed against the manifest. The CLI gained `--archive-path` |
+| 7 | `CaptureRateIntent.from_payload` defaulted a missing `schema_version` | Deleting that one line left the fingerprint reconstructing to exactly the same value | The field is required and must name a supported schema |
+
+### Documentary authority is re-derived, not recorded
+
+The chain runs from the manifest to the document's bytes with no believed value
+in the middle. `_verified_approval` proves the approval against the stamps on
+the manifest records -- **under the field set its own declared schema covered**,
+so a v2.1.20 approval is not hashed with a v2.1.24 field -- and both the rate
+intent and the documentation bundle hang off that one proved artifact.
+
+A v2.1.24+ capture's bound `documented_rate_unit` is authoritative *and* must
+agree with the re-derived bundle. A capture whose two documentary statements
+disagree is refused rather than resolved by preference.
+
+### Pricing dimensions
+
+`RISK_FREE_RATE`, `DIVIDEND_VALUE` and `MINIMUM_TIME_FLOOR` are now reported.
+`RISK_FREE_RATE` needs both an approval-bound intent and a resolved live
+reading, so the first capture -- which declared no intent -- leaves it open.
+`DIVIDEND_CONVENTION` and `SOLVER_VERSION` remain unresolved. This is evidence
+accounting and it authorizes nothing; `trusted_for_gex` is still constant false.
+
+### Versions
+
+`capture-certification/2.1.25`, `pricing-evidence/2.1.25`, package `2.1.25`.
+
+`CaptureRateIntent` gets its own constant, `CAPTURE_RATE_INTENT_SCHEMA_VERSION`,
+still reading `pricing-evidence/2.1.24`. One constant was versioning two things
+with different lifetimes. The ledger schema says what an observation may claim
+and that did change; the intent's fields and their meanings did not -- only the
+strictness of its reader, and a reader getting stricter is not the record
+meaning something new. That constant sits inside a fingerprint an operator
+approves and a later capture is checked against, so bumping it would have moved
+every declared intent, including the one already accepted for capture #2, to
+announce a change in a different record.
+
+### The first capture is unchanged where the evidence still supports it
+
+14,556 list/quote/greeks, 14,130 open interest, 426 missing, 3,692 explicit
+zero, 0 unexpected. `RATE_UNITS` resolved, live `DECIMAL_ANNUAL_RATE` against a
+documented `PERCENT_ANNUAL_RATE` **re-derived from the pinned document**,
+conflict retained, vendor `r = 4.2` against a legacy intent of `0.042`,
+economically invalid. `ACT_365`, 16:00 ET front-week with the boundary still
+`OPEN`, six ambiguous inversion rows, 7759.27 @ 10:01:34 against an index
+snapshot of 7759.54 @ 10:01:33, non-atomic.
+
+Two findings changed, and both changed toward claiming less:
+`DIVIDEND_CONVENTION` is no longer documented, and `RISK_FREE_RATE` is not
+established for a capture that never declared what it meant to buy.
+
 ## 2.1.24 - certification authority and inference identifiability
 
 Seven defects found reviewing v2.1.23 before capture #2. No capture was taken.

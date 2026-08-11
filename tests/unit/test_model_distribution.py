@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.24"
+    assert package["project"]["version"] == "2.1.25"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -332,8 +332,13 @@ def test_all_three_versions_are_documented():
         # documented-versus-observed record carries, and what an offline
         # certification derives -- and one moved, because MATCHED on RATE_UNITS
         # can now mean the documentation was contradicted rather than confirmed.
-        "pricing-evidence/2.1.24",
-        "capture-certification/2.1.24",
+        #
+        # Both moved again in v2.1.25: an unresolved inference no longer yields
+        # a documented/observed verdict, and certification re-derives its
+        # documentary readings from the pinned document instead of believing
+        # what the capture recorded.
+        "pricing-evidence/2.1.25",
+        "capture-certification/2.1.25",
         "pricing-compatibility/2.1.22",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",
@@ -349,3 +354,12 @@ def test_all_three_versions_are_documented():
         "raw-request-plan/2.1.20",
     ):
         assert version in text, version
+
+    # v2.1.25 split the rate intent's schema from the ledger's, and the intent
+    # deliberately stayed at ``pricing-evidence/2.1.24`` because its value is
+    # inside a fingerprint an operator approves. A table that named only the
+    # bumped one would make the exception look like an oversight, so both rows
+    # have to be there and the reason has to be written down.
+    assert "Capture-rate-intent schema" in text
+    assert "pricing-evidence/2.1.24" in text
+    assert "rate_intent_fingerprint" in text

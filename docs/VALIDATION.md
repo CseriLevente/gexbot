@@ -228,7 +228,7 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.24` | `pyproject.toml` | anything ships |
+| Package version | `2.1.25` | `pyproject.toml` | anything ships |
 | Parser version | `thetadata-v3-parser/2.1.17` | `src/adapters/raw_store.py` | vendor-payload interpretation changes -- v2.1.15 replays the exact stored bytes under the captured content type and charset rather than a UTF-8-with-replacement reading of them |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
 | Manifest schema | `raw-capture-manifest/2.1.17` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
@@ -252,8 +252,9 @@ They move independently, and conflating them is how a change hides.
 | Analytical-readiness schema | `analytical-readiness/2.1.13` | `src/adapters/certification.py` | what a dataset-ready verdict rests on changes |
 | Raw-response schema | `raw-response/2.1.17` | `src/adapters/raw_store.py` | what a stored payload *is* changes -- v2.1.13 stores entity bytes rather than a re-encoding of a lossily decoded string, and v2.1.14 records the content type, the declared and selected charset, the decode status and the decoded-text hash alongside them |
 | Pricing-compatibility schema | `pricing-compatibility/2.1.22` | `src/config/compatibility.py` | what a dimension result *means* changes. Moved in v2.1.22: `MATCHED` on `RATE_UNITS` used to mean the vendor's published description was confirmed, and can now also mean it was contradicted by a live capture and the configuration matches the measured behaviour instead |
-| Pricing-evidence schema | `pricing-evidence/2.1.24` | `src/adapters/thetadata/live_behavior.py` | what a documented-versus-observed record must carry changes. New in v2.1.22: a v2.1.21 reader saw only the documented side and would report agreement where there is a conflict |
-| Capture-certification schema | `capture-certification/2.1.24` | `src/adapters/thetadata/capture_certification.py` | what an offline certification report derives from a capture changes |
+| Pricing-evidence schema | `pricing-evidence/2.1.25` | `src/adapters/thetadata/live_behavior.py` | what a documented-versus-observed record must carry changes. New in v2.1.22: a v2.1.21 reader saw only the documented side and would report agreement where there is a conflict. Moved in v2.1.25: an unresolved inference no longer yields a documented/observed verdict, and `DIVIDEND_CONVENTION` stopped being reported as documentation-resolved on evidence no capture carries |
+| Capture-rate-intent schema | `pricing-evidence/2.1.24` | `src/adapters/thetadata/live_behavior.py` | what a capture's *declared economic intent* must carry changes. **Deliberately not tracking the row above**, which is why it still reads `2.1.24`: this value is inside `rate_intent_fingerprint`, which an operator approves at dry-run time and a later capture is checked against, and the intent's fields did not change in v2.1.25 -- only the strictness of its reader. Bumping it would have moved every declared intent to announce a change in a different record |
+| Capture-certification schema | `capture-certification/2.1.25` | `src/adapters/thetadata/capture_certification.py` | what an offline certification report derives from a capture changes |
 | Raw-acquisition schema | `raw-acquisition/2.1.17` | `src/adapters/thetadata/raw_acquisition.py` | what an endpoint-by-endpoint acquisition report records changes |
 | Parser-report schema | `parser-report/2.1.17` | `src/adapters/thetadata/raw_acquisition.py` | what a parser claims about already-stored bytes changes |
 | Attempt-evidence schema | `attempt-evidence/2.1.17` | `src/adapters/http_attempts.py` | what reopening a persisted attempt log checks changes |

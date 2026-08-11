@@ -13,9 +13,16 @@
     "",
     "Every number below came out of that command. None was typed in.",
     "",
-    "The archive digest here is an UNVERIFIED external claim: the archive",
-    "was not present when this fixture was generated, so certification",
-    "recorded the claim and refused to call it a known identity."
+    "From v2.1.25 the archive digest here is VERIFIED, not a claim: the",
+    "archive was present, was hashed, was opened, and was found to hold this",
+    "capture's manifest, its run intent and all five raw payloads, each",
+    "rehashing to the digest the manifest records for it. Earlier fixtures",
+    "recorded the same digest as UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM",
+    "because nothing had opened a file.",
+    "",
+    "The documented rate unit here was re-derived from the pinned OpenAPI",
+    "document's own bytes on the run that produced this file, not read out",
+    "of the capture's run-intent.json."
   ],
   "access_mode": "THETA_TERMINAL_REST_V3",
   "analytical_readiness": "ADAPTER_CERTIFICATION_EVIDENCE",
@@ -26,15 +33,23 @@
     "IV_PRICE_BASIS",
     "UNDERLYING_SOURCE",
     "UNDERLYING_TIMESTAMP",
-    "DIVIDEND_CONVENTION",
+    "DIVIDEND_VALUE",
+    "MINIMUM_TIME_FLOOR",
     "CONTRACT_LIST_UNIVERSE"
   ],
-  "behavior_dimensions_unresolved": [],
+  "behavior_dimensions_unresolved": [
+    "DIVIDEND_CONVENTION",
+    "RISK_FREE_RATE"
+  ],
   "capture": {
-    "archive_byte_length": 0,
-    "archive_contains_capture_manifest": false,
-    "archive_digest_provenance": "UNVERIFIED_EXTERNAL_ARCHIVE_DIGEST_CLAIM",
-    "archive_identity_known": false,
+    "archive_byte_length": 1635919,
+    "archive_bytes_hashed": true,
+    "archive_contains_capture_manifest": true,
+    "archive_digest_provenance": "VERIFIED_FROM_BYTES",
+    "archive_identity_known": true,
+    "archive_matches_capture": true,
+    "archive_mismatch_reasons": [],
+    "archive_payloads_verified": 5,
     "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
     "captured_at": "2026-08-10T14:01:29.616899+00:00",
     "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
@@ -78,6 +93,21 @@
       "median_abs_delta_error": 0.011399364434035436,
       "rows": 7348
     }
+  ],
+  "documentary_evidence": {
+    "bundle_fingerprint": "e82371a7cf54644633ba95e6684029923a18bbb54336a6c67d47afd8a8b88a4d",
+    "content_location": "thetadata/1b/1b65f93c879a5ca4477a0ff9177235138e0c81840e0c7dddfbd9e34164b40b50.yaml",
+    "document_sha256": "1b65f93c879a5ca4477a0ff9177235138e0c81840e0c7dddfbd9e34164b40b50",
+    "documentary_authority": "REDERIVED_FROM_PINNED_DOCUMENT_BYTES",
+    "documentation_root": "C:\\Users\\cseri\\OneDrive\\Asztali g\u00e9p\\Levi\\t\u0151zsde\\gex-bot\\vendor_documentation",
+    "rules_rederived": [
+      "MINIMUM_TIME_FLOOR",
+      "OPEN_INTEREST_SETTLEMENT",
+      "RATE_UNITS"
+    ]
+  },
+  "documentation_live_conflicts": [
+    "RATE_UNITS"
   ],
   "endpoint_synchrony": {
     "identical_ask_ratio": 0.9699093157460841,
@@ -234,6 +264,23 @@
     "IV_PRICE_BASIS": "RESOLVED",
     "RATE_UNITS": "RESOLVED"
   },
+  "inference_models": {
+    "admissible_model_count": 1,
+    "admissible_models": [
+      {
+        "day_count": "ACT/365",
+        "rate_interpretation": "DECIMAL_ANNUAL_RATE"
+      }
+    ],
+    "numerical_best": {
+      "day_count": "ACT/365",
+      "rate_interpretation": "DECIMAL_ANNUAL_RATE"
+    },
+    "resolved_selected": {
+      "day_count": "ACT/365",
+      "rate_interpretation": "DECIMAL_ANNUAL_RATE"
+    }
+  },
   "iv_basis_comparison": [
     {
       "basis": "NBBO_MID",
@@ -256,6 +303,8 @@
   ],
   "open_interest_coverage": {
     "coverage_ratio": 0.9707337180544106,
+    "coverage_state": "OI_MISSING",
+    "duplicate_oi_identity_count": 0,
     "fully_missing_expirations": [
       "2026-09-16"
     ],
@@ -367,23 +416,27 @@
       }
     ],
     "missing_identities_hash": "f2cc65a79c4ca852f04493b7e64758c69c55cedb1d76b8b7e0a0e93972a87489",
+    "oi_covered": 14130,
     "oi_explicit_zero": 3692,
     "oi_missing": 426,
     "oi_present": 10438,
     "permits_trusted_aggregate": false,
+    "unexpected_oi_by_expiration": [],
+    "unexpected_oi_count": 0,
+    "unexpected_oi_identities_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "universe_count": 14556
   },
   "pricing_dimensions_still_unresolved": [
-    "DIVIDEND_VALUE",
-    "MINIMUM_TIME_FLOOR",
+    "DIVIDEND_CONVENTION",
     "RISK_FREE_RATE",
     "SOLVER_VERSION"
   ],
   "pricing_dimensions_supported_by_evidence": [
     "DAY_COUNT",
-    "DIVIDEND_CONVENTION",
+    "DIVIDEND_VALUE",
     "EXPIRATION_TIMESTAMP",
     "IV_PRICE_BASIS",
+    "MINIMUM_TIME_FLOOR",
     "RATE_UNITS",
     "UNDERLYING_SOURCE",
     "UNDERLYING_TIMESTAMP"
@@ -471,6 +524,7 @@
     "observed_vendor_rate_unit": "DECIMAL_ANNUAL_RATE",
     "rate_units_documentation_live_conflict": true,
     "vendor_effective_rate": 4.2,
+    "vendor_rate_identified": true,
     "wire_rate_value": 4.2
   },
   "rate_intent_binding": {
@@ -478,6 +532,7 @@
     "capture_records_binding_schema": false,
     "intent_schema_version": "raw-capture-intent/2.1.19",
     "rate_intent_fingerprint": "",
+    "rate_intent_schema_version": "",
     "source": "LEGACY_CAPTURE_DOCUMENTATION_DERIVED"
   },
   "rate_semantics": [
@@ -504,7 +559,7 @@
     },
     "records_verified": 5
   },
-  "report_hash": "025129637cb7508cbd150797be1b78a87826d9da167b28d7ca59be44d393666b",
+  "report_hash": "a03e6778c3f00565fefc354cb1581bdf4bb09f3f06edf127bf79af62f4a36a89",
   "resolved_day_count": "ACT_365",
   "resolved_expiration_clock": "16:00 America/New_York",
   "root_resolution": {
@@ -515,7 +570,7 @@
     "usable_rows": 2862
   },
   "rows_reconstructed": 7348,
-  "schema_version": "capture-certification/2.1.24",
+  "schema_version": "capture-certification/2.1.25",
   "theta_terminal_version": {
     "carried_in_capture": false,
     "note": "No response and no manifest field records the Theta Terminal build. Observed on the capture machine rather than in the capture, so it is context and not capture-bound evidence."
@@ -528,6 +583,13 @@
       "note": "no capture records an IV_PRICE_BASIS extraction, so this reading cannot be compared against a live finding as documentary evidence. The live finding stands on its own.",
       "origin": "REPOSITORY_CONSTANT_NOT_CAPTURE_BOUND",
       "reference": "components/schemas/first_order_greeks/properties/implied_vol"
+    },
+    {
+      "claim": "ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
+      "dimension": "DIVIDEND_CONVENTION",
+      "note": "the pinned document settles OPEN_INTEREST_SETTLEMENT, RATE_UNITS and MINIMUM_TIME_FLOOR, and nothing else. There is no DIVIDEND_CONVENTION extraction to re-derive, and the capture requested annual_dividend=0.0, under which every convention produces the same zero -- so the capture cannot distinguish them either. Resolving it would need a pinned extraction or a non-zero dividend, and this release has neither.",
+      "origin": "REPOSITORY_CONSTANT_NOT_CAPTURE_BOUND",
+      "reference": "ThetaData greeks article, annual_div"
     }
   ],
   "underlying_synchronization": {
@@ -591,8 +653,8 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -628,8 +690,8 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -679,8 +741,8 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -793,8 +855,8 @@
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -837,8 +899,8 @@
       {
         "basis": "LIVE_FIELD_READ",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -859,8 +921,8 @@
       {
         "basis": "LIVE_FIELD_READ",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -881,25 +943,86 @@
       {
         "basis": "REQUEST_BOUND",
         "capture": null,
-        "decision": "RESOLVED",
+        "decision": "NOT_IDENTIFIABLE",
         "dimension": "DIVIDEND_CONVENTION",
-        "documentation_matched": true,
-        "documentation_reference": "ThetaData greeks article, annual_div",
-        "documented_value": "ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
-        "governing_value": "ANNUAL_CASH_DIVIDEND_CONVERTED_TO_YIELD",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "",
         "metrics": [],
-        "notes": "effective dividend 0, effective q 0 for this capture.",
+        "notes": "No pinned documentary extraction establishes what annual_dividend means to the vendor, and a zero-dividend request cannot establish it either. Resolving this needs an extraction in the pinned bundle or a capture with a non-zero dividend; see unbound_documentary_claims.",
         "observed_value": "",
         "pricing_dimension": "DIVIDEND_CONVENTION",
         "rows_used": 0,
-        "scope": "annual_dividend=0.0 was requested, so this capture exercises only the zero case and cannot speak to non-zero handling",
+        "scope": "annual_dividend=0.0 was requested, so every dividend convention produces the same zero and none is distinguishable from the others by this capture",
+        "status": "UNRESOLVED"
+      },
+      {
+        "basis": "REQUEST_BOUND",
+        "capture": {
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "decision": "RESOLVED",
+        "dimension": "DIVIDEND_VALUE",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "0",
+        "metrics": [],
+        "notes": "The dividend amount the request carried, proved by the same binding that proves the rate value. Its interpretation is DIVIDEND_CONVENTION, which this capture does not settle.",
+        "observed_value": "0",
+        "pricing_dimension": "DIVIDEND_VALUE",
+        "rows_used": 14556,
+        "scope": "the verified greeks request for this capture",
+        "status": "LIVE_ONLY"
+      },
+      {
+        "basis": "REQUEST_BOUND",
+        "capture": {
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
+          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+        },
+        "decision": "INSUFFICIENT_DATA",
+        "dimension": "RISK_FREE_RATE",
+        "documentation_matched": false,
+        "documentation_reference": "",
+        "documented_value": "",
+        "governing_value": "",
+        "metrics": [],
+        "notes": "Established by an approval-bound rate intent read together with a resolved live rate reading. A capture with only one of the two leaves this open: an intent nobody checked against the vendor is a declaration, and a reading with no declared intent has nothing to be the rate *of*.",
+        "observed_value": "",
+        "pricing_dimension": "RISK_FREE_RATE",
+        "rows_used": 0,
+        "scope": "the economic rate this capture was approved to buy",
+        "status": "UNRESOLVED"
+      },
+      {
+        "basis": "PINNED_DOCUMENTATION",
+        "capture": null,
+        "decision": "RESOLVED",
+        "dimension": "MINIMUM_TIME_FLOOR",
+        "documentation_matched": true,
+        "documentation_reference": "components/parameters/greeks_version/description",
+        "documented_value": "60",
+        "governing_value": "60",
+        "metrics": [],
+        "notes": "Re-derived from the pinned document's bytes on this run, through a bundle whose fingerprint matched the manifest-bound approval. Documentary, not live: no row in this capture sits close enough to expiry to exercise the floor.",
+        "observed_value": "",
+        "pricing_dimension": "MINIMUM_TIME_FLOOR",
+        "rows_used": 0,
+        "scope": "greeks_version=latest, which is what this capture requested",
         "status": "DOCUMENTATION_ONLY"
       },
       {
         "basis": "LIVE_SET_COMPARISON",
         "capture": {
-          "archive_identity_known": false,
-          "archive_sha256": "",
+          "archive_identity_known": true,
+          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
           "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
           "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
         },
@@ -918,8 +1041,11 @@
         "status": "LIVE_ONLY"
       }
     ],
-    "schema_version": "pricing-evidence/2.1.24",
-    "unresolved": []
+    "schema_version": "pricing-evidence/2.1.25",
+    "unresolved": [
+      "DIVIDEND_CONVENTION",
+      "RISK_FREE_RATE"
+    ]
   },
   "vendor_clock_by_expiration": [
     {

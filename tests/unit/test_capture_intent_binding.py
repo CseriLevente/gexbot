@@ -22,6 +22,7 @@ from src.adapters.thetadata.capture_certification import (
     CaptureCertificationError,
     _expiry_day_window,
     _implied_year_candidates,
+    _recomputed_approval_hash,
     _resolve_root,
     certify_capture,
 )
@@ -122,10 +123,30 @@ def test_the_wire_value_must_express_the_economic_rate():
 
 
 def test_an_intent_the_approval_never_covered_is_refused(tmp_path):
+    """Link 2 on its own, with links 3 and 4 left intact.
+
+    Editing ``rate_intent_fingerprint`` and stopping there is caught by the
+    approval's own hash, which is a different check. To reach the
+    intent-vs-approval comparison the approval has to be internally coherent
+    *and* bound to the records -- so the hash is recomputed and restamped here,
+    which is what somebody rewriting history would have to do.
+    """
     root = write_capture(tmp_path / "cap", _corrected())
-    rewrite_intent(
-        root, lambda p: p["preflight_approval"].update(rate_intent_fingerprint="0" * 64)
-    )
+
+    def _reapprove(payload):
+        approval = payload["preflight_approval"]
+        approval["rate_intent_fingerprint"] = "0" * 64
+        approval["approval_hash"] = _recomputed_approval_hash(approval)
+        return approval["approval_hash"]
+
+    stored: dict[str, str] = {}
+    rewrite_intent(root, lambda p: stored.update(hash=_reapprove(p)))
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    for record in manifest["records"]:
+        record["preflight_approval_hash"] = stored["hash"]
+    manifest["manifest_hash"] = RawCaptureManifest.rebuilt_from(manifest).manifest_hash
+    (root / "manifest.json").write_text(json.dumps(manifest, default=str), "utf-8")
+
     with pytest.raises(CaptureCertificationError, match="approval was taken against"):
         certify_capture(root)
 
@@ -383,29 +404,81 @@ def test_a_caller_digest_is_recorded_as_a_claim_not_an_identity(tmp_path):
     assert report.archive_sha256 == ""
 
 
-def test_an_archive_is_hashed_and_matched_to_the_capture(tmp_path):
+def _full_archive(root: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    """A ZIP holding everything a recipient would need to re-verify."""
+    with zipfile.ZipFile(target, "w") as bundle:
+        bundle.write(root / "manifest.json", "capture/manifest.json")
+        bundle.write(root / "run-intent.json", "capture/run-intent.json")
+        for payload in sorted((root / "raw").iterdir()):
+            bundle.write(payload, f"capture/raw/{payload.name}")
+    return target
+
+
+def test_a_complete_archive_becomes_the_capture_archive_identity(tmp_path):
     root = write_capture(tmp_path / "cap", _corrected())
-    archive = tmp_path / "capture.zip"
+    archive = _full_archive(root, tmp_path / "capture.zip")
+
+    report = certify_capture(root, archive_path=archive)
+    assert report.archive.bytes_hashed is True
+    assert report.archive.contains_capture_manifest is True
+    assert report.archive.matches_capture is True
+    assert report.archive.known is True
+    assert report.archive.payloads_verified == 5
+    assert report.archive.sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert report.archive.byte_length == archive.stat().st_size
+    # Only now does the digest reach the identity every observation carries.
+    assert report.archive_sha256 == report.archive.sha256
+
+
+def test_a_manifest_only_archive_is_not_the_capture_archive(tmp_path):
+    """v2.1.24 called this a verified archive. A recipient could check nothing."""
+    root = write_capture(tmp_path / "cap", _corrected())
+    archive = tmp_path / "manifest-only.zip"
     with zipfile.ZipFile(archive, "w") as bundle:
         bundle.write(root / "manifest.json", "capture/manifest.json")
 
     report = certify_capture(root, archive_path=archive)
-    assert report.archive.known is True
-    assert report.archive.sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert report.archive.bytes_hashed is True
     assert report.archive.contains_capture_manifest is True
-    assert report.archive.byte_length == archive.stat().st_size
+    assert report.archive.matches_capture is False
+    assert report.archive.known is False
+    assert report.archive_sha256 == ""
+    assert any("run-intent" in r for r in report.archive.mismatch_reasons)
+    assert any("raw payload" in r for r in report.archive.mismatch_reasons)
 
 
-def test_an_archive_of_another_capture_is_not_matched(tmp_path):
+def test_an_archive_with_a_corrupted_payload_is_not_the_capture_archive(tmp_path):
     root = write_capture(tmp_path / "cap", _corrected())
-    other = write_capture(tmp_path / "other", SyntheticVendor())
-    archive = tmp_path / "wrong.zip"
+    archive = tmp_path / "corrupt.zip"
     with zipfile.ZipFile(archive, "w") as bundle:
-        bundle.write(other / "manifest.json", "capture/manifest.json")
+        bundle.write(root / "manifest.json", "capture/manifest.json")
+        bundle.write(root / "run-intent.json", "capture/run-intent.json")
+        for payload in sorted((root / "raw").iterdir()):
+            body = payload.read_bytes()
+            if "greeks" in payload.name:
+                body += b"# appended\n"
+            bundle.writestr(f"capture/raw/{payload.name}", body)
 
     report = certify_capture(root, archive_path=archive)
-    assert report.archive.known is True
+    assert report.archive.matches_capture is False
+    assert report.archive.known is False
+    assert any("hashes differently" in r for r in report.archive.mismatch_reasons)
+
+
+def test_an_unrelated_archive_is_never_stamped_onto_observations(tmp_path):
+    """The v2.1.24 defect exactly: a source ZIP hashed and adopted as identity."""
+    root = write_capture(tmp_path / "cap", _corrected())
+    other = write_capture(tmp_path / "other", SyntheticVendor())
+    archive = _full_archive(other, tmp_path / "wrong.zip")
+
+    report = certify_capture(root, archive_path=archive)
+    assert report.archive.bytes_hashed is True
     assert report.archive.contains_capture_manifest is False
+    assert report.archive.matches_capture is False
+    assert report.archive.known is False
+    assert report.archive_sha256 == ""
+    for observation in report.ledger.observations:
+        assert observation.capture is None or observation.capture.archive_sha256 == ""
 
 
 # ---------------------------------------------------------------------------
@@ -491,11 +564,18 @@ def test_pricing_dimensions_are_reported_apart_from_behaviour_dimensions(tmp_pat
     """An empty behaviour list must not read as analytical completeness."""
     report = certify_capture(write_capture(tmp_path / "cap", _corrected()))
     data = report.as_dict()
-    assert not data["behavior_dimensions_unresolved"]
-    # ... and yet the analytical layer still needs things this cannot give.
-    assert data["pricing_dimensions_still_unresolved"]
-    assert "RISK_FREE_RATE" in data["pricing_dimensions_still_unresolved"]
-    assert "UNDERLYING_TIMESTAMP" in data["pricing_dimensions_supported_by_evidence"]
+    supported = data["pricing_dimensions_supported_by_evidence"]
+    unresolved = data["pricing_dimensions_still_unresolved"]
+    assert "UNDERLYING_TIMESTAMP" in supported
+    # A correctly-approved capture *does* establish the economic rate, because
+    # a bound intent and a resolved live reading are both present.
+    assert "RISK_FREE_RATE" in supported
+    assert "DIVIDEND_VALUE" in supported
+    assert "MINIMUM_TIME_FLOOR" in supported
+    # ... and the analytical layer still needs things this cannot give.
+    assert "DIVIDEND_CONVENTION" in unresolved
+    assert "SOLVER_VERSION" in unresolved
+    assert not set(supported) & set(unresolved)
 
 
 def test_universe_coverage_maps_to_no_pricing_dimension():
@@ -517,6 +597,14 @@ def test_the_iv_documentary_claim_is_labelled_as_unbound(tmp_path):
 
 
 def test_an_extraction_from_another_document_is_refused(tmp_path):
+    """Repointing one extraction at a different document is refused.
+
+    v2.1.24 caught this by comparing the extraction's ``document_sha256``
+    against the bundle's. v2.1.25 catches it earlier and harder: the recorded
+    extraction is rebuilt as a typed object first, and its ``extraction_hash``
+    covers the document digest, so the edit contradicts the record's own hash
+    before anything is re-derived.
+    """
     root = write_capture(tmp_path / "cap", _corrected())
     rewrite_intent(
         root,
@@ -524,5 +612,5 @@ def test_an_extraction_from_another_document_is_refused(tmp_path):
             document_sha256="9" * 64
         ),
     )
-    with pytest.raises(CaptureCertificationError, match="belongs to another document"):
+    with pytest.raises(CaptureCertificationError, match="could not be re-derived"):
         certify_capture(root)

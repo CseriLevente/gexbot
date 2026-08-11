@@ -62,20 +62,34 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
     cap = data["capture"]
     request = data["capture_request"]
     economics = data["rate_economics"]
+
+    def _tri(value: object) -> str:
+        """``None`` prints as an explicit non-answer, never as ``False``."""
+        return "not-established" if value is None else str(value)
+
+    effective = economics["vendor_effective_rate"]
     lines = [
         f"capture         {cap['session_id']}",
         f"manifest        {cap['manifest_hash']} (recomputed from descriptors)",
-        f"archive         {cap['archive_sha256'] or '<not computed>'}",
+        f"archive         {cap['archive_sha256'] or '<not computed>'}"
+        f" (identity={cap['archive_identity_known']}, "
+        f"matches capture={cap['archive_matches_capture']})",
+        f"documentation   {data['documentary_evidence']['documentary_authority']}"
+        + (
+            f" [{', '.join(data['documentary_evidence']['rules_rederived'])}]"
+            if data["documentary_evidence"]["rules_rederived"]
+            else ""
+        ),
         f"records         {data['raw_record_verification']['records_verified']} verified",
         f"request         rate_value={request['greeks_rate_value']:g} "
         f"({request['binding']})",
-        f"vendor rate     r={economics['vendor_effective_rate']:g} "
+        f"vendor rate     r={'not-established' if effective is None else f'{effective:g}'} "
         f"| intended r={economics['intended_economic_rate']:g} "
         f"({economics['intended_rate_source']})",
         f"rate verdict    documentation conflict="
-        f"{economics['rate_units_documentation_live_conflict']} | "
+        f"{_tri(economics['rate_units_documentation_live_conflict'])} | "
         f"economically correct="
-        f"{economics['capture_effective_rate_matches_intended_rate']}",
+        f"{_tri(economics['capture_effective_rate_matches_intended_rate'])}",
     ]
     universe = data["universe"]
     lines.append(
@@ -86,8 +100,9 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
     oi = data["open_interest_coverage"]
     lines.append(
         f"open interest   present {oi['oi_present']:,} | explicit zero "
-        f"{oi['oi_explicit_zero']:,} | missing {oi['oi_missing']:,} "
-        f"({oi['coverage_ratio'] * 100:.3f}% covered)"
+        f"{oi['oi_explicit_zero']:,} | missing {oi['oi_missing']:,} | "
+        f"unexpected {oi['unexpected_oi_count']:,} "
+        f"({oi['coverage_ratio'] * 100:.3f}% covered) -> {oi['coverage_state']}"
     )
     if oi["fully_missing_expirations"]:
         lines.append(
@@ -136,6 +151,18 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
             for name, verdict in sorted(data["inference_decisions"].items())
         )
     )
+    models = data["inference_models"]
+    selected = models["resolved_selected"]
+    lines.append(
+        f"model           best fit "
+        f"{models['numerical_best']['rate_interpretation']}/"
+        f"{models['numerical_best']['day_count']} | selected "
+        + (
+            f"{selected['rate_interpretation']}/{selected['day_count']}"
+            if selected
+            else f"none ({models['admissible_model_count']} admissible)"
+        )
+    )
     roots = data["root_resolution"]
     lines.append(
         f"root choice     {roots['single_root_rows']} single, "
@@ -173,11 +200,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("capture_root", help="the directory a capture run created")
     parser.add_argument(
+        "--archive-path",
+        default="",
+        help=(
+            "the archive the capture was distributed as. Hashed here, opened, "
+            "and checked to hold this capture's manifest, its run intent and "
+            "every raw payload the manifest names. This is the only way an "
+            "archive digest becomes the capture's archive identity"
+        ),
+    )
+    parser.add_argument(
         "--archive-sha256",
         default="",
         help=(
-            "digest of the archive the capture was distributed as, recorded in "
-            "the report so a reader can tie it to the artefact they hold"
+            "a digest computed somewhere else. On its own it is recorded as an "
+            "unverified external claim and never as identity; alongside "
+            "--archive-path it is checked against the bytes"
         ),
     )
     parser.add_argument(
@@ -190,7 +228,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         report = certify_capture(
-            pathlib.Path(args.capture_root), archive_sha256=args.archive_sha256
+            pathlib.Path(args.capture_root),
+            archive_path=(
+                pathlib.Path(args.archive_path) if args.archive_path else None
+            ),
+            archive_sha256=args.archive_sha256,
         )
     except CaptureCertificationError as error:
         print(f"capture cannot be certified: {error}", file=sys.stderr)

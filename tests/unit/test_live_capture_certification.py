@@ -586,6 +586,13 @@ def test_the_first_capture_archive_is_verified_not_claimed(capture):
     assert archive["archive_mismatch_reasons"] == []
     # And it is not the manifest hash wearing the archive's name.
     assert archive["archive_sha256"] != archive["manifest_hash"]
+    # v2.1.26: the archived manifest was rebuilt rather than read, the archived
+    # run intent was compared by bytes, and five is out of five.
+    assert archive["archive_identity_schema_version"] == "archive-identity/2.1.26"
+    assert archive["archive_manifest_recomputed"] is True
+    assert archive["archive_run_intent_verified"] is True
+    assert archive["archive_records_expected"] == 5
+    assert len(archive["archive_run_intent_sha256"]) == 64
 
 
 def test_the_first_capture_documentation_is_rederived_not_recorded(capture):

@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.25"
+    assert package["project"]["version"] == "2.1.26"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -338,7 +338,12 @@ def test_all_three_versions_are_documented():
         # documentary readings from the pinned document instead of believing
         # what the capture recorded.
         "pricing-evidence/2.1.25",
-        "capture-certification/2.1.25",
+        # v2.1.26: what an archive has to be to *be* a capture's archive.
+        # Its own schema, because it moves for its own reasons -- the archived
+        # manifest is recomputed rather than read, the run intent is compared
+        # by bytes, and colliding entry names are refused.
+        "archive-identity/2.1.26",
+        "capture-certification/2.1.26",
         "pricing-compatibility/2.1.22",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",

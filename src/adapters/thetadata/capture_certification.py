@@ -84,7 +84,13 @@ __all__ = [
     "load_capture",
 ]
 
-CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.25"
+CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.26"
+
+#: Bumped when what it takes for an archive to *be* a capture's archive changes.
+#: v2.1.26 stops believing the archived manifest's stored digest, requires the
+#: archived run intent to be this capture's by bytes, and refuses an archive
+#: whose entry names collide once separators are normalised.
+ARCHIVE_IDENTITY_SCHEMA_VERSION = "archive-identity/2.1.26"
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -309,6 +315,17 @@ class LoadedCapture:
     #: The run-intent schema this capture was written under, which is what says
     #: whether a bound rate intent *should* have been present.
     intent_schema_version: str = ""
+    #: The manifest rebuilt from its own descriptors, kept so an archive can be
+    #: compared against *the reconstruction* rather than against a stored field.
+    rebuilt_manifest: Any | None = None
+    #: SHA-256 over the exact bytes of this capture's ``run-intent.json``. What
+    #: an archived copy has to equal to be this capture's run intent rather than
+    #: a file with the right name.
+    run_intent_sha256: str = ""
+
+    @property
+    def record_count(self) -> int:
+        return len(self.record_hashes)
 
     @property
     def records_are_post_binding(self) -> bool:
@@ -459,7 +476,7 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
     if not root.is_dir():
         raise CaptureCertificationError(f"{root} is not a directory")
 
-    manifest, _rebuilt = _verified_manifest(root)
+    manifest, rebuilt = _verified_manifest(root)
 
     tables: dict[str, list[dict[str, str]]] = {}
     record_hashes: dict[str, str] = {}
@@ -493,7 +510,8 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
             "records the requests it was about to make and what it meant by "
             "them; without it neither can be established."
         )
-    intent = json.loads(intent_path.read_bytes())
+    intent_bytes = intent_path.read_bytes()
+    intent = json.loads(intent_bytes)
     approval = _verified_approval(intent, manifest)
 
     return LoadedCapture(
@@ -515,6 +533,8 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
             intent, approval=approval, capture_root=root
         ),
         intent_schema_version=str(intent.get("schema_version", "")),
+        rebuilt_manifest=rebuilt,
+        run_intent_sha256=hashlib.sha256(intent_bytes).hexdigest(),
     )
 
 
@@ -890,15 +910,31 @@ class ArchiveIdentity:
     #: ``ABSENT``. Whether anybody hashed anything, and nothing more.
     provenance: str = "ABSENT"
     byte_length: int = 0
-    #: Whether the archive was opened and found to contain *this* capture.
+    #: Whether an archived manifest **rebuilt** to this capture's manifest.
+    #:
+    #: Derived from the reconstruction, not from a file with the right name and
+    #: the right ``session_id``: a forged manifest carrying a copied digest is
+    #: not this capture's manifest, and describing the archive as containing
+    #: one would be the same mistake in a different field.
     contains_capture_manifest: bool = False
-    #: Whether it contains the *whole* capture: the manifest, the run intent,
-    #: and every raw payload the manifest names, each hashing to the digest the
-    #: manifest records for it.
+    #: Whether it contains the *whole* capture: a manifest that rebuilds to this
+    #: capture's, the exact run intent, and every raw payload the reconstruction
+    #: names, each hashing to the digest the manifest records for it.
     matches_capture: bool = False
     #: Why not, when not. Empty when the archive matched.
     mismatch_reasons: tuple[str, ...] = ()
     payloads_verified: int = 0
+    #: Records the *recomputed* archive manifest names. The denominator
+    #: ``payloads_verified`` has to reach; published so a reader never has to
+    #: infer whether "5 verified" was five out of five.
+    records_expected: int = 0
+    #: Whether the archived manifest was rebuilt from its own descriptors and
+    #: agreed with both its stored digest and this capture's.
+    manifest_recomputed: bool = False
+    #: Whether the archived run intent is this capture's, compared by bytes.
+    run_intent_verified: bool = False
+    archive_run_intent_sha256: str = ""
+    schema_version: str = ARCHIVE_IDENTITY_SCHEMA_VERSION
 
     @property
     def bytes_hashed(self) -> bool:
@@ -924,6 +960,7 @@ class ArchiveIdentity:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "archive_identity_schema_version": self.schema_version,
             "archive_sha256": self.sha256,
             "archive_identity_known": self.known,
             "archive_bytes_hashed": self.bytes_hashed,
@@ -931,70 +968,214 @@ class ArchiveIdentity:
             "archive_digest_provenance": self.provenance,
             "archive_byte_length": self.byte_length,
             "archive_contains_capture_manifest": self.contains_capture_manifest,
+            "archive_manifest_recomputed": self.manifest_recomputed,
+            "archive_run_intent_verified": self.run_intent_verified,
+            "archive_run_intent_sha256": self.archive_run_intent_sha256,
             "archive_payloads_verified": self.payloads_verified,
+            "archive_records_expected": self.records_expected,
             "archive_mismatch_reasons": list(self.mismatch_reasons),
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _ArchiveInspection:
+    """What opening one archive established. Each field is checked separately.
+
+    A single ``matches`` boolean assembled from a chain of ``and``s is easy to
+    satisfy accidentally; these are the individual facts, and
+    :attr:`matches` requires all of them.
+    """
+
+    contains_capture_manifest: bool = False
+    manifest_recomputed: bool = False
+    run_intent_verified: bool = False
+    archive_run_intent_sha256: str = ""
+    payloads_verified: int = 0
+    records_expected: int = 0
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def disqualifying(self) -> tuple[str, ...]:
+        return tuple(r for r in self.reasons if "not required" not in r)
+
+    @property
+    def matches(self) -> bool:
+        return (
+            self.contains_capture_manifest
+            and self.manifest_recomputed
+            and self.run_intent_verified
+            and self.records_expected > 0
+            and self.payloads_verified == self.records_expected
+            and not self.disqualifying
+        )
+
+
+def _canonical_entries(
+    bundle: zipfile.ZipFile,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Map canonical path -> stored entry name, and report every collision.
+
+    **Separators are normalised, and normalising creates the hazard.** The ZIP
+    specification says forward slashes and ``zipfile.write`` produces them, but
+    the real first capture was archived by a Windows tool that wrote
+    ``raw\\name``; comparing those against a path joined with ``/`` finds
+    nothing, so v2.1.25 folded ``\\`` to ``/`` before looking anything up.
+
+    That fold is many-to-one. An archive holding *both* ``raw/foo.raw`` and
+    ``raw\\foo.raw`` with different bytes collapses to one key, and which one
+    survives is decided by iteration order over the ZIP's central directory --
+    so the evidence a verifier reads is chosen by how somebody ordered entries.
+    A plain duplicate of the same name does the same thing; ZIP permits that
+    too.
+
+    So collisions are detected and the archive is refused rather than resolved.
+    There is no correct winner to pick.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    entries: dict[str, str] = {}
+    for name in bundle.namelist():
+        canonical = name.replace("\\", "/")
+        counts[canonical] += 1
+        entries.setdefault(canonical, name)
+    return entries, tuple(sorted(k for k, n in counts.items() if n > 1))
+
+
 def _archive_contents(
-    path: pathlib.Path, *, session_id: str, manifest_hash: str
-) -> tuple[bool, bool, int, tuple[str, ...]]:
+    path: pathlib.Path,
+    *,
+    session_id: str,
+    manifest_hash: str,
+    rebuilt_manifest: Any,
+    run_intent_sha256: str,
+) -> _ArchiveInspection:
     """Open the archive and decide whether it holds *the whole capture*.
 
-    Returns ``(contains_manifest, matches, payloads_verified, reasons)``.
+    A matching manifest is where the search starts, not where it ends, and
+    v2.1.25 got the start wrong as well. It looked for a ``manifest.json``
+    whose ``session_id`` and ``manifest_hash`` *fields* read correctly and never
+    recomputed either. A file carrying the right session id, a copied digest and
+    ``records: []`` therefore passed, alongside an empty run intent and no
+    payloads at all -- and reported ``archive_matches_capture = true`` with
+    ``archive_payloads_verified = 0``, because zero records have zero missing
+    payloads.
 
-    A matching manifest is where the search starts, not where it ends. A ZIP
-    holding one ``manifest.json`` and nothing else satisfies "contains the
-    capture manifest" completely, and is not an archive of the capture -- a
-    reader handed it could re-verify nothing. So the archive must also carry the
-    run intent and *every* payload the manifest names, each hashing to the
-    digest the manifest records. That is the minimum at which "this is the
-    archive of that capture" is a checkable statement rather than a label.
+    So the archived manifest is rebuilt from its own descriptors through the
+    same reconstruction the root manifest goes through, and the recomputation --
+    not the stored field -- has to agree with both the field beside it and the
+    capture being certified. Then the record count and the descriptors
+    themselves are compared, the run intent is compared by bytes, and every
+    payload the reconstruction names is rehashed.
     """
+    from src.adapters.raw_store import RawCaptureManifest
+
     reasons: list[str] = []
     try:
         with zipfile.ZipFile(path) as bundle:
-            # **Separators are normalised.** The ZIP specification says forward
-            # slashes and ``zipfile.write`` produces them, but the real first
-            # capture was archived by a Windows tool that wrote ``raw\name``.
-            # Comparing those against a path this code joins with ``/`` finds
-            # nothing, and "every payload is absent" is indistinguishable from
-            # a genuinely incomplete archive.
-            held = {name.replace("\\", "/"): name for name in bundle.namelist()}
+            held, collisions = _canonical_entries(bundle)
+            if collisions:
+                return _ArchiveInspection(
+                    reasons=tuple(
+                        f"two archive entries share the canonical path {name!r}; "
+                        "which one a verifier reads would be decided by entry "
+                        "order"
+                        for name in collisions
+                    )
+                )
+
+            candidate: dict[str, Any] | None = None
             prefix = ""
-            found = False
-            for normalised, actual_name in sorted(held.items()):
-                if not normalised.endswith("manifest.json"):
+            for canonical, stored in sorted(held.items()):
+                if not canonical.endswith("manifest.json"):
                     continue
                 try:
-                    payload = json.loads(bundle.read(actual_name))
-                except (json.JSONDecodeError, KeyError):
+                    payload = json.loads(bundle.read(stored))
+                except (json.JSONDecodeError, KeyError, ValueError):
                     continue
-                if (
-                    str(payload.get("session_id", "")) == session_id
-                    and str(payload.get("manifest_hash", "")) == manifest_hash
-                ):
-                    found = True
-                    prefix = normalised[: -len("manifest.json")]
+                if str(payload.get("session_id", "")) == session_id:
+                    candidate = payload
+                    prefix = canonical[: -len("manifest.json")]
                     break
-            if not found:
-                return False, False, 0, ("no manifest for this capture session",)
+            if candidate is None:
+                return _ArchiveInspection(
+                    reasons=("no manifest for this capture session",)
+                )
 
-            manifest = json.loads(bundle.read(held[f"{prefix}manifest.json"]))
-            if f"{prefix}run-intent.json" not in held:
+            # -- the manifest, recomputed ----------------------------------
+            #
+            # A manifest *naming* this session has been found. Whether it is
+            # this capture's manifest is decided below, by rebuilding it --
+            # never by the fact that a file with the right name and the right
+            # session id turned up. ``contains_capture_manifest`` reports the
+            # rebuilt answer, so a forgery carrying the right session id is not
+            # described as containing the capture's manifest.
+            stated = str(candidate.get("manifest_hash", ""))
+            try:
+                rebuilt = RawCaptureManifest.rebuilt_from(candidate)
+            except Exception as error:  # a manifest that will not reconstruct
+                return _ArchiveInspection(
+                    reasons=(f"the archived manifest cannot be rebuilt: {error}",),
+                )
+            recomputed = rebuilt.manifest_hash
+            if recomputed != stated:
+                reasons.append(
+                    f"the archived manifest's descriptors hash to {recomputed} "
+                    f"and it states {stated}"
+                )
+            if recomputed != manifest_hash:
+                reasons.append(
+                    f"the archived manifest rebuilds to {recomputed} and this "
+                    f"capture's manifest is {manifest_hash}"
+                )
+            expected_records = len(rebuilt_manifest.records)
+            if len(rebuilt.records) != expected_records:
+                reasons.append(
+                    f"the archived manifest names {len(rebuilt.records)} records "
+                    f"and this capture has {expected_records}"
+                )
+            # Descriptor equality, compared rather than inferred from the hash
+            # agreeing. The hash covers these, so this cannot fail while the
+            # hashes match -- which is the point: it is the assumption written
+            # down as a check, and it is what fails first if the digest ever
+            # stops covering a field somebody adds.
+            if rebuilt.semantic_payload() != rebuilt_manifest.semantic_payload():
+                reasons.append(
+                    "the archived manifest's descriptors differ from this capture's"
+                )
+            manifest_recomputed = not reasons
+
+            # -- the run intent, by bytes ----------------------------------
+            archived_intent = ""
+            intent_entry = f"{prefix}run-intent.json"
+            if intent_entry not in held:
                 reasons.append("run-intent.json is absent")
+            else:
+                archived_intent = hashlib.sha256(
+                    bundle.read(held[intent_entry])
+                ).hexdigest()
+                if archived_intent != run_intent_sha256:
+                    reasons.append(
+                        f"the archived run intent hashes to {archived_intent} "
+                        f"and this capture's is {run_intent_sha256}. A file with "
+                        "the right name is not the run intent"
+                    )
+            run_intent_verified = bool(archived_intent) and (
+                archived_intent == run_intent_sha256
+            )
+
+            # -- every payload the reconstruction names --------------------
             verified = 0
-            for record in manifest.get("records", []):
-                location = str(record.get("payload_location", "")).replace("\\", "/")
+            for record in rebuilt.records:
+                location = str(record.payload_location).replace("\\", "/")
                 entry = f"{prefix}raw/{location}"
                 if entry not in held:
                     reasons.append(f"raw payload {location} is absent")
                     continue
                 actual = hashlib.sha256(bundle.read(held[entry])).hexdigest()
-                if actual != str(record.get("payload_hash", "")):
+                if actual != record.payload_hash:
                     reasons.append(f"raw payload {location} hashes differently")
                     continue
                 verified += 1
+
             # Present when a capture writes them, and worth reporting -- but a
             # capture is re-verifiable without them, so their absence is noted
             # rather than disqualifying. Named as the capture writer actually
@@ -1009,20 +1190,28 @@ def _archive_contents(
                 if f"{prefix}{optional}" not in held:
                     reasons.append(f"{optional} is absent (not required)")
     except (zipfile.BadZipFile, json.JSONDecodeError, KeyError, ValueError) as error:
-        return False, False, 0, (f"the archive could not be read: {error}",)
+        return _ArchiveInspection(reasons=(f"the archive could not be read: {error}",))
 
-    disqualifying = tuple(r for r in reasons if "not required" not in r)
-    return True, not disqualifying, verified, tuple(reasons)
+    return _ArchiveInspection(
+        contains_capture_manifest=(recomputed == manifest_hash),
+        manifest_recomputed=manifest_recomputed,
+        run_intent_verified=run_intent_verified,
+        archive_run_intent_sha256=archived_intent,
+        payloads_verified=verified,
+        records_expected=expected_records,
+        reasons=tuple(reasons),
+    )
 
 
 def _archive_identity(
     *,
     archive_path: pathlib.Path | str | None,
     archive_sha256: str,
-    session_id: str,
-    manifest_hash: str,
+    capture: LoadedCapture,
 ) -> ArchiveIdentity:
     """Hash the archive, check it is *this* capture's, or record that nobody did."""
+    session_id = capture.session_id
+    manifest_hash = capture.manifest_hash
     if archive_path is None:
         if not archive_sha256:
             return ArchiveIdentity()
@@ -1051,17 +1240,25 @@ def _archive_identity(
         raise CaptureCertificationError(
             f"{path} hashes to {digest} and the caller expected {archive_sha256}"
         )
-    contains, matches, verified, reasons = _archive_contents(
-        path, session_id=session_id, manifest_hash=manifest_hash
+    seen = _archive_contents(
+        path,
+        session_id=session_id,
+        manifest_hash=manifest_hash,
+        rebuilt_manifest=capture.rebuilt_manifest,
+        run_intent_sha256=capture.run_intent_sha256,
     )
     return ArchiveIdentity(
         sha256=digest,
         provenance="VERIFIED_FROM_BYTES",
         byte_length=len(body),
-        contains_capture_manifest=contains,
-        matches_capture=matches,
-        payloads_verified=verified,
-        mismatch_reasons=reasons,
+        contains_capture_manifest=seen.contains_capture_manifest,
+        matches_capture=seen.matches,
+        payloads_verified=seen.payloads_verified,
+        records_expected=seen.records_expected,
+        manifest_recomputed=seen.manifest_recomputed,
+        run_intent_verified=seen.run_intent_verified,
+        archive_run_intent_sha256=seen.archive_run_intent_sha256,
+        mismatch_reasons=seen.reasons,
     )
 
 
@@ -2968,8 +3165,7 @@ def certify_capture(
     archive = _archive_identity(
         archive_path=archive_path,
         archive_sha256=archive_sha256,
-        session_id=capture.session_id,
-        manifest_hash=capture.manifest_hash,
+        capture=capture,
     )
     identity = CaptureIdentity(
         session_id=capture.session_id,

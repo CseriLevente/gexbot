@@ -1,5 +1,61 @@
 ﻿# Changelog
 
+## 2.1.26 - capture archive identity
+
+Four defects found reviewing v2.1.25's archive verification. No capture was
+taken, and nothing outside archive identity was touched.
+
+v2.1.25 decided whether an archive *was* a capture's archive by reading fields.
+A `manifest.json` whose `session_id` and `manifest_hash` said the right things,
+a `run-intent.json` that existed under that name, and a payload count that was
+allowed to be zero. None of the three was recomputed.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `VALIDATED_AGAINST_ONE_LIVE_THETADATA_CAPTURE` |
+`NOT_READY_FOR_ANALYTICAL_DATASET`.
+
+### Defects fixed
+
+| S | Defect in v2.1.25 | Why it mattered | Fix |
+|---|---|---|---|
+| 1 | The archived manifest's `manifest_hash` was compared as a string, never recomputed | A file carrying the correct `session_id`, a copied digest and `records: []`, beside an empty run intent and no payloads at all, reported `archive_matches_capture = true`, `archive_identity_known = true` and `archive_payloads_verified = 0` — because zero records have zero missing payloads | The archived manifest is rebuilt through `RawCaptureManifest.rebuilt_from` and the *recomputation* must equal both the digest stored beside it and this capture's. Record count and descriptors are compared too |
+| 2 | The archived run intent was checked for presence | A genuine manifest, all five genuine payloads and `run-intent.json = {}` was accepted as the capture's archive | The archived run intent must hash to the same SHA-256 as this capture's `run-intent.json`, over exact bytes. `archive_run_intent_sha256` and `archive_run_intent_verified` are published |
+| 3 | Separator normalisation folded `\` to `/` into a dictionary | An archive holding both `raw/foo.raw` and `raw\foo.raw` with different bytes collapsed to one key, and which bytes a verifier read was decided by entry order. Written tampered-first, v2.1.25 read the genuine copy and reported a complete verified archive while the archive still carried the tampered one | Colliding canonical names — including a plainly duplicated name, which ZIP also permits — are detected before anything is read, and the archive is refused. There is no correct winner to pick |
+| 4 | `payloads_verified` had no denominator | "5 verified" and "0 verified" were equally satisfying | `archive_records_expected` comes from the recomputed manifest, and identity requires `payloads_verified == records_expected > 0` |
+
+### A correction to the v2.1.25 entry
+
+That release said the first capture's archive stores backslashes and that
+`zipfile.write` never reproduces them. Both halves are true — the archive holds
+22 backslash bytes, confirmed against the raw file and by .NET — but the
+conclusion drawn from it was not.
+
+CPython's `ZipInfo.__init__` rewrites `\` to `/` whenever `os.sep` is `\`, on
+read as well as on write. So on Windows `namelist()` returns `raw/name` for
+that archive and the forward-slash lookup would have worked without any
+normalisation; the fold is load-bearing on **Linux**, where the backslashes
+survive. The verification that "confirmed" the v2.1.25 fix ran on Windows and
+could not have distinguished the two, and CI never touched the real archive
+because it is not in the repository.
+
+The normalisation was right. The evidence given for it was not, and it went
+untested on the platform where it matters. `test_a_backslash_stored_archive_is_the_captures_archive`
+now builds an archive with literal backslashes on either platform by setting
+`ZipInfo.filename` after construction, which is the only way past that rewrite.
+
+### Versions
+
+`capture-certification/2.1.26`, `archive-identity/2.1.26` (new), package
+`2.1.26`. The request plan, the rate intent, the parser and the GEX engine are
+untouched, as is every vendor finding: `test_certification_is_unchanged_by_the_archive`
+compares thirteen report sections with and without an archive.
+
+### The first capture is unchanged
+
+Its real archive `5fc25800…` still verifies — `archive_matches_capture = true`,
+`archive_identity_known = true`, 5 of 5 payloads rehashed, and now with the
+archived run intent proved equal to the capture's by bytes.
+
 ## 2.1.25 - certification evidence integrity
 
 Nine defects found reviewing v2.1.24 before capture #2. No capture was taken.

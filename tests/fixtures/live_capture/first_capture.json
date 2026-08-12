@@ -47,9 +47,14 @@
     "archive_contains_capture_manifest": true,
     "archive_digest_provenance": "VERIFIED_FROM_BYTES",
     "archive_identity_known": true,
+    "archive_identity_schema_version": "archive-identity/2.1.26",
+    "archive_manifest_recomputed": true,
     "archive_matches_capture": true,
     "archive_mismatch_reasons": [],
     "archive_payloads_verified": 5,
+    "archive_records_expected": 5,
+    "archive_run_intent_sha256": "6fcd0526e49ac7685fe69814cc95ce7ae80d1f1da122de58d7010858ec42603c",
+    "archive_run_intent_verified": true,
     "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
     "captured_at": "2026-08-10T14:01:29.616899+00:00",
     "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
@@ -559,7 +564,7 @@
     },
     "records_verified": 5
   },
-  "report_hash": "a03e6778c3f00565fefc354cb1581bdf4bb09f3f06edf127bf79af62f4a36a89",
+  "report_hash": "4644eb5a6a57040d4fe82df57b90b8f22c9f0db38c68551a1488a9a9138a77de",
   "resolved_day_count": "ACT_365",
   "resolved_expiration_clock": "16:00 America/New_York",
   "root_resolution": {
@@ -570,7 +575,7 @@
     "usable_rows": 2862
   },
   "rows_reconstructed": 7348,
-  "schema_version": "capture-certification/2.1.25",
+  "schema_version": "capture-certification/2.1.26",
   "theta_terminal_version": {
     "carried_in_capture": false,
     "note": "No response and no manifest field records the Theta Terminal build. Observed on the capture machine rather than in the capture, so it is context and not capture-bound evidence."

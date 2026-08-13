@@ -251,19 +251,28 @@ DIVIDEND_TOLERANCE = 1e-9
 #: The pinned OpenAPI document describes the parameter as a percent. The first
 #: live capture sent ``4.2`` on that basis and the returned Greeks are only
 #: reproducible with ``r = 4.2`` -- 420%. Reconstructing 7,348 usable rows put
-#: the delta RMSE at 1.75e-04 under ``r=4.2`` and 2.32e-01 under ``r=0.042``, a
-#: separation of three orders of magnitude with no ambiguity left in it.
+#: the delta RMSE at 1.58e-04 under ``r=4.2`` and 2.32e-01 under ``r=0.042``.
 #:
-#: Pinned here rather than derived at import so the pipeline does not need the
+#: **Confirmed forwards by the second capture**, which is the stronger evidence:
+#: the first proved the reading by getting the economics wrong, and a mistake
+#: that reproduces is still only one observation. The second sent ``0.042``
+#: under this measured reading and reconstructs at 9.60e-05 against 1.80e-02
+#: over 11,442 rows -- the same conclusion from a capture that priced what it
+#: intended.
+#:
+#: Pinned here rather than derived at import so the pipeline does not need a
 #: capture directory present to build a correct request. The derivation lives in
 #: :mod:`src.adapters.thetadata.capture_certification` and is re-runnable
-#: offline against the archive named below.
+#: offline against either archive.
 OBSERVED_RATE_UNITS: RateUnit = RateUnit.DECIMAL_ANNUAL_RATE
 
-#: Where a reader checks the measurement above.
+#: Where a reader checks the measurement above. A citation, not a scope: it
+#: names the captures the reading was measured from, and naming them is the
+#: point. Nothing derives behaviour from these session ids.
 LIVE_RATE_UNIT_REFERENCE = (
     "docs/ADAPTER_CERTIFICATION.md#rate-units "
-    "(capture-20260810T140129Z-2ef4f56270c1447b)"
+    "(measured in capture-20260810T140129Z-2ef4f56270c1447b, "
+    "confirmed in capture-20260812T153415Z-a3c594606c4c64c0)"
 )
 
 

@@ -29,15 +29,15 @@
     "UNDERLYING_SOURCE",
     "UNDERLYING_TIMESTAMP",
     "DIVIDEND_VALUE",
+    "RISK_FREE_RATE",
     "MINIMUM_TIME_FLOOR",
     "CONTRACT_LIST_UNIVERSE"
   ],
   "behavior_dimensions_unresolved": [
-    "DIVIDEND_CONVENTION",
-    "RISK_FREE_RATE"
+    "DIVIDEND_CONVENTION"
   ],
   "capture": {
-    "archive_byte_length": 1635919,
+    "archive_byte_length": 1835721,
     "archive_bytes_hashed": true,
     "archive_contains_capture_manifest": true,
     "archive_digest_provenance": "VERIFIED_FROM_BYTES",
@@ -48,18 +48,18 @@
     "archive_mismatch_reasons": [],
     "archive_payloads_verified": 5,
     "archive_records_expected": 5,
-    "archive_run_intent_sha256": "6fcd0526e49ac7685fe69814cc95ce7ae80d1f1da122de58d7010858ec42603c",
+    "archive_run_intent_sha256": "84efb3526bacedf5c61bd0c24811bf534db17e88b85094df433251843a121a70",
     "archive_run_intent_verified": true,
-    "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-    "captured_at": "2026-08-10T14:01:29.616899+00:00",
-    "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+    "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+    "captured_at": "2026-08-12T15:34:15.252153+00:00",
+    "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
     "parser_version": "thetadata-v3-parser/2.1.17",
-    "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+    "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
   },
   "capture_request": {
     "binding": "RECOMPUTED_AGAINST_MANIFEST_PLANNED_REQUEST_HASH",
     "greeks_annual_dividend": 0.0,
-    "greeks_rate_value": 4.2,
+    "greeks_rate_value": 0.042,
     "verified_endpoints": [
       "/v3/index/snapshot/price",
       "/v3/option/list/contracts/quote",
@@ -70,28 +70,28 @@
   },
   "day_count_comparison": [
     {
-      "delta_rmse": 0.0001584804637398003,
+      "delta_rmse": 9.604725555390033e-05,
       "hypothesis": "ACT/365",
-      "median_abs_delta_error": 4.434673004381621e-05,
-      "rows": 7348
+      "median_abs_delta_error": 5.728302685256725e-05,
+      "rows": 11442
     },
     {
-      "delta_rmse": 0.013961639481461724,
+      "delta_rmse": 0.005305459563007872,
       "hypothesis": "ACT/365.25",
-      "median_abs_delta_error": 0.00018963728248269467,
-      "rows": 7348
+      "median_abs_delta_error": 0.0001437042486956766,
+      "rows": 11442
     },
     {
-      "delta_rmse": 0.013486576120886202,
+      "delta_rmse": 0.0013692080289346258,
       "hypothesis": "ACT/360",
-      "median_abs_delta_error": 0.00044613922678004084,
-      "rows": 7348
+      "median_abs_delta_error": 0.0007820639431106568,
+      "rows": 11442
     },
     {
-      "delta_rmse": 0.09021003920376473,
+      "delta_rmse": 0.02828446668486261,
       "hypothesis": "ACT/252",
-      "median_abs_delta_error": 0.011399364434035436,
-      "rows": 7348
+      "median_abs_delta_error": 0.02372689413946176,
+      "rows": 11442
     }
   ],
   "documentary_evidence": {
@@ -110,35 +110,33 @@
     "RATE_UNITS"
   ],
   "endpoint_synchrony": {
-    "identical_ask_ratio": 0.9699093157460841,
-    "identical_bid_ratio": 0.9689475130530365,
-    "identical_timestamp_ratio": 0.7489007969222314,
+    "identical_ask_ratio": 0.9360599863667348,
+    "identical_bid_ratio": 0.9317655078391275,
+    "identical_timestamp_ratio": 0.6447852760736197,
     "is_atomic": false,
-    "max_gap_seconds": 51.593,
-    "overlap": 14556,
-    "p99_gap_seconds": 2.444
+    "max_gap_seconds": 270.021,
+    "overlap": 14670,
+    "p99_gap_seconds": 6.724
   },
   "expiration_clock_evidence": {
-    "boundary_first_whole_day": "2026-08-17",
-    "boundary_gap_days": 3,
-    "boundary_last_intraday": "2026-08-14",
-    "boundary_status": "OPEN",
+    "boundary_first_whole_day": "2026-08-19",
+    "boundary_gap_days": 1,
+    "boundary_last_intraday": "2026-08-18",
+    "boundary_status": "RESOLVED",
     "contradicting_count": 26,
-    "implied_clock_et": "16:01 America/New_York",
-    "implied_clock_seconds_after_midnight": 57669.37055195574,
+    "implied_clock_et": "16:02 America/New_York",
+    "implied_clock_seconds_after_midnight": 57740.06321249613,
     "intraday_count": 5,
     "intraday_expirations": [
-      "2026-08-10",
-      "2026-08-11",
       "2026-08-12",
       "2026-08-13",
-      "2026-08-14"
+      "2026-08-14",
+      "2026-08-17",
+      "2026-08-18"
     ],
     "scope_is_global": false,
     "unexplained_expirations": [],
     "whole_day_expirations": [
-      "2026-08-17",
-      "2026-08-18",
       "2026-08-19",
       "2026-08-20",
       "2026-08-21",
@@ -159,90 +157,92 @@
       "2026-09-14",
       "2026-09-15",
       "2026-09-16",
+      "2026-09-17",
       "2026-09-18",
       "2026-09-21",
       "2026-09-25",
-      "2026-09-30"
+      "2026-09-30",
+      "2026-10-02"
     ]
   },
   "expiration_time_comparison": [
     {
-      "delta_rmse": 0.009037917931919043,
+      "delta_rmse": 0.0018194128344400146,
       "hypothesis": "15:30 America/New_York",
-      "median_abs_delta_error": 0.00011396331061761531,
-      "rows": 1592
+      "median_abs_delta_error": 0.0003192267176485783,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.007796395614686174,
+      "delta_rmse": 0.0015158252169558519,
       "hypothesis": "15:35 America/New_York",
-      "median_abs_delta_error": 9.443064699407851e-05,
-      "rows": 1592
+      "median_abs_delta_error": 0.0002710064956112507,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.006476606313205351,
+      "delta_rmse": 0.0012141550084359713,
       "hypothesis": "15:40 America/New_York",
-      "median_abs_delta_error": 8.322655825197571e-05,
-      "rows": 1592
+      "median_abs_delta_error": 0.00022280079896216942,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.005068394950977941,
+      "delta_rmse": 0.0009144381949504481,
       "hypothesis": "15:45 America/New_York",
-      "median_abs_delta_error": 7.771235992576678e-05,
-      "rows": 1592
+      "median_abs_delta_error": 0.00017792787400744414,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.003563182682879667,
+      "delta_rmse": 0.0006169983794538298,
       "hypothesis": "15:50 America/New_York",
-      "median_abs_delta_error": 7.443821745340944e-05,
-      "rows": 1592
+      "median_abs_delta_error": 0.00012984915747810133,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.0019576195601976668,
+      "delta_rmse": 0.0003237161616889848,
       "hypothesis": "15:55 America/New_York",
-      "median_abs_delta_error": 7.05562951102821e-05,
-      "rows": 1592
+      "median_abs_delta_error": 8.379401555492439e-05,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.00034791561392758294,
+      "delta_rmse": 7.682628242355127e-05,
       "hypothesis": "16:00 America/New_York",
-      "median_abs_delta_error": 4.795259171688133e-05,
-      "rows": 1592
+      "median_abs_delta_error": 5.588144779173883e-05,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.001644397237812145,
+      "delta_rmse": 0.00028569843688680785,
       "hypothesis": "16:05 America/New_York",
-      "median_abs_delta_error": 8.061784474510146e-05,
-      "rows": 1592
+      "median_abs_delta_error": 6.84215764503171e-05,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.0035728405261937334,
+      "delta_rmse": 0.0005742459084118023,
       "hypothesis": "16:10 America/New_York",
-      "median_abs_delta_error": 0.00010468740056420782,
-      "rows": 1592
+      "median_abs_delta_error": 9.387643967924694e-05,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.0056063270033672955,
+      "delta_rmse": 0.0008650353086415575,
       "hypothesis": "16:15 America/New_York",
-      "median_abs_delta_error": 0.00012956954365611354,
-      "rows": 1592
+      "median_abs_delta_error": 0.00013165669931602402,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.007723726714534073,
+      "delta_rmse": 0.0011555718957141537,
       "hypothesis": "16:20 America/New_York",
-      "median_abs_delta_error": 0.00015465430047318686,
-      "rows": 1592
+      "median_abs_delta_error": 0.00017788297504027094,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.009905131439049687,
+      "delta_rmse": 0.0014454146437570905,
       "hypothesis": "16:25 America/New_York",
-      "median_abs_delta_error": 0.0001862170350517058,
-      "rows": 1592
+      "median_abs_delta_error": 0.0002235998477278173,
+      "rows": 2298
     },
     {
-      "delta_rmse": 0.01212826653512948,
+      "delta_rmse": 0.0017344543213753457,
       "hypothesis": "16:30 America/New_York",
-      "median_abs_delta_error": 0.00021693880382834892,
-      "rows": 1592
+      "median_abs_delta_error": 0.0002747641456170638,
+      "rows": 2298
     }
   ],
   "fitting_method": {
@@ -255,8 +255,7 @@
     "underlying": "the underlying price embedded in the greeks response"
   },
   "gex_blockers": [
-    "the vendor priced this capture at r=4.2 and the request meant r=0.042, a factor of 100. Every implied volatility and every delta in it describes a market that does not exist. The capture remains the evidence that established the rate semantics and must not be discarded.",
-    "426 contract identities have no open-interest row. Open interest is the linear weight on every GEX term and there is no evidence-backed policy for an absent one, so an aggregate would be choosing silently."
+    "416 contract identities have no open-interest row. Open interest is the linear weight on every GEX term and there is no evidence-backed policy for an absent one, so an aggregate would be choosing silently."
   ],
   "inference_decisions": {
     "DAY_COUNT": "RESOLVED",
@@ -284,151 +283,110 @@
   "iv_basis_comparison": [
     {
       "basis": "NBBO_MID",
-      "median_abs_iv_error": 5.0581442555430733e-05,
-      "rows": 2868,
-      "within_half_tick_ratio": 0.49337517433751743
+      "median_abs_iv_error": 4.89417037696227e-05,
+      "rows": 5835,
+      "within_half_tick_ratio": 0.5105398457583548
     },
     {
       "basis": "BID",
-      "median_abs_iv_error": 0.004986929120127437,
-      "rows": 2868,
-      "within_half_tick_ratio": 0.0003486750348675035
+      "median_abs_iv_error": 0.000370112047189633,
+      "rows": 5519,
+      "within_half_tick_ratio": 0.0001811922449719152
     },
     {
       "basis": "ASK",
-      "median_abs_iv_error": 0.005059261821667049,
-      "rows": 2868,
+      "median_abs_iv_error": 0.00048324334966004523,
+      "rows": 5835,
       "within_half_tick_ratio": 0.0
     }
   ],
   "open_interest_coverage": {
-    "coverage_ratio": 0.9707337180544106,
+    "coverage_ratio": 0.9716428084526244,
     "coverage_state": "OI_MISSING",
     "duplicate_oi_identity_count": 0,
     "fully_missing_expirations": [
-      "2026-09-16"
+      "2026-10-02"
     ],
     "missing_by_expiration": [
       {
-        "expiration": "2026-08-10",
-        "listed": 562,
-        "missing": 4
-      },
-      {
-        "expiration": "2026-08-11",
-        "listed": 562,
-        "missing": 4
-      },
-      {
-        "expiration": "2026-08-12",
-        "listed": 562,
-        "missing": 4
-      },
-      {
-        "expiration": "2026-08-13",
-        "listed": 534,
-        "missing": 16
-      },
-      {
-        "expiration": "2026-08-14",
-        "listed": 680,
-        "missing": 34
-      },
-      {
-        "expiration": "2026-08-17",
-        "listed": 504,
-        "missing": 4
-      },
-      {
         "expiration": "2026-08-18",
-        "listed": 504,
-        "missing": 4
-      },
-      {
-        "expiration": "2026-08-19",
-        "listed": 504,
-        "missing": 6
-      },
-      {
-        "expiration": "2026-08-20",
-        "listed": 474,
+        "listed": 520,
         "missing": 16
+      },
+      {
+        "expiration": "2026-08-21",
+        "listed": 1000,
+        "missing": 8
       },
       {
         "expiration": "2026-08-24",
-        "listed": 428,
+        "listed": 450,
         "missing": 2
       },
       {
         "expiration": "2026-08-25",
-        "listed": 412,
-        "missing": 2
+        "listed": 440,
+        "missing": 28
       },
       {
-        "expiration": "2026-08-26",
-        "listed": 412,
-        "missing": 2
-      },
-      {
-        "expiration": "2026-08-27",
-        "listed": 394,
-        "missing": 16
-      },
-      {
-        "expiration": "2026-08-28",
-        "listed": 600,
-        "missing": 34
-      },
-      {
-        "expiration": "2026-09-03",
-        "listed": 310,
-        "missing": 6
+        "expiration": "2026-09-01",
+        "listed": 374,
+        "missing": 38
       },
       {
         "expiration": "2026-09-04",
-        "listed": 470,
-        "missing": 54
+        "listed": 474,
+        "missing": 2
       },
       {
         "expiration": "2026-09-08",
-        "listed": 266,
+        "listed": 282,
         "missing": 4
-      },
-      {
-        "expiration": "2026-09-09",
-        "listed": 242,
-        "missing": 4
-      },
-      {
-        "expiration": "2026-09-10",
-        "listed": 242,
-        "missing": 14
       },
       {
         "expiration": "2026-09-11",
-        "listed": 338,
-        "missing": 46
+        "listed": 342,
+        "missing": 4
       },
       {
-        "expiration": "2026-09-16",
-        "listed": 150,
-        "missing": 150
+        "expiration": "2026-09-14",
+        "listed": 240,
+        "missing": 6
+      },
+      {
+        "expiration": "2026-09-15",
+        "listed": 226,
+        "missing": 80
+      },
+      {
+        "expiration": "2026-09-18",
+        "listed": 836,
+        "missing": 8
+      },
+      {
+        "expiration": "2026-09-25",
+        "listed": 222,
+        "missing": 2
+      },
+      {
+        "expiration": "2026-10-02",
+        "listed": 218,
+        "missing": 218
       }
     ],
-    "missing_identities_hash": "f2cc65a79c4ca852f04493b7e64758c69c55cedb1d76b8b7e0a0e93972a87489",
-    "oi_covered": 14130,
-    "oi_explicit_zero": 3692,
-    "oi_missing": 426,
-    "oi_present": 10438,
+    "missing_identities_hash": "0ff70d3951bb7672efc9aaad8ef80fb07203ba902c5236f297cb382fe1bfb36e",
+    "oi_covered": 14254,
+    "oi_explicit_zero": 3596,
+    "oi_missing": 416,
+    "oi_present": 10658,
     "permits_trusted_aggregate": false,
     "unexpected_oi_by_expiration": [],
     "unexpected_oi_count": 0,
     "unexpected_oi_identities_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "universe_count": 14556
+    "universe_count": 14670
   },
   "pricing_dimensions_still_unresolved": [
     "DIVIDEND_CONVENTION",
-    "RISK_FREE_RATE",
     "SOLVER_VERSION"
   ],
   "pricing_dimensions_supported_by_evidence": [
@@ -438,138 +396,139 @@
     "IV_PRICE_BASIS",
     "MINIMUM_TIME_FLOOR",
     "RATE_UNITS",
+    "RISK_FREE_RATE",
     "UNDERLYING_SOURCE",
     "UNDERLYING_TIMESTAMP"
   ],
   "rate_day_count_grid": [
     {
       "day_count": "ACT/365",
-      "delta_rmse": 0.0001584804637398003,
-      "effective_rate": 4.2,
-      "median_abs_delta_error": 4.434673004381621e-05,
+      "delta_rmse": 9.604725555390033e-05,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 5.728302685256725e-05,
       "rate_interpretation": "DECIMAL_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": true
     },
     {
       "day_count": "ACT/365.25",
-      "delta_rmse": 0.013961639481461724,
-      "effective_rate": 4.2,
-      "median_abs_delta_error": 0.00018963728248269467,
+      "delta_rmse": 0.005305459563007872,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.0001437042486956766,
       "rate_interpretation": "DECIMAL_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     },
     {
       "day_count": "ACT/360",
-      "delta_rmse": 0.013486576120886202,
-      "effective_rate": 4.2,
-      "median_abs_delta_error": 0.00044613922678004084,
+      "delta_rmse": 0.0013692080289346258,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.0007820639431106568,
       "rate_interpretation": "DECIMAL_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     },
     {
       "day_count": "ACT/252",
-      "delta_rmse": 0.09021003920376473,
-      "effective_rate": 4.2,
-      "median_abs_delta_error": 0.011399364434035436,
+      "delta_rmse": 0.02828446668486261,
+      "effective_rate": 0.042,
+      "median_abs_delta_error": 0.02372689413946176,
       "rate_interpretation": "DECIMAL_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     },
     {
       "day_count": "ACT/365",
-      "delta_rmse": 0.23244930523404025,
-      "effective_rate": 0.042,
-      "median_abs_delta_error": 0.22084373046392233,
+      "delta_rmse": 0.017995293073221164,
+      "effective_rate": 0.00042,
+      "median_abs_delta_error": 0.0063823795269744785,
       "rate_interpretation": "PERCENT_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     },
     {
       "day_count": "ACT/365.25",
-      "delta_rmse": 0.23244715330582305,
-      "effective_rate": 0.042,
-      "median_abs_delta_error": 0.22084031731396334,
+      "delta_rmse": 0.01799358611699909,
+      "effective_rate": 0.00042,
+      "median_abs_delta_error": 0.006367634879831118,
       "rate_interpretation": "PERCENT_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     },
     {
       "day_count": "ACT/360",
-      "delta_rmse": 0.23249413083725876,
-      "effective_rate": 0.042,
-      "median_abs_delta_error": 0.2212105653096965,
+      "delta_rmse": 0.01802839000412664,
+      "effective_rate": 0.00042,
+      "median_abs_delta_error": 0.006815285087718614,
       "rate_interpretation": "PERCENT_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     },
     {
       "day_count": "ACT/252",
-      "delta_rmse": 0.2337947905119352,
-      "effective_rate": 0.042,
-      "median_abs_delta_error": 0.22671208823612865,
+      "delta_rmse": 0.03342584032685082,
+      "effective_rate": 0.00042,
+      "median_abs_delta_error": 0.02551355985970235,
       "rate_interpretation": "PERCENT_ANNUAL_RATE",
-      "rows": 7348,
+      "rows": 11442,
       "selected": false
     }
   ],
   "rate_economics": {
-    "capture_effective_rate_matches_intended_rate": false,
+    "capture_effective_rate_matches_intended_rate": true,
     "documented_rate_unit": "PERCENT_ANNUAL_RATE",
     "intended_economic_rate": 0.042,
-    "intended_rate_source": "LEGACY_CAPTURE_DOCUMENTATION_DERIVED",
-    "magnitude_ratio": 100.0,
+    "intended_rate_source": "BOUND_TO_PREFLIGHT_APPROVAL",
+    "magnitude_ratio": 1.0,
     "observed_vendor_rate_unit": "DECIMAL_ANNUAL_RATE",
     "rate_units_documentation_live_conflict": true,
-    "vendor_effective_rate": 4.2,
+    "vendor_effective_rate": 0.042,
     "vendor_rate_identified": true,
-    "wire_rate_value": 4.2
+    "wire_rate_value": 0.042
   },
   "rate_intent_binding": {
-    "bound": false,
-    "capture_records_binding_schema": false,
-    "intent_schema_version": "raw-capture-intent/2.1.19",
-    "rate_intent_fingerprint": "",
-    "rate_intent_schema_version": "",
-    "source": "LEGACY_CAPTURE_DOCUMENTATION_DERIVED"
+    "bound": true,
+    "capture_records_binding_schema": true,
+    "intent_schema_version": "raw-capture-intent/2.1.24",
+    "rate_intent_fingerprint": "e3e8aa4a1bd70464bd9d5bf67d8e9377bb0cb51e9ac07c49f6ba22834185ca15",
+    "rate_intent_schema_version": "pricing-evidence/2.1.24",
+    "source": "BOUND_TO_PREFLIGHT_APPROVAL"
   },
   "rate_semantics": [
     {
-      "delta_rmse": 0.0001584804637398003,
-      "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=4.2)",
-      "median_abs_delta_error": 4.434673004381621e-05,
-      "rows": 7348
+      "delta_rmse": 9.604725555390033e-05,
+      "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=0.042)",
+      "median_abs_delta_error": 5.728302685256725e-05,
+      "rows": 11442
     },
     {
-      "delta_rmse": 0.23244930523404025,
-      "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
-      "median_abs_delta_error": 0.22084373046392233,
-      "rows": 7348
+      "delta_rmse": 0.017995293073221164,
+      "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.00042)",
+      "median_abs_delta_error": 0.0063823795269744785,
+      "rows": 11442
     }
   ],
   "raw_record_verification": {
     "record_payload_hashes": {
-      "/v3/index/snapshot/price": "3a163c0ec3388dcb532ebb873f0ffd2c80b5247517403010f9a783964ec580cd",
-      "/v3/option/list/contracts/quote": "3af531d46a0c1c9353441287ec0f79370d29560c63067433fa2a2d8ac806a54e",
-      "/v3/option/snapshot/greeks/first_order": "3ec31b150d3ebd39dab9b66e95473334ea90ab11ea0440300316cd969a3651f2",
-      "/v3/option/snapshot/open_interest": "9130f82af351669c5bc67a7b9a68ddb1281a156e699e066ada27da42821b382d",
-      "/v3/option/snapshot/quote": "45a1a024939f051c950afbdc59f9ea643fb0b3701b489b85a2c4841b73eb8a8d"
+      "/v3/index/snapshot/price": "9d6e86e2d38291228534f59ee3e09dfe78c1e12caebdcb6ceda236fb6740c62f",
+      "/v3/option/list/contracts/quote": "faf7c414fba5619c3f99960cb481bd7f6e6a897881ddd07e2604741c2df240fd",
+      "/v3/option/snapshot/greeks/first_order": "fe9275a8e929540b3118150e39241f9d04def785db483d5b7e27d4bd2de2a477",
+      "/v3/option/snapshot/open_interest": "72c97320d9221227a5d3b03a20aefbe2b152dd5295d0f1bafa20020858c49950",
+      "/v3/option/snapshot/quote": "a268c1fedd515ba9fc5fcdfabd217b9e8d5b1e4600727daf1613c2ea27b8a1d7"
     },
     "records_verified": 5
   },
-  "report_hash": "1409952721af75d5881537b8d5baed1963579b48daf82e316c07d52ce5356280",
+  "report_hash": "65d65724901cd31bf278efeb98faca31f76850da0af5994a41ad7096af6a06f4",
   "resolved_day_count": "ACT_365",
   "resolved_expiration_clock": "16:00 America/New_York",
   "root_resolution": {
-    "ambiguous_root_rows": 6,
-    "disambiguated_multi_root_rows": 812,
-    "inconsistent_root_rows": 0,
-    "single_root_rows": 2050,
-    "usable_rows": 2862
+    "ambiguous_root_rows": 0,
+    "disambiguated_multi_root_rows": 3294,
+    "inconsistent_root_rows": 133,
+    "single_root_rows": 2484,
+    "usable_rows": 5778
   },
-  "rows_reconstructed": 7348,
+  "rows_reconstructed": 11790,
   "schema_version": "capture-certification/2.1.27",
   "theta_terminal_version": {
     "carried_in_capture": false,
@@ -594,55 +553,55 @@
   ],
   "underlying_synchronization": {
     "authoritative_for_vendor_model": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
-    "index_snapshot_price": 7759.54,
-    "index_snapshot_timestamp": "2026-08-10T10:01:33.000",
-    "price_difference": 0.27,
+    "index_snapshot_price": 7739.58,
+    "index_snapshot_timestamp": "2026-08-12T11:34:18.000",
+    "price_difference": 0.07,
     "synchronized": false,
-    "vendor_greeks_underlying_price": 7759.27,
-    "vendor_greeks_underlying_timestamp": "2026-08-10T10:01:34.000"
+    "vendor_greeks_underlying_price": 7739.51,
+    "vendor_greeks_underlying_timestamp": "2026-08-12T11:34:19.000"
   },
   "universe": {
-    "contract_list_count": 14556,
-    "contract_list_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "contract_list_count": 14670,
+    "contract_list_set_hash": "65fde9f877499aa2e6d002af4ecbb2523de8fa25ca2a9c54305f9de7a24ff3a5",
     "duplicate_identity_count": 0,
     "endpoint_identities": [
       {
         "duplicate_identity_count": 0,
         "duplicate_identity_hash": "",
         "endpoint": "/v3/option/list/contracts/quote",
-        "row_count": 14556,
-        "unique_identity_count": 14556
+        "row_count": 14670,
+        "unique_identity_count": 14670
       },
       {
         "duplicate_identity_count": 0,
         "duplicate_identity_hash": "",
         "endpoint": "/v3/option/snapshot/quote",
-        "row_count": 14556,
-        "unique_identity_count": 14556
+        "row_count": 14670,
+        "unique_identity_count": 14670
       },
       {
         "duplicate_identity_count": 0,
         "duplicate_identity_hash": "",
         "endpoint": "/v3/option/snapshot/greeks/first_order",
-        "row_count": 14556,
-        "unique_identity_count": 14556
+        "row_count": 14670,
+        "unique_identity_count": 14670
       },
       {
         "duplicate_identity_count": 0,
         "duplicate_identity_hash": "",
         "endpoint": "/v3/option/snapshot/open_interest",
-        "row_count": 14130,
-        "unique_identity_count": 14130
+        "row_count": 14254,
+        "unique_identity_count": 14254
       }
     ],
-    "greeks_count": 14556,
+    "greeks_count": 14670,
     "greeks_matches_list": true,
-    "greeks_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "greeks_set_hash": "65fde9f877499aa2e6d002af4ecbb2523de8fa25ca2a9c54305f9de7a24ff3a5",
     "only_in_list": [],
     "only_in_snapshots": [],
-    "quote_count": 14556,
+    "quote_count": 14670,
     "quote_matches_list": true,
-    "quote_set_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "quote_set_hash": "65fde9f877499aa2e6d002af4ecbb2523de8fa25ca2a9c54305f9de7a24ff3a5",
     "state": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE"
   },
   "vendor_behavior": {
@@ -654,9 +613,9 @@
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "RATE_UNITS",
@@ -666,24 +625,24 @@
         "governing_value": "DECIMAL_ANNUAL_RATE",
         "metrics": [
           {
-            "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=4.2)",
-            "rows": 7348,
+            "hypothesis": "rate_value consumed as DECIMAL_ANNUAL_RATE (r=0.042)",
+            "rows": 11442,
             "selected": true,
             "statistic": "delta_rmse",
-            "value": 0.0001584804637398003
+            "value": 9.604725555390033e-05
           },
           {
-            "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.042)",
-            "rows": 7348,
+            "hypothesis": "rate_value consumed as PERCENT_ANNUAL_RATE (r=0.00042)",
+            "rows": 11442,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.23244930523404025
+            "value": 0.017995293073221164
           }
         ],
         "notes": "The document says percent and the implementation reads a decimal. Both records are kept; the observed reading governs request construction because the request is answered by the implementation.",
         "observed_value": "DECIMAL_ANNUAL_RATE",
         "pricing_dimension": "RATE_UNITS",
-        "rows_used": 7348,
+        "rows_used": 11442,
         "scope": "/v3/option/snapshot/greeks/first_order, greeks_version=latest",
         "status": "DOCUMENTATION_LIVE_CONFLICT"
       },
@@ -691,9 +650,9 @@
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "DAY_COUNT",
@@ -704,47 +663,47 @@
         "metrics": [
           {
             "hypothesis": "ACT/365",
-            "rows": 7348,
+            "rows": 11442,
             "selected": true,
             "statistic": "delta_rmse",
-            "value": 0.0001584804637398003
+            "value": 9.604725555390033e-05
           },
           {
             "hypothesis": "ACT/365.25",
-            "rows": 7348,
+            "rows": 11442,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.013961639481461724
+            "value": 0.005305459563007872
           },
           {
             "hypothesis": "ACT/360",
-            "rows": 7348,
+            "rows": 11442,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.013486576120886202
+            "value": 0.0013692080289346258
           },
           {
             "hypothesis": "ACT/252",
-            "rows": 7348,
+            "rows": 11442,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.09021003920376473
+            "value": 0.02828446668486261
           }
         ],
         "notes": "",
         "observed_value": "ACT_365",
         "pricing_dimension": "DAY_COUNT",
-        "rows_used": 7348,
-        "scope": "SPXW first-order greeks in capture-20260810T140129Z-2ef4f56270c1447b",
+        "rows_used": 11442,
+        "scope": "SPXW first-order greeks in capture-20260812T153415Z-a3c594606c4c64c0",
         "status": "LIVE_ONLY"
       },
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "EXPIRATION_TIMESTAMP",
@@ -755,110 +714,110 @@
         "metrics": [
           {
             "hypothesis": "15:30 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.009037917931919043
+            "value": 0.0018194128344400146
           },
           {
             "hypothesis": "15:35 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.007796395614686174
+            "value": 0.0015158252169558519
           },
           {
             "hypothesis": "15:40 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.006476606313205351
+            "value": 0.0012141550084359713
           },
           {
             "hypothesis": "15:45 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.005068394950977941
+            "value": 0.0009144381949504481
           },
           {
             "hypothesis": "15:50 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.003563182682879667
+            "value": 0.0006169983794538298
           },
           {
             "hypothesis": "15:55 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.0019576195601976668
+            "value": 0.0003237161616889848
           },
           {
             "hypothesis": "16:00 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": true,
             "statistic": "delta_rmse",
-            "value": 0.00034791561392758294
+            "value": 7.682628242355127e-05
           },
           {
             "hypothesis": "16:05 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.001644397237812145
+            "value": 0.00028569843688680785
           },
           {
             "hypothesis": "16:10 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.0035728405261937334
+            "value": 0.0005742459084118023
           },
           {
             "hypothesis": "16:15 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.0056063270033672955
+            "value": 0.0008650353086415575
           },
           {
             "hypothesis": "16:20 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.007723726714534073
+            "value": 0.0011555718957141537
           },
           {
             "hypothesis": "16:25 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.009905131439049687
+            "value": 0.0014454146437570905
           },
           {
             "hypothesis": "16:30 America/New_York",
-            "rows": 1592,
+            "rows": 2298,
             "selected": false,
             "statistic": "delta_rmse",
-            "value": 0.01212826653512948
+            "value": 0.0017344543213753457
           }
         ],
         "notes": "Read by inverting delta and implied volatility for the vendor's own time-to-expiry, not by scoring a global hypothesis. The structured scope is in expiration_clock_evidence; this string is a summary of it and never the only copy.",
         "observed_value": "16:00 America/New_York",
         "pricing_dimension": "EXPIRATION_TIMESTAMP",
-        "rows_used": 1592,
-        "scope": "SPXW expirations up to and including 2026-08-14. Beyond that boundary 26 expirations in this capture price on whole calendar days instead, so this rule is NOT established for longer maturities and must not be applied to them. The exact transition is OPEN: the nearest contradicting expiration is 2026-08-17, 3 calendar days later, and nothing was captured in between.",
+        "rows_used": 2298,
+        "scope": "SPXW expirations up to and including 2026-08-18. Beyond that boundary 26 expirations in this capture price on whole calendar days instead, so this rule is NOT established for longer maturities and must not be applied to them. The exact transition is RESOLVED: the nearest contradicting expiration is 2026-08-19, 1 calendar days later, and nothing was captured in between.",
         "status": "LIVE_ONLY"
       },
       {
         "basis": "LIVE_NUMERICAL_RECONSTRUCTION",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "IV_PRICE_BASIS",
@@ -869,40 +828,40 @@
         "metrics": [
           {
             "hypothesis": "NBBO_MID",
-            "rows": 2868,
+            "rows": 5835,
             "selected": true,
             "statistic": "median_abs_iv_error",
-            "value": 5.0581442555430733e-05
+            "value": 4.89417037696227e-05
           },
           {
             "hypothesis": "BID",
-            "rows": 2868,
+            "rows": 5519,
             "selected": false,
             "statistic": "median_abs_iv_error",
-            "value": 0.004986929120127437
+            "value": 0.000370112047189633
           },
           {
             "hypothesis": "ASK",
-            "rows": 2868,
+            "rows": 5835,
             "selected": false,
             "statistic": "median_abs_iv_error",
-            "value": 0.005059261821667049
+            "value": 0.00048324334966004523
           }
         ],
         "notes": "The residual under NBBO mid is half the reporting tick of implied_vol, which is the floor -- there is nothing left to explain. Bid and ask are two orders of magnitude worse.",
         "observed_value": "NBBO_MID",
         "pricing_dimension": "IV_PRICE_BASIS",
-        "rows_used": 2868,
-        "scope": "SPXW first-order greeks in capture-20260810T140129Z-2ef4f56270c1447b",
+        "rows_used": 5835,
+        "scope": "SPXW first-order greeks in capture-20260812T153415Z-a3c594606c4c64c0",
         "status": "LIVE_ONLY"
       },
       {
         "basis": "LIVE_FIELD_READ",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "UNDERLYING_SOURCE",
@@ -911,10 +870,10 @@
         "documented_value": "",
         "governing_value": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
         "metrics": [],
-        "notes": "The Greeks response carries one underlying print (7759.27 at 2026-08-10T10:01:34.000). The separately captured index snapshot returned 7759.54 at 2026-08-10T10:01:33.000, which is a different state. The index response is not what these Greeks were computed from and must not be described as synchronized.",
+        "notes": "The Greeks response carries one underlying print (7739.51 at 2026-08-12T11:34:19.000). The separately captured index snapshot returned 7739.58 at 2026-08-12T11:34:18.000, which is a different state. The index response is not what these Greeks were computed from and must not be described as synchronized.",
         "observed_value": "GREEKS_RESPONSE_EMBEDDED_VENDOR_UNDERLYING",
         "pricing_dimension": "UNDERLYING_SOURCE",
-        "rows_used": 14556,
+        "rows_used": 14670,
         "scope": "reproduction of the vendor's own model",
         "status": "LIVE_ONLY"
       },
@@ -922,9 +881,9 @@
         "basis": "LIVE_FIELD_READ",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "UNDERLYING_TIMESTAMP",
@@ -933,10 +892,10 @@
         "documented_value": "",
         "governing_value": "GREEKS_RESPONSE_EMBEDDED_UNDERLYING_TIMESTAMP",
         "metrics": [],
-        "notes": "The Greeks response stamps one underlying instant (2026-08-10T10:01:34.000) across every row. The separately captured index snapshot is stamped 2026-08-10T10:01:33.000, so the two are different observations of the underlying and the embedded one is what these Greeks were computed against. Recorded as its own dimension because the analytical compatibility layer treats source and timestamp separately, and until v2.1.24 this ledger carried only the source -- so an empty unresolved list read as though every pricing dimension were settled.",
+        "notes": "The Greeks response stamps one underlying instant (2026-08-12T11:34:19.000) across every row. The separately captured index snapshot is stamped 2026-08-12T11:34:18.000, so the two are different observations of the underlying and the embedded one is what these Greeks were computed against. Recorded as its own dimension because the analytical compatibility layer treats source and timestamp separately, and until v2.1.24 this ledger carried only the source -- so an empty unresolved list read as though every pricing dimension were settled.",
         "observed_value": "GREEKS_RESPONSE_EMBEDDED_UNDERLYING_TIMESTAMP",
         "pricing_dimension": "UNDERLYING_TIMESTAMP",
-        "rows_used": 14556,
+        "rows_used": 14670,
         "scope": "reproduction of the vendor's own model",
         "status": "LIVE_ONLY"
       },
@@ -961,9 +920,9 @@
         "basis": "REQUEST_BOUND",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "DIVIDEND_VALUE",
@@ -975,7 +934,7 @@
         "notes": "The dividend amount the request carried, proved by the same binding that proves the rate value. Its interpretation is DIVIDEND_CONVENTION, which this capture does not settle.",
         "observed_value": "0",
         "pricing_dimension": "DIVIDEND_VALUE",
-        "rows_used": 14556,
+        "rows_used": 14670,
         "scope": "the verified greeks request for this capture",
         "status": "LIVE_ONLY"
       },
@@ -983,23 +942,23 @@
         "basis": "REQUEST_BOUND",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
-        "decision": "INSUFFICIENT_DATA",
+        "decision": "RESOLVED",
         "dimension": "RISK_FREE_RATE",
         "documentation_matched": false,
         "documentation_reference": "",
         "documented_value": "",
-        "governing_value": "",
+        "governing_value": "0.042",
         "metrics": [],
         "notes": "Established by an approval-bound rate intent read together with a resolved live rate reading. A capture with only one of the two leaves this open: an intent nobody checked against the vendor is a declaration, and a reading with no declared intent has nothing to be the rate *of*.",
-        "observed_value": "",
+        "observed_value": "0.042",
         "pricing_dimension": "RISK_FREE_RATE",
-        "rows_used": 0,
+        "rows_used": 14670,
         "scope": "the economic rate this capture was approved to buy",
-        "status": "UNRESOLVED"
+        "status": "LIVE_ONLY"
       },
       {
         "basis": "PINNED_DOCUMENTATION",
@@ -1022,9 +981,9 @@
         "basis": "LIVE_SET_COMPARISON",
         "capture": {
           "archive_identity_known": true,
-          "archive_sha256": "5fc258007a3390b11960d7f3fa46a329f1277a899faf5a9a0a4f56598882d638",
-          "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
-          "session_id": "capture-20260810T140129Z-2ef4f56270c1447b"
+          "archive_sha256": "eff02677eca96ddbcdbc123ce959fca8144cce869891c58ce7bd92a8035c3284",
+          "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+          "session_id": "capture-20260812T153415Z-a3c594606c4c64c0"
         },
         "decision": "RESOLVED",
         "dimension": "CONTRACT_LIST_UNIVERSE",
@@ -1033,330 +992,329 @@
         "documented_value": "",
         "governing_value": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE",
         "metrics": [],
-        "notes": "contract list e8d189b6ade90686, quote e8d189b6ade90686, greeks e8d189b6ade90686",
+        "notes": "contract list 65fde9f877499aa2, quote 65fde9f877499aa2, greeks 65fde9f877499aa2",
         "observed_value": "DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE",
         "pricing_dimension": "",
-        "rows_used": 14556,
-        "scope": "SPXW, contract-list session 2026-08-10, max_dte=60, quote and first-order greeks snapshots only (capture capture-20260810T140129Z-2ef4f56270c1447b)",
+        "rows_used": 14670,
+        "scope": "SPXW, contract-list session 2026-08-12, max_dte=60, quote and first-order greeks snapshots only (capture capture-20260812T153415Z-a3c594606c4c64c0)",
         "status": "LIVE_ONLY"
       }
     ],
     "schema_version": "pricing-evidence/2.1.25",
     "unresolved": [
-      "DIVIDEND_CONVENTION",
-      "RISK_FREE_RATE"
+      "DIVIDEND_CONVENTION"
     ]
   },
   "vendor_clock_by_expiration": [
     {
       "calendar_days": 0,
-      "expiration": "2026-08-10",
-      "implied_days": 0.24901923503361983,
+      "expiration": "2026-08-12",
+      "implied_days": 0.1846182072460612,
       "is_intraday_regime": true,
       "is_whole_day_regime": false,
-      "offset_from_calendar": 0.24901923503361983,
-      "rows": 87,
-      "spread": 0.0003832573205411749
+      "offset_from_calendar": 0.1846182072460612,
+      "rows": 34,
+      "spread": 0.0006541084891452109
     },
     {
       "calendar_days": 1,
-      "expiration": "2026-08-11",
-      "implied_days": 1.2493830300728859,
+      "expiration": "2026-08-13",
+      "implied_days": 1.1853912842571876,
       "is_intraday_regime": true,
       "is_whole_day_regime": false,
-      "offset_from_calendar": 0.24938303007288587,
-      "rows": 95,
-      "spread": 0.001309215781733375
+      "offset_from_calendar": 0.18539128425718765,
+      "rows": 78,
+      "spread": 0.0048383124383988285
     },
     {
       "calendar_days": 2,
-      "expiration": "2026-08-12",
-      "implied_days": 2.249714936943932,
-      "is_intraday_regime": true,
-      "is_whole_day_regime": false,
-      "offset_from_calendar": 0.2497149369439322,
-      "rows": 101,
-      "spread": 0.0021151802831651523
-    },
-    {
-      "calendar_days": 3,
-      "expiration": "2026-08-13",
-      "implied_days": 3.250052506877768,
-      "is_intraday_regime": true,
-      "is_whole_day_regime": false,
-      "offset_from_calendar": 0.2500525068777679,
-      "rows": 101,
-      "spread": 0.002833150117531158
-    },
-    {
-      "calendar_days": 4,
       "expiration": "2026-08-14",
-      "implied_days": 4.250310879800095,
+      "implied_days": 2.1861234168112977,
       "is_intraday_regime": true,
       "is_whole_day_regime": false,
-      "offset_from_calendar": 0.2503108798000948,
-      "rows": 125,
-      "spread": 0.0039028641728027225
+      "offset_from_calendar": 0.18612341681129774,
+      "rows": 106,
+      "spread": 0.006437820993215659
+    },
+    {
+      "calendar_days": 5,
+      "expiration": "2026-08-17",
+      "implied_days": 5.1895742273760455,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
+      "offset_from_calendar": 0.18957422737604546,
+      "rows": 133,
+      "spread": 0.02025063772291258
+    },
+    {
+      "calendar_days": 6,
+      "expiration": "2026-08-18",
+      "implied_days": 6.190012658434091,
+      "is_intraday_regime": true,
+      "is_whole_day_regime": false,
+      "offset_from_calendar": 0.19001265843409065,
+      "rows": 151,
+      "spread": 0.02303576478131042
     },
     {
       "calendar_days": 7,
-      "expiration": "2026-08-17",
-      "implied_days": 7.001533950571411,
+      "expiration": "2026-08-19",
+      "implied_days": 7.006476334107334,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0015339505714111468,
-      "rows": 89,
-      "spread": 0.005203994464809014
+      "offset_from_calendar": 0.0064763341073339475,
+      "rows": 166,
+      "spread": 0.02312265366600741
     },
     {
       "calendar_days": 8,
-      "expiration": "2026-08-18",
-      "implied_days": 8.002178006208066,
+      "expiration": "2026-08-20",
+      "implied_days": 8.007043262487658,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0021780062080658524,
-      "rows": 91,
-      "spread": 0.0072570337651862715
+      "offset_from_calendar": 0.007043262487657742,
+      "rows": 179,
+      "spread": 0.03268311905320864
     },
     {
       "calendar_days": 9,
-      "expiration": "2026-08-19",
-      "implied_days": 9.002758738142491,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0027587381424911683,
-      "rows": 93,
-      "spread": 0.009219768140965812
-    },
-    {
-      "calendar_days": 10,
-      "expiration": "2026-08-20",
-      "implied_days": 10.002569972814044,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0025699728140438083,
-      "rows": 95,
-      "spread": 0.010041712098276534
-    },
-    {
-      "calendar_days": 11,
       "expiration": "2026-08-21",
-      "implied_days": 11.003237086359356,
+      "implied_days": 9.008606463543412,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.003237086359355601,
-      "rows": 181,
-      "spread": 0.007036106726824087
+      "offset_from_calendar": 0.00860646354341199,
+      "rows": 201,
+      "spread": 0.028027166551177984
+    },
+    {
+      "calendar_days": 12,
+      "expiration": "2026-08-24",
+      "implied_days": 12.011207125736261,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.011207125736261148,
+      "rows": 204,
+      "spread": 0.04512254917144176
+    },
+    {
+      "calendar_days": 13,
+      "expiration": "2026-08-25",
+      "implied_days": 13.011082388771918,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.011082388771917806,
+      "rows": 204,
+      "spread": 0.042013068663409925
     },
     {
       "calendar_days": 14,
-      "expiration": "2026-08-24",
-      "implied_days": 14.00378798502614,
+      "expiration": "2026-08-26",
+      "implied_days": 14.010197951273451,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0037879850261397507,
-      "rows": 85,
-      "spread": 0.014438307665123773
+      "offset_from_calendar": 0.010197951273450911,
+      "rows": 185,
+      "spread": 0.055029279038613765
     },
     {
       "calendar_days": 15,
-      "expiration": "2026-08-25",
-      "implied_days": 15.003955410564206,
+      "expiration": "2026-08-27",
+      "implied_days": 15.011606579043805,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.003955410564206119,
-      "rows": 87,
-      "spread": 0.014445382323110323
+      "offset_from_calendar": 0.011606579043805354,
+      "rows": 197,
+      "spread": 0.05601987589222013
     },
     {
       "calendar_days": 16,
-      "expiration": "2026-08-26",
-      "implied_days": 16.004299420321885,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.00429942032188535,
-      "rows": 88,
-      "spread": 0.01378650094794942
-    },
-    {
-      "calendar_days": 17,
-      "expiration": "2026-08-27",
-      "implied_days": 17.006502279151253,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.006502279151252566,
-      "rows": 92,
-      "spread": 0.017188232458703823
-    },
-    {
-      "calendar_days": 18,
       "expiration": "2026-08-28",
-      "implied_days": 18.007233932661386,
+      "implied_days": 16.01181926790538,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0072339326613857224,
-      "rows": 123,
-      "spread": 0.014244545364377359
+      "offset_from_calendar": 0.01181926790538057,
+      "rows": 278,
+      "spread": 0.0559689241065211
+    },
+    {
+      "calendar_days": 19,
+      "expiration": "2026-08-31",
+      "implied_days": 19.01429540358864,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.014295403588640454,
+      "rows": 341,
+      "spread": 0.059911674383418045
+    },
+    {
+      "calendar_days": 20,
+      "expiration": "2026-09-01",
+      "implied_days": 20.016201836706404,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.016201836706404293,
+      "rows": 207,
+      "spread": 0.10368053555874823
     },
     {
       "calendar_days": 21,
-      "expiration": "2026-08-31",
-      "implied_days": 21.00642875392472,
+      "expiration": "2026-09-02",
+      "implied_days": 21.015167318369883,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.0064287539247196435,
-      "rows": 185,
-      "spread": 0.016314694911244487
+      "offset_from_calendar": 0.015167318369883276,
+      "rows": 178,
+      "spread": 0.06697169223024702
     },
     {
       "calendar_days": 22,
-      "expiration": "2026-09-01",
-      "implied_days": 22.007672141855636,
+      "expiration": "2026-09-03",
+      "implied_days": 22.016496031988495,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.007672141855636028,
-      "rows": 68,
-      "spread": 0.023711116567593393
+      "offset_from_calendar": 0.016496031988495474,
+      "rows": 174,
+      "spread": 0.08570332569150096
     },
     {
       "calendar_days": 23,
-      "expiration": "2026-09-02",
-      "implied_days": 23.006191981989364,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.006191981989363882,
-      "rows": 69,
-      "spread": 0.017108236760584816
-    },
-    {
-      "calendar_days": 24,
-      "expiration": "2026-09-03",
-      "implied_days": 24.008882315237425,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.008882315237425331,
-      "rows": 69,
-      "spread": 0.01896215552864078
-    },
-    {
-      "calendar_days": 25,
       "expiration": "2026-09-04",
-      "implied_days": 25.007350008786844,
+      "implied_days": 23.013681047504974,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.007350008786843887,
-      "rows": 106,
-      "spread": 0.020060802503191866
+      "offset_from_calendar": 0.01368104750497423,
+      "rows": 258,
+      "spread": 0.0972899548538777
+    },
+    {
+      "calendar_days": 27,
+      "expiration": "2026-09-08",
+      "implied_days": 27.018799794400852,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.01879979440085222,
+      "rows": 161,
+      "spread": 0.11311359899920603
+    },
+    {
+      "calendar_days": 28,
+      "expiration": "2026-09-09",
+      "implied_days": 28.019550386608984,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.019550386608983672,
+      "rows": 132,
+      "spread": 0.17271908103744948
     },
     {
       "calendar_days": 29,
-      "expiration": "2026-09-08",
-      "implied_days": 29.010920119139342,
+      "expiration": "2026-09-10",
+      "implied_days": 29.018120867063644,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.010920119139342432,
-      "rows": 63,
-      "spread": 0.03019735423333003
+      "offset_from_calendar": 0.018120867063643686,
+      "rows": 133,
+      "spread": 0.1598558965822896
     },
     {
       "calendar_days": 30,
-      "expiration": "2026-09-09",
-      "implied_days": 30.008465931369887,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.008465931369887159,
-      "rows": 64,
-      "spread": 0.032110994738481224
-    },
-    {
-      "calendar_days": 31,
-      "expiration": "2026-09-10",
-      "implied_days": 31.010958698300634,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.010958698300633785,
-      "rows": 64,
-      "spread": 0.030725756769573564
-    },
-    {
-      "calendar_days": 32,
       "expiration": "2026-09-11",
-      "implied_days": 32.0112388809309,
+      "implied_days": 30.023255008993637,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.011238880930896755,
-      "rows": 79,
-      "spread": 0.024177366397516664
+      "offset_from_calendar": 0.02325500899363675,
+      "rows": 210,
+      "spread": 0.12723151016236756
+    },
+    {
+      "calendar_days": 33,
+      "expiration": "2026-09-14",
+      "implied_days": 33.02154616429852,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.02154616429852041,
+      "rows": 133,
+      "spread": 0.15924629967473436
+    },
+    {
+      "calendar_days": 34,
+      "expiration": "2026-09-15",
+      "implied_days": 34.02421699052714,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.024216990527136772,
+      "rows": 131,
+      "spread": 0.18656408011332104
     },
     {
       "calendar_days": 35,
-      "expiration": "2026-09-14",
-      "implied_days": 35.01119258859306,
+      "expiration": "2026-09-16",
+      "implied_days": 35.020045035644,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.011192588593061714,
-      "rows": 32,
-      "spread": 0.032713626326874135
+      "offset_from_calendar": 0.02004503564400295,
+      "rows": 82,
+      "spread": 0.12661406483790216
     },
     {
       "calendar_days": 36,
-      "expiration": "2026-09-15",
-      "implied_days": 36.017760487303775,
+      "expiration": "2026-09-17",
+      "implied_days": 36.026099609026886,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.017760487303775108,
-      "rows": 31,
-      "spread": 0.03030054302814733
+      "offset_from_calendar": 0.026099609026886128,
+      "rows": 82,
+      "spread": 0.10986614782893156
     },
     {
       "calendar_days": 37,
-      "expiration": "2026-09-16",
-      "implied_days": 37.015437699176594,
-      "is_intraday_regime": false,
-      "is_whole_day_regime": true,
-      "offset_from_calendar": 0.015437699176594322,
-      "rows": 34,
-      "spread": 0.02937942928853232
-    },
-    {
-      "calendar_days": 39,
       "expiration": "2026-09-18",
-      "implied_days": 39.014031941403516,
+      "implied_days": 37.02469989064956,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.014031941403516157,
-      "rows": 174,
-      "spread": 0.029873790579074466
+      "offset_from_calendar": 0.024699890649557688,
+      "rows": 477,
+      "spread": 0.12908645899476312
     },
     {
-      "calendar_days": 42,
+      "calendar_days": 40,
       "expiration": "2026-09-21",
-      "implied_days": 42.01715214420054,
+      "implied_days": 40.028341722252335,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.017152144200537123,
-      "rows": 32,
-      "spread": 0.03121877250663374
+      "offset_from_calendar": 0.028341722252335444,
+      "rows": 85,
+      "spread": 0.17308965760134498
     },
     {
-      "calendar_days": 46,
+      "calendar_days": 44,
       "expiration": "2026-09-25",
-      "implied_days": 46.019818652367334,
+      "implied_days": 44.030470985488826,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.019818652367334266,
-      "rows": 56,
-      "spread": 0.04433738928103992
+      "offset_from_calendar": 0.030470985488825875,
+      "rows": 134,
+      "spread": 0.2630889034576853
+    },
+    {
+      "calendar_days": 49,
+      "expiration": "2026-09-30",
+      "implied_days": 49.029959262364855,
+      "is_intraday_regime": false,
+      "is_whole_day_regime": true,
+      "offset_from_calendar": 0.02995926236485502,
+      "rows": 612,
+      "spread": 0.15790728127370812
     },
     {
       "calendar_days": 51,
-      "expiration": "2026-09-30",
-      "implied_days": 51.01973034495916,
+      "expiration": "2026-10-02",
+      "implied_days": 51.03228811736106,
       "is_intraday_regime": false,
       "is_whole_day_regime": true,
-      "offset_from_calendar": 0.019730344959157264,
-      "rows": 203,
-      "spread": 0.043366803626994965
+      "offset_from_calendar": 0.03228811736106252,
+      "rows": 132,
+      "spread": 0.31987483240767034
     }
   ]
 }

@@ -1,5 +1,96 @@
 ﻿# Changelog
 
+## 2.1.27 - deterministic certification and longitudinal open-interest evidence
+
+Two live captures now exist, and the second one changes what can be asked. The
+first proved the vendor's rate semantics by getting the economics wrong; the
+second sends `0.042` under the measured decimal reading and prices 4.2% — the
+same conclusion, confirmed forwards, from a capture that is economically valid.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `VALIDATED_AGAINST_TWO_LIVE_THETADATA_CAPTURES` |
+`NOT_READY_FOR_ANALYTICAL_DATASET`.
+
+No capture was taken for this release, and no network request was made.
+
+### A report identifies its findings, not the machine that made it
+
+Certifying one immutable capture produced identical findings on Windows and
+Linux and different `report_hash` values. Two causes, neither about the vendor:
+
+| | |
+|---|---|
+| An absolute path in the report | `documentation_root` is `C:\...` here and `/...` there. It is still shown to an operator and is excluded from the digest, along with any field declared in `LOCAL_DIAGNOSTIC_FIELDS`. A test scans the canonical payload for anything path-shaped, so the *next* such field is caught before it reaches a hash |
+| Floating point | Reconstruction runs `exp`, `log`, `erf` and `sqrt` thousands of times; libm builds differ in the last bits (`0.0001584804637398003` against `0.00015848046373980108`). Numbers now enter the digest as decimal strings at nine significant digits |
+
+Nine is justified against the source rather than chosen for tidiness: the
+vendor quotes `delta` and `implied_vol` to 1e-4, so a statistic over them
+carries four or five meaningful digits and nine is four orders finer than
+anything the inputs support — while being six orders coarser than the ~5e-15
+relative noise it absorbs. `certification-report-canonical/1` names the
+rendering, because a digest taken under one and compared under another would
+disagree about two identical reports.
+
+Determinism was not bought with blindness: a change at the ninth significant
+digit still moves the hash.
+
+### Evidence scope is derived from the capture
+
+v2.1.26 labelled the second capture's contract universe `"SPXW, session
+2026-08-10, max_dte=60"`. The identity sets were right; the sentence about them
+was a constant, and it named a session two days before the one captured. Scope
+is now read from the verified request plan — symbol, contract-list date,
+`max_dte`, session id — so a capture cannot be wrong about which session it
+describes. A test walks the AST of `src/` and fails on any first-capture
+literal used as a value, with one declared exemption for the provenance
+citation in `config/pipeline.py`, which names the captures a reading was
+*measured from* and derives no behaviour from them.
+
+### Longitudinal open-interest evidence
+
+`src/adapters/thetadata/oi_transition.py` and
+`python -m src.tools.compare_thetadata_captures` compare two certified captures
+by contract identity. Both are certified first; the comparison is offline and
+content-addressed (`transition_report_hash`).
+
+Fourteen mutually exclusive transition classes, jointly exhaustive over the
+union of the two expected universes — 15,232 identities, every one classified
+exactly once, asserted rather than assumed.
+
+What the two real captures show:
+
+| | |
+|---|---|
+| 426 identities had no open-interest row on 2026-08-10 | 422 were still listed on the 12th; 4 had expired |
+| Those 422 | **422 of 422** carried a row two days later — 206 explicit zero, 216 positive, 0 still missing |
+| 416 identities have no row on 2026-08-12 | **all 416** are absent from the earlier universe. None was previously answered; none was unanswered in both |
+| 676 identities are new | 260 already carry a row |
+| 2026-10-02 | 218 listed, 218 new, 218 unanswered |
+
+In every expiration carrying unanswered open interest, the unanswered count
+never exceeds the newly listed count.
+
+### Observation is not imputation
+
+None of that establishes that a missing row means zero, or that the contract may
+be dropped. Both would change every aggregate that consumed them, and neither
+follows from two observations. The report says so in
+`analytical_evidence_status` — `OI_SEMANTICS_LONGITUDINAL_EVIDENCE_AVAILABLE`
+beside `OI_IMPUTATION_POLICY_UNRESOLVED` — and in an `imputation_policy` field
+that begins `NONE.`
+
+Capture #2 keeps `trusted_for_gex = false` with exactly one blocker: 416
+identities have no open-interest row. The transition evidence makes that
+blocker more informative. It does not remove it.
+
+### Versions
+
+`capture-certification/2.1.27`, `longitudinal-oi/2.1.27`,
+`certification-report-canonical/1`, `oi-transition/1`, package `2.1.27`.
+Archive identity stays at `2.1.26` — what an archive has to *be* did not
+change. The request plan, the rate intent, the parser and the GEX engine are
+untouched.
+
 ## 2.1.26 - capture archive identity
 
 Four defects found reviewing v2.1.25's archive verification. No capture was

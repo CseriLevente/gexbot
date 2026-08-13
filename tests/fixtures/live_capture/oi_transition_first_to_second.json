@@ -1,0 +1,646 @@
+{
+  "_comment": [
+    "Open-interest transition evidence between the two live captures.",
+    "",
+    "Derived by:",
+    "  python -m src.tools.compare_thetadata_captures \\",
+    "      <earlier-root> <later-root> \\",
+    "      --earlier-archive-path <zip> --later-archive-path <zip>",
+    "",
+    "Both captures are certified before anything is compared. Every count",
+    "below came out of the contract identities in the raw responses.",
+    "",
+    "This is an observation, not a policy. Nothing here establishes that a",
+    "missing open-interest row may be read as zero, or that the contract may",
+    "be dropped; see analytical_evidence_status and imputation_policy."
+  ],
+  "accounting_is_exhaustive": true,
+  "algorithm_version": "oi-transition/1",
+  "analytical_evidence_status": [
+    "OI_SEMANTICS_LONGITUDINAL_EVIDENCE_AVAILABLE",
+    "OI_IMPUTATION_POLICY_UNRESOLVED"
+  ],
+  "classified_identity_count": 15232,
+  "earlier_capture": {
+    "expected_universe_count": 14556,
+    "expected_universe_hash": "e8d189b6ade9068665d847bcfd10cf6394d8812d0e77e632d41d1056c15b423a",
+    "manifest_hash": "2f45534bbb569dfeb3e251b4fe3e27a8bdebbb716d5c0ac5b22f821d43ecbd20",
+    "max_dte": "60",
+    "oi_answered_count": 14130,
+    "oi_explicit_zero_count": 3692,
+    "oi_missing_count": 426,
+    "oi_missing_hash": "f2cc65a79c4ca852f04493b7e64758c69c55cedb1d76b8b7e0a0e93972a87489",
+    "oi_positive_count": 10438,
+    "oi_unexpected_count": 0,
+    "session_date": "2026-08-10",
+    "session_id": "capture-20260810T140129Z-2ef4f56270c1447b",
+    "symbol": "SPXW",
+    "valuation_timestamp": "2026-08-10T14:01:29.616899+00:00"
+  },
+  "imputation_policy": "NONE. This report records what was observed between two captures. It does not establish that a missing open-interest row means zero, and it does not authorise dropping the contract. Either would be an analytical decision that these observations do not make.",
+  "later_capture": {
+    "expected_universe_count": 14670,
+    "expected_universe_hash": "65fde9f877499aa2e6d002af4ecbb2523de8fa25ca2a9c54305f9de7a24ff3a5",
+    "manifest_hash": "8d713b91a9d6260510efb16bf961fad56aaacd1fbc1c86d24a8afa97f20dad99",
+    "max_dte": "60",
+    "oi_answered_count": 14254,
+    "oi_explicit_zero_count": 3596,
+    "oi_missing_count": 416,
+    "oi_missing_hash": "0ff70d3951bb7672efc9aaad8ef80fb07203ba902c5236f297cb382fe1bfb36e",
+    "oi_positive_count": 10658,
+    "oi_unexpected_count": 0,
+    "session_date": "2026-08-12",
+    "session_id": "capture-20260812T153415Z-a3c594606c4c64c0",
+    "symbol": "SPXW",
+    "valuation_timestamp": "2026-08-12T15:34:15.252153+00:00"
+  },
+  "longitudinal_findings": [
+    "426 identities had no open-interest row in capture-20260810T140129Z-2ef4f56270c1447b. 422 were still in the later expected universe and 4 were not.",
+    "Of those 422 survivors, 422 carried an open-interest row in capture-20260812T153415Z-a3c594606c4c64c0 (206 explicit zero, 216 positive) and 0 did not.",
+    "416 identities have no open-interest row in capture-20260812T153415Z-a3c594606c4c64c0. 416 of them are absent from the earlier expected universe; 0 were answered earlier and are unanswered now; 0 were unanswered in both.",
+    "676 identities are new relative to the earlier universe, of which 260 already carry an open-interest row."
+  ],
+  "per_expiration": [
+    {
+      "existing_contracts": 562,
+      "expected_contracts": 562,
+      "expiration": "2026-08-11",
+      "new_contracts": 0,
+      "oi_explicit_zero": 121,
+      "oi_missing": 0,
+      "oi_positive": 441,
+      "oi_present": 562,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 429,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 10,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 119,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 2,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 2
+      }
+    },
+    {
+      "existing_contracts": 562,
+      "expected_contracts": 562,
+      "expiration": "2026-08-12",
+      "new_contracts": 0,
+      "oi_explicit_zero": 128,
+      "oi_missing": 0,
+      "oi_positive": 434,
+      "oi_present": 562,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 416,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 16,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 126,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 2,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 2
+      }
+    },
+    {
+      "existing_contracts": 534,
+      "expected_contracts": 534,
+      "expiration": "2026-08-13",
+      "new_contracts": 0,
+      "oi_explicit_zero": 125,
+      "oi_missing": 0,
+      "oi_positive": 409,
+      "oi_present": 534,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 390,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 11,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 117,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 8,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 8
+      }
+    },
+    {
+      "existing_contracts": 680,
+      "expected_contracts": 680,
+      "expiration": "2026-08-14",
+      "new_contracts": 0,
+      "oi_explicit_zero": 94,
+      "oi_missing": 0,
+      "oi_positive": 586,
+      "oi_present": 680,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 549,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 17,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 80,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 20,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 14
+      }
+    },
+    {
+      "existing_contracts": 504,
+      "expected_contracts": 524,
+      "expiration": "2026-08-17",
+      "new_contracts": 20,
+      "oi_explicit_zero": 122,
+      "oi_missing": 0,
+      "oi_positive": 402,
+      "oi_present": 524,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_PRESENT_POSITIVE": 10,
+        "NEW_CONTRACT_OI_PRESENT_ZERO": 10,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 380,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 10,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 110,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 2,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 2
+      }
+    },
+    {
+      "existing_contracts": 504,
+      "expected_contracts": 520,
+      "expiration": "2026-08-18",
+      "new_contracts": 16,
+      "oi_explicit_zero": 115,
+      "oi_missing": 16,
+      "oi_positive": 389,
+      "oi_present": 504,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 16,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 369,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 17,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 114,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 3,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 1
+      }
+    },
+    {
+      "existing_contracts": 504,
+      "expected_contracts": 504,
+      "expiration": "2026-08-19",
+      "new_contracts": 0,
+      "oi_explicit_zero": 124,
+      "oi_missing": 0,
+      "oi_positive": 380,
+      "oi_present": 504,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 367,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 10,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 121,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 3,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 3
+      }
+    },
+    {
+      "existing_contracts": 474,
+      "expected_contracts": 474,
+      "expiration": "2026-08-20",
+      "new_contracts": 0,
+      "oi_explicit_zero": 114,
+      "oi_missing": 0,
+      "oi_positive": 360,
+      "oi_present": 474,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 343,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_ZERO": 2,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 8,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 105,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 9,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 7
+      }
+    },
+    {
+      "existing_contracts": 992,
+      "expected_contracts": 1000,
+      "expiration": "2026-08-21",
+      "new_contracts": 8,
+      "oi_explicit_zero": 207,
+      "oi_missing": 8,
+      "oi_positive": 785,
+      "oi_present": 992,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 8,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 776,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 9,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 207
+      }
+    },
+    {
+      "existing_contracts": 428,
+      "expected_contracts": 450,
+      "expiration": "2026-08-24",
+      "new_contracts": 22,
+      "oi_explicit_zero": 122,
+      "oi_missing": 2,
+      "oi_positive": 326,
+      "oi_present": 448,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 2,
+        "NEW_CONTRACT_OI_PRESENT_POSITIVE": 8,
+        "NEW_CONTRACT_OI_PRESENT_ZERO": 12,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 304,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 13,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 109,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 1,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 1
+      }
+    },
+    {
+      "existing_contracts": 412,
+      "expected_contracts": 440,
+      "expiration": "2026-08-25",
+      "new_contracts": 28,
+      "oi_explicit_zero": 114,
+      "oi_missing": 28,
+      "oi_positive": 298,
+      "oi_present": 412,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 28,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 278,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 19,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 113,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 1,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 1
+      }
+    },
+    {
+      "existing_contracts": 412,
+      "expected_contracts": 412,
+      "expiration": "2026-08-26",
+      "new_contracts": 0,
+      "oi_explicit_zero": 116,
+      "oi_missing": 0,
+      "oi_positive": 296,
+      "oi_present": 412,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 280,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 14,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 116,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 2
+      }
+    },
+    {
+      "existing_contracts": 394,
+      "expected_contracts": 394,
+      "expiration": "2026-08-27",
+      "new_contracts": 0,
+      "oi_explicit_zero": 119,
+      "oi_missing": 0,
+      "oi_positive": 275,
+      "oi_present": 394,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 256,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 11,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 111,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 8,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 8
+      }
+    },
+    {
+      "existing_contracts": 600,
+      "expected_contracts": 600,
+      "expiration": "2026-08-28",
+      "new_contracts": 0,
+      "oi_explicit_zero": 131,
+      "oi_missing": 0,
+      "oi_positive": 469,
+      "oi_present": 600,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 451,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 5,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 110,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 13,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 21
+      }
+    },
+    {
+      "existing_contracts": 1022,
+      "expected_contracts": 1022,
+      "expiration": "2026-08-31",
+      "new_contracts": 0,
+      "oi_explicit_zero": 200,
+      "oi_missing": 0,
+      "oi_positive": 822,
+      "oi_present": 1022,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 820,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_ZERO": 1,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 2,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 199
+      }
+    },
+    {
+      "existing_contracts": 336,
+      "expected_contracts": 374,
+      "expiration": "2026-09-01",
+      "new_contracts": 38,
+      "oi_explicit_zero": 96,
+      "oi_missing": 38,
+      "oi_positive": 240,
+      "oi_present": 336,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 38,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 229,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 11,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 96
+      }
+    },
+    {
+      "existing_contracts": 336,
+      "expected_contracts": 336,
+      "expiration": "2026-09-02",
+      "new_contracts": 0,
+      "oi_explicit_zero": 122,
+      "oi_missing": 0,
+      "oi_positive": 214,
+      "oi_present": 336,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 201,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 13,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 122
+      }
+    },
+    {
+      "existing_contracts": 310,
+      "expected_contracts": 310,
+      "expiration": "2026-09-03",
+      "new_contracts": 0,
+      "oi_explicit_zero": 96,
+      "oi_missing": 0,
+      "oi_positive": 214,
+      "oi_present": 310,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 205,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 8,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 91,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 1,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 5
+      }
+    },
+    {
+      "existing_contracts": 470,
+      "expected_contracts": 474,
+      "expiration": "2026-09-04",
+      "new_contracts": 4,
+      "oi_explicit_zero": 107,
+      "oi_missing": 2,
+      "oi_positive": 365,
+      "oi_present": 472,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 2,
+        "NEW_CONTRACT_OI_PRESENT_POSITIVE": 1,
+        "NEW_CONTRACT_OI_PRESENT_ZERO": 1,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 326,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 90,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 38,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 16
+      }
+    },
+    {
+      "existing_contracts": 266,
+      "expected_contracts": 282,
+      "expiration": "2026-09-08",
+      "new_contracts": 16,
+      "oi_explicit_zero": 91,
+      "oi_missing": 4,
+      "oi_positive": 187,
+      "oi_present": 278,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 4,
+        "NEW_CONTRACT_OI_PRESENT_POSITIVE": 7,
+        "NEW_CONTRACT_OI_PRESENT_ZERO": 5,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 168,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 10,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 84,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 2,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 2
+      }
+    },
+    {
+      "existing_contracts": 242,
+      "expected_contracts": 242,
+      "expiration": "2026-09-09",
+      "new_contracts": 0,
+      "oi_explicit_zero": 100,
+      "oi_missing": 0,
+      "oi_positive": 142,
+      "oi_present": 242,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 115,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 25,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 98,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 2,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 2
+      }
+    },
+    {
+      "existing_contracts": 242,
+      "expected_contracts": 242,
+      "expiration": "2026-09-10",
+      "new_contracts": 0,
+      "oi_explicit_zero": 99,
+      "oi_missing": 0,
+      "oi_positive": 143,
+      "oi_present": 242,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 98,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 40,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 90,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 5,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 9
+      }
+    },
+    {
+      "existing_contracts": 338,
+      "expected_contracts": 342,
+      "expiration": "2026-09-11",
+      "new_contracts": 4,
+      "oi_explicit_zero": 75,
+      "oi_missing": 4,
+      "oi_positive": 263,
+      "oi_present": 338,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 4,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 225,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 9,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 58,
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 29,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 17
+      }
+    },
+    {
+      "existing_contracts": 178,
+      "expected_contracts": 240,
+      "expiration": "2026-09-14",
+      "new_contracts": 62,
+      "oi_explicit_zero": 91,
+      "oi_missing": 6,
+      "oi_positive": 143,
+      "oi_present": 234,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 6,
+        "NEW_CONTRACT_OI_PRESENT_POSITIVE": 28,
+        "NEW_CONTRACT_OI_PRESENT_ZERO": 28,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 110,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 5,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 63
+      }
+    },
+    {
+      "existing_contracts": 146,
+      "expected_contracts": 226,
+      "expiration": "2026-09-15",
+      "new_contracts": 80,
+      "oi_explicit_zero": 75,
+      "oi_missing": 80,
+      "oi_positive": 71,
+      "oi_present": 146,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 80,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 36,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 35,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 75
+      }
+    },
+    {
+      "existing_contracts": 150,
+      "expected_contracts": 150,
+      "expiration": "2026-09-16",
+      "new_contracts": 0,
+      "oi_explicit_zero": 85,
+      "oi_missing": 0,
+      "oi_positive": 65,
+      "oi_present": 150,
+      "transition_counts": {
+        "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 65,
+        "PREVIOUSLY_MISSING_OI_NOW_ZERO": 85
+      }
+    },
+    {
+      "existing_contracts": 0,
+      "expected_contracts": 150,
+      "expiration": "2026-09-17",
+      "new_contracts": 150,
+      "oi_explicit_zero": 109,
+      "oi_missing": 0,
+      "oi_positive": 41,
+      "oi_present": 150,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_PRESENT_POSITIVE": 41,
+        "NEW_CONTRACT_OI_PRESENT_ZERO": 109
+      }
+    },
+    {
+      "existing_contracts": 828,
+      "expected_contracts": 836,
+      "expiration": "2026-09-18",
+      "new_contracts": 8,
+      "oi_explicit_zero": 158,
+      "oi_missing": 8,
+      "oi_positive": 670,
+      "oi_present": 828,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 8,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 667,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 3,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 158
+      }
+    },
+    {
+      "existing_contracts": 150,
+      "expected_contracts": 150,
+      "expiration": "2026-09-21",
+      "new_contracts": 0,
+      "oi_explicit_zero": 62,
+      "oi_missing": 0,
+      "oi_positive": 88,
+      "oi_present": 150,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 80,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 8,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 62
+      }
+    },
+    {
+      "existing_contracts": 220,
+      "expected_contracts": 222,
+      "expiration": "2026-09-25",
+      "new_contracts": 2,
+      "oi_explicit_zero": 75,
+      "oi_missing": 2,
+      "oi_positive": 145,
+      "oi_present": 220,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 2,
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 133,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 12,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 75
+      }
+    },
+    {
+      "existing_contracts": 1198,
+      "expected_contracts": 1198,
+      "expiration": "2026-09-30",
+      "new_contracts": 0,
+      "oi_explicit_zero": 203,
+      "oi_missing": 0,
+      "oi_positive": 995,
+      "oi_present": 1198,
+      "transition_counts": {
+        "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 989,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 6,
+        "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 203
+      }
+    },
+    {
+      "existing_contracts": 0,
+      "expected_contracts": 218,
+      "expiration": "2026-10-02",
+      "new_contracts": 218,
+      "oi_explicit_zero": 0,
+      "oi_missing": 218,
+      "oi_positive": 0,
+      "oi_present": 0,
+      "transition_counts": {
+        "NEW_CONTRACT_OI_MISSING": 218
+      }
+    }
+  ],
+  "schema_version": "longitudinal-oi/2.1.27",
+  "scope_differences": [],
+  "session_distance_days": 2,
+  "transition_counts": {
+    "NEW_CONTRACT_OI_MISSING": 416,
+    "NEW_CONTRACT_OI_PRESENT_POSITIVE": 95,
+    "NEW_CONTRACT_OI_PRESENT_ZERO": 165,
+    "PRESENT_BOTH_OI_NOW_MISSING": 0,
+    "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": 9990,
+    "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_ZERO": 3,
+    "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": 357,
+    "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": 3222,
+    "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": 216,
+    "PREVIOUSLY_MISSING_OI_NOW_ZERO": 206,
+    "PREVIOUSLY_MISSING_OI_STILL_MISSING": 0,
+    "REMOVED_OR_EXPIRED_PREVIOUS_OI_MISSING": 4,
+    "REMOVED_OR_EXPIRED_PREVIOUS_OI_POSITIVE": 445,
+    "REMOVED_OR_EXPIRED_PREVIOUS_OI_ZERO": 113
+  },
+  "transition_identity_hashes": {
+    "NEW_CONTRACT_OI_MISSING": "0ff70d3951bb7672efc9aaad8ef80fb07203ba902c5236f297cb382fe1bfb36e",
+    "NEW_CONTRACT_OI_PRESENT_POSITIVE": "ec085b67c310596d32af7535d377f899fa08e973c4df66c5a34e2c10e4af99ec",
+    "NEW_CONTRACT_OI_PRESENT_ZERO": "1e61d4895311c60231a0ce3c8a8898cf7f687bdc03213d4a5dc5ef315c7d00d3",
+    "PRESENT_BOTH_OI_NOW_MISSING": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_POSITIVE": "34ecc29db84f565b69f6c1976fcf056f57a86e4c2f59ce4a8b18777202aa022d",
+    "PRESENT_BOTH_PREVIOUS_OI_POSITIVE_CURRENT_ZERO": "cc0510c1b207c26b3f1bb75cd697b5bcedda928f5a7bbcdd609b45c5563120f6",
+    "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_POSITIVE": "767abced364ce3f16772b9d978bd15ac81244c62f7e6f30fafe8142b8a89f329",
+    "PRESENT_BOTH_PREVIOUS_OI_ZERO_CURRENT_ZERO": "7d9d81e539a0844c4d9ead3f22766a5cf345ba0a58d02f05d498f6e616a9b432",
+    "PREVIOUSLY_MISSING_OI_NOW_POSITIVE": "f7bf9d2a1d435fdb7fd95155e52c2038c20c3b6dc17195e41aa43208d233003c",
+    "PREVIOUSLY_MISSING_OI_NOW_ZERO": "315fedcbe4f351c3f7b4ae79b32ef03274baf2396391e633e2c05a60115033cd",
+    "PREVIOUSLY_MISSING_OI_STILL_MISSING": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "REMOVED_OR_EXPIRED_PREVIOUS_OI_MISSING": "75e4371f517936eaf0ba11a8634ce3241f57f21f34dcf6f25958ae73946d56e6",
+    "REMOVED_OR_EXPIRED_PREVIOUS_OI_POSITIVE": "9a1aa16f55ffa3fa62e1b4e9a944fcce68c2d87276775af704ec41c87ab7138b",
+    "REMOVED_OR_EXPIRED_PREVIOUS_OI_ZERO": "f88831e7fca3a72c3a915bb1fcc684458088f70ec80c93566441735a5fd34708"
+  },
+  "transition_report_hash": "6847d40cbd66677af135099868331f52d059c80ea329b0e9ac1f4b77f3fd3d99",
+  "transition_rollups": {
+    "NEW_CONTRACTS": 676,
+    "NEW_CONTRACTS_WITH_OI_ROW": 260,
+    "PRESENT_BOTH_OI_PRESENT_BOTH": 13572,
+    "PREVIOUSLY_MISSING_RESOLVED": 422,
+    "PREVIOUSLY_MISSING_SURVIVING": 422,
+    "REMOVED_OR_EXPIRED": 562
+  },
+  "union_universe_count": 15232
+}

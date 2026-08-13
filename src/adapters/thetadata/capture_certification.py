@@ -61,6 +61,7 @@ from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
 from src.adapters.thetadata.live_behavior import InferenceDecision
+from src.domain.canonical import CANONICAL_REPORT_SCHEMA_VERSION
 from src.domain.contracts import OptionRight
 from src.gex.pricing import BlackScholesInputs, norm_cdf
 from src.gex.pricing import delta as bs_delta
@@ -84,13 +85,27 @@ __all__ = [
     "load_capture",
 ]
 
-CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.26"
+CAPTURE_CERTIFICATION_SCHEMA_VERSION = "capture-certification/2.1.27"
 
 #: Bumped when what it takes for an archive to *be* a capture's archive changes.
+#: **Not** moved in v2.1.27: archive verification is unchanged there. The
+#: report that carries it became portable and its universe scope became
+#: capture-derived, neither of which alters what an archive has to be.
 #: v2.1.26 stops believing the archived manifest's stored digest, requires the
 #: archived run intent to be this capture's by bytes, and refuses an archive
 #: whose entry names collide once separators are normalised.
 ARCHIVE_IDENTITY_SCHEMA_VERSION = "archive-identity/2.1.26"
+
+#: **Shown to an operator, never hashed.** Dotted paths into the report whose
+#: values describe this machine rather than the capture: where the pinned
+#: document was found, which checkout answered. A digest that covered them
+#: would say two identical certifications of one immutable capture were
+#: different artifacts because they ran in different directories.
+#:
+#: Declared as data so the exclusion is auditable, and guarded by a test that
+#: scans the canonical payload for anything shaped like an absolute path --
+#: which catches the next such field before it reaches a digest.
+LOCAL_DIAGNOSTIC_FIELDS: tuple[str, ...] = ("documentary_evidence.documentation_root",)
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -2659,10 +2674,29 @@ class CaptureCertificationReport:
             "gex_blockers": list(self.gex_blockers),
         }
 
+    def canonical_payload(self) -> dict[str, Any]:
+        """The report as its digest sees it: portable, and nothing local.
+
+        Two things are removed from what :meth:`as_dict` publishes. Absolute
+        filesystem paths, because where a checkout lives is a fact about a
+        machine; and binary floating point, because reconstruction statistics
+        differ in their last bits between libm builds. Both moved
+        ``report_hash`` between Windows and Linux for identical findings.
+
+        See :mod:`src.domain.canonical` for the rounding and its justification.
+        """
+        from src.domain.canonical import canonical_payload, without_fields
+
+        payload = without_fields(self.as_dict(), LOCAL_DIAGNOSTIC_FIELDS)
+        return {
+            "canonical_schema_version": CANONICAL_REPORT_SCHEMA_VERSION,
+            **canonical_payload(payload),
+        }
+
     def report_hash(self) -> str:
         from src.domain.digests import digest_of
 
-        return digest_of(self.as_dict())
+        return digest_of(self.canonical_payload())
 
 
 def _rate_dimension() -> Any:
@@ -2689,6 +2723,159 @@ def _status_for(decision: Any, *, observed: str, documented: str) -> Any:
         EvidenceStatus.DOCUMENTATION_LIVE_CONFLICT
         if observed != documented
         else EvidenceStatus.DOCUMENTATION_LIVE_AGREE
+    )
+
+
+def open_interest_by_identity(rows: list[dict[str, str]]) -> dict[ContractKey, int]:
+    """Every open-interest answer this capture carries, by contract identity.
+
+    **Exact.** ``int(float("12.5"))`` is 12, which is a different open interest
+    quietly substituted for an unparseable one. A contract count is an integer
+    or the response is not what this parser thinks it is.
+
+    Public since v2.1.27 because the cross-capture comparison must read open
+    interest exactly as certification does. Two parsers would eventually
+    disagree, and the disagreement would be invisible: both would produce a
+    plausible integer.
+    """
+    answered: dict[ContractKey, int] = {}
+    for row in rows:
+        text = str(row.get("open_interest", "")).strip().strip('"')
+        try:
+            value = int(text)
+        except ValueError:
+            raise CaptureCertificationError(
+                f"open_interest {text!r} is not an integer. A fractional "
+                "contract count is not a thing the vendor can send, and "
+                "truncating it would substitute a different number for an "
+                "unreadable one."
+            ) from None
+        if value < 0:
+            raise CaptureCertificationError(
+                f"open_interest {value} is negative; that is a parse failure, "
+                "not a small position"
+            )
+        answered[ContractKey.from_row(row)] = value
+    return answered
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureUniverse:
+    """One capture's expected universe and what open interest it answered.
+
+    The unit a longitudinal comparison works in. Deliberately *not* the
+    certification report: that report is a set of findings about vendor
+    conventions, and comparing two of them would compare conclusions. A
+    transition is about contract identities, so this carries the identities.
+    """
+
+    session_id: str
+    #: The anchor. Recomputed from the capture's own descriptors before this
+    #: object exists, and it covers the per-record ``planned_request_hash``
+    #: stamps -- so it binds the requests too, without a second field that
+    #: could drift away from them.
+    manifest_hash: str
+    session_date: str
+    symbol: str
+    max_dte: str
+    valuation_timestamp: str
+    #: Every identity the dedicated contract listing named.
+    expected: frozenset[ContractKey]
+    #: Every identity the open-interest endpoint answered, and with what. An
+    #: identity in ``expected`` and absent here is ``OI_MISSING``.
+    answered: dict[ContractKey, int]
+
+    @property
+    def missing(self) -> frozenset[ContractKey]:
+        return frozenset(self.expected - set(self.answered))
+
+    @property
+    def unexpected(self) -> frozenset[ContractKey]:
+        return frozenset(set(self.answered) - self.expected)
+
+    def state_of(self, key: ContractKey) -> str:
+        """Where one identity stands in this capture. A closed set of four."""
+        if key not in self.expected:
+            return "NOT_IN_UNIVERSE"
+        value = self.answered.get(key)
+        if value is None:
+            return "OI_MISSING"
+        return "OI_ZERO" if value == 0 else "OI_POSITIVE"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "manifest_hash": self.manifest_hash,
+            "session_date": self.session_date,
+            "symbol": self.symbol,
+            "max_dte": self.max_dte,
+            "valuation_timestamp": self.valuation_timestamp,
+            "expected_universe_count": len(self.expected),
+            "expected_universe_hash": _set_hash(set(self.expected)),
+            "oi_answered_count": len(self.answered),
+            "oi_missing_count": len(self.missing),
+            "oi_missing_hash": _set_hash(set(self.missing)),
+            "oi_unexpected_count": len(self.unexpected),
+            "oi_explicit_zero_count": sum(1 for v in self.answered.values() if v == 0),
+            "oi_positive_count": sum(1 for v in self.answered.values() if v > 0),
+        }
+
+
+def capture_universe(capture: LoadedCapture) -> CaptureUniverse:
+    """Read one capture's universe and open-interest answers. No inference."""
+    listing = capture.rows(OPTION_CONTRACT_LIST)
+    _identity_counts, expected = _identities(OPTION_CONTRACT_LIST, listing)
+    return CaptureUniverse(
+        session_id=capture.session_id,
+        manifest_hash=capture.manifest_hash,
+        session_date=capture.request.value_for(OPTION_CONTRACT_LIST, "date") or "",
+        symbol=_symbol(capture),
+        max_dte=capture.request.value_for(OPTION_CONTRACT_LIST, "max_dte") or "",
+        valuation_timestamp=capture.captured_at,
+        expected=frozenset(expected),
+        answered=open_interest_by_identity(capture.rows(OPTION_OPEN_INTEREST)),
+    )
+
+
+def _symbol(capture: LoadedCapture) -> str:
+    """The option symbol this capture requested, from its verified plan."""
+    return (
+        capture.request.value_for(OPTION_CONTRACT_LIST, "symbol")
+        or capture.request.value_for(OPTION_GREEKS, "symbol")
+        or "<symbol not in request>"
+    )
+
+
+def _greeks_scope(capture: LoadedCapture) -> str:
+    """The scope a Greeks-derived finding holds over. Read from the request."""
+    return f"{_symbol(capture)} first-order greeks in {capture.session_id}"
+
+
+def _universe_scope(capture: LoadedCapture) -> str:
+    """What universe this capture's contract listing is evidence about.
+
+    Derived from the verified request plan, every field of which was recomputed
+    against the digest stamped on the manifest records. Until v2.1.27 this was
+    the sentence ``"SPXW, session 2026-08-10, max_dte=60, ..."`` written into
+    the certification code -- correct for the first capture and a lie about
+    every other one. The second capture's identity sets were right and its
+    evidence label said it was about a session two days before the one it
+    captured.
+
+    A scope that cannot be wrong about which session it describes is one that
+    reads the session out of the request that produced it.
+    """
+    listed = {
+        name: capture.request.value_for(OPTION_CONTRACT_LIST, name)
+        for name in ("symbol", "date", "max_dte")
+    }
+    symbol = listed["symbol"] or "<symbol not in request>"
+    session = listed["date"] or "<session date not in request>"
+    max_dte = listed["max_dte"] or "<max_dte not in request>"
+    return (
+        f"{symbol}, contract-list session {session}, max_dte={max_dte}, "
+        "quote and first-order greeks snapshots only "
+        f"(capture {capture.session_id})"
     )
 
 
@@ -3387,7 +3574,7 @@ def certify_capture(
             decision=day_count_decision,
             capture=identity,
             rows_used=best_day.rows if best_day else 0,
-            scope="SPXW first-order greeks in this capture",
+            scope=_greeks_scope(capture),
             metrics=tuple(
                 ReconstructionMetric(
                     hypothesis=s.hypothesis,
@@ -3410,7 +3597,7 @@ def certify_capture(
             capture=identity,
             rows_used=best_exp.rows if best_exp else 0,
             scope=(
-                "SPXW expirations up to and including "
+                f"{_symbol(capture)} expirations up to and including "
                 f"{clock_evidence.boundary_last_intraday or 'n/a'}. Beyond that "
                 f"boundary {clock_evidence.contradicting_count} expirations in "
                 "this capture price on whole calendar days instead, so this "
@@ -3453,7 +3640,7 @@ def certify_capture(
             ),
             capture=identity,
             rows_used=best_iv[1] if best_iv else 0,
-            scope="SPXW first-order greeks in this capture",
+            scope=_greeks_scope(capture),
             metrics=tuple(
                 ReconstructionMetric(
                     hypothesis=name,
@@ -3622,10 +3809,7 @@ def certify_capture(
             observed_value=universe.state,
             capture=identity,
             rows_used=universe.contract_list_count,
-            scope=(
-                "SPXW, session 2026-08-10, max_dte=60, quote and first-order "
-                "greeks snapshots only"
-            ),
+            scope=_universe_scope(capture),
             notes=(
                 f"contract list {universe.contract_list_hash[:16]}, quote "
                 f"{universe.quote_hash[:16]}, greeks {universe.greeks_hash[:16]}"

@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.26"
+    assert package["project"]["version"] == "2.1.27"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -343,7 +343,12 @@ def test_all_three_versions_are_documented():
         # manifest is recomputed rather than read, the run intent is compared
         # by bytes, and colliding entry names are refused.
         "archive-identity/2.1.26",
-        "capture-certification/2.1.26",
+        # v2.1.27: the report became portable (no absolute paths, canonical
+        # numbers) and its universe scope became capture-derived. Archive
+        # identity did not move -- what an archive has to *be* is unchanged.
+        "capture-certification/2.1.27",
+        "longitudinal-oi/2.1.27",
+        "certification-report-canonical/1",
         "pricing-compatibility/2.1.22",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",

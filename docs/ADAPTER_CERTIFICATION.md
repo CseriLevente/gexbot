@@ -1650,6 +1650,67 @@ No trusted aggregate GEX until there is an evidence-backed policy for these
 identities. There is not one yet, and inventing one here would be choosing
 silently.
 
+## What two captures say about the missing rows
+
+A single snapshot cannot distinguish three explanations for an absent
+open-interest row: a zero the vendor declines to state, a contract too new to
+have settled, or a gap. Two snapshots can, because the contracts are the same
+contracts. From v2.1.27:
+
+```bash
+python -m src.tools.compare_thetadata_captures <earlier> <later> \
+    --earlier-archive-path <zip> --later-archive-path <zip>
+```
+
+Comparing 2026-08-10 with 2026-08-12, two calendar days apart, over a union of
+15,232 identities every one of which lands in exactly one transition class:
+
+| observation | count |
+|---|---|
+| Unanswered on the 10th | 426 |
+| — still listed on the 12th | 422 |
+| — expired before the 12th | 4 |
+| Of the 422 survivors, answered by the 12th | **422** |
+| — resolved to an explicit zero | 206 |
+| — resolved to a positive figure | 216 |
+| — still unanswered | 0 |
+| Unanswered on the 12th | 416 |
+| — absent from the earlier universe (newly listed) | **416** |
+| — previously answered, now unanswered | 0 |
+| — unanswered in both | 0 |
+| New identities on the 12th | 676 |
+| — already carrying a row | 260 |
+
+`2026-10-02` is the clearest case: 218 contracts listed, all 218 new, all 218
+unanswered. In every expiration carrying unanswered open interest, the
+unanswered count never exceeds the newly listed count.
+
+### This is an observation, not a rule
+
+**It does not license `missing → 0`.** The evidence points the other way. Of the
+422 identities that resolved, 216 — **51%** — resolved to a *positive* figure,
+several substantial. Reading those as zero would have understated the linear
+weight on 216 contracts. The only direct measurement of what a missing row later
+turns out to be says that assuming zero is wrong about half the time.
+
+**It does not license dropping the contract either**, for the same reason: the
+dropped contracts demonstrably carry real open interest two days later.
+
+What it does establish is that absence is *transient and associated with
+newness* rather than permanent and associated with the contract. That is
+genuine progress on the question and it is not an answer to it. The transition
+report records `OI_SEMANTICS_LONGITUDINAL_EVIDENCE_AVAILABLE` beside
+`OI_IMPUTATION_POLICY_UNRESOLVED`, and its `imputation_policy` field begins
+`NONE.`
+
+### What is still unmeasured
+
+* **Resolution latency.** The pair spans two calendar days and a weekend. Nothing
+  distinguishes "resolves in one session" from "resolves in two".
+* **Settlement mechanism.** Rows appear; no capture ties their appearance to a
+  settlement boundary rather than to the calendar.
+* **Generality.** One transition, one symbol, no monthly expiration cycle.
+
 ## Quote and Greeks are not atomic
 
 Two sequential HTTP requests, not one observation:

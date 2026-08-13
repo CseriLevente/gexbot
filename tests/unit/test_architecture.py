@@ -584,21 +584,30 @@ def test_the_documentation_describes_apis_that_exist() -> None:
 
 
 def test_the_only_operator_commands_acquire_or_read_bytes() -> None:
-    """``src/tools`` is where a command goes, and there are two.
+    """``src/tools`` is where a command goes, and every one of them is named.
 
     Added in v2.1.11, which is also the release that added a command at all. A
     new entry point here would be the natural place for "just run the strategy
     once" to appear, so the check is that every command is named.
 
-    v2.1.22 added the second: certification, which reads a capture already
-    taken. The guard was never "one command" -- it is that a command here either
-    acquires raw bytes or reads bytes already acquired, and neither trades.
+    v2.1.22 added certification, which reads a capture already taken. v2.1.27
+    added the cross-capture comparison, which reads two. The guard was never
+    "one command" or "two" -- it is that a command here either acquires raw
+    bytes or reads bytes already acquired, and none of them trades. Adding a
+    name to this list is the moment somebody has to say which of those a new
+    command is.
     """
     tools = SRC / "tools"
     modules = sorted(p.name for p in tools.glob("*.py") if p.name != "__init__.py")
     assert modules == [
+        # Acquires raw bytes, once, under an explicit approval.
         "capture_thetadata_once.py",
+        # Reads one capture's bytes. No network.
         "certify_thetadata_capture.py",
+        # Reads two captures' bytes and compares contract identities. No
+        # network, and it decides nothing: the open-interest policy question it
+        # gathers evidence for is left explicitly unresolved.
+        "compare_thetadata_captures.py",
     ], modules
 
 

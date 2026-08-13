@@ -121,6 +121,16 @@ class SyntheticVendor:
     #: with nothing left for certification to object to -- which must still not
     #: be enough to authorize a trusted GEX.
     complete_open_interest: bool = False
+    #: The underlying and scope this capture requested. Parameters rather than
+    #: constants since v2.1.27, because certification derives its evidence
+    #: scope from the request and a generator that could only produce one
+    #: symbol could not show that.
+    symbol: str = "SPXW"
+    max_dte: int = 60
+    #: Every ``index % oi_gap == 0`` strike is left without an open-interest
+    #: row, which is how the real captures behave for newly listed contracts.
+    #: Raising it resolves previously-missing identities in a later capture.
+    oi_gap: int = 37
     strikes: tuple[int, ...] = field(
         default_factory=lambda: tuple(range(3000, 12000, 50))
     )
@@ -179,7 +189,7 @@ def _rows(vendor: SyntheticVendor) -> tuple[list[dict[str, str]], ...]:
                 if price <= 0.10:
                     continue
                 identity = {
-                    "symbol": "SPXW",
+                    "symbol": vendor.symbol,
                     "expiration": expiration.isoformat(),
                     "strike": f"{strike}.000",
                     "right": right.value.upper(),
@@ -210,7 +220,7 @@ def _rows(vendor: SyntheticVendor) -> tuple[list[dict[str, str]], ...]:
                     }
                 )
                 listing.append(dict(identity))
-                if index % 37 == 0 and not vendor.complete_open_interest:
+                if index % vendor.oi_gap == 0 and not vendor.complete_open_interest:
                     continue
                 oi.append(
                     {**identity, "open_interest": "0" if index % 5 == 0 else "125"}
@@ -265,7 +275,13 @@ def _parameters(vendor: SyntheticVendor, endpoint: str) -> dict[str, Any]:
     """What the request for one endpoint carried, including the rate."""
     if endpoint == INDEX_PRICE:
         return {"symbol": "SPX"}
-    params: dict[str, Any] = {"symbol": "SPXW", "max_dte": 60}
+    params: dict[str, Any] = {"symbol": vendor.symbol, "max_dte": vendor.max_dte}
+    if endpoint == OPTION_CONTRACT_LIST:
+        # The session the listing is *of*. Certification derives its universe
+        # scope from this rather than from a constant, so a synthetic capture
+        # has to carry one -- and two captures with different dates are what
+        # makes a longitudinal comparison orderable.
+        params["date"] = vendor.valuation.date().isoformat()
     if endpoint == OPTION_GREEKS:
         params.update(
             {

@@ -304,6 +304,33 @@ table of scored hypotheses rather than a verdict.
 
 Exit 3 is not a failure. It is the state the first capture is in.
 
+### Comparing two captures
+
+Once a second capture exists, their open-interest coverage can be compared by
+contract identity:
+
+```bash
+python -m src.tools.compare_thetadata_captures \
+    /absolute/path/to/earlier-capture \
+    /absolute/path/to/later-capture \
+    --earlier-archive-path /absolute/path/to/earlier.zip \
+    --later-archive-path /absolute/path/to/later.zip \
+    --json transition.json
+```
+
+Offline. Both captures are certified in full before anything is compared, and
+the comparison is refused outright if the underlyings differ, if the same
+capture is passed twice, or if the two are given in the wrong order. A
+difference in `max_dte` is *reported* rather than refused — it explains part of
+the universe change and does not make the captures incomparable.
+
+The report answers a question one capture cannot: whether a contract with no
+open-interest row is permanently unavailable or simply had not settled yet. It
+does **not** answer what to do about it, and deliberately says so —
+`analytical_evidence_status` carries `OI_IMPUTATION_POLICY_UNRESOLVED` and
+`imputation_policy` begins `NONE.` Treating a missing row as zero, or dropping
+the contract, remains a decision nobody has made.
+
 Two runs over an untouched capture produce the same `report_hash`. A run over an
 edited one does not, and a run over a capture whose payloads no longer match
 their manifest hashes refuses before computing anything.

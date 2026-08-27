@@ -14,10 +14,11 @@ Sign is applied on top of that magnitude and is a *proxy* -- see
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from src.domain.analytical_universe import temporal_eligibility
 from src.domain.contracts import (
     ChainSnapshot,
     OptionContract,
@@ -290,9 +291,15 @@ class ExclusionReason(str, Enum):
     """
 
     VALIDATION_REJECTED = "validation_rejected"
+    #: Past its settlement *instant*, root by root -- an AM-settled series at
+    #: midday on its expiration day. Distinct from ``EXPIRED_BEFORE_SESSION``,
+    #: which is about the session and not about the clock.
     EXPIRED = "expired"
     BEYOND_MAX_DTE = "beyond_max_dte"
     CROSSED_QUOTE = "crossed_quote"
+    #: The vendor reported an open interest and it was zero. A measurement, and
+    #: a weight of zero, so the contract contributes nothing and is dropped when
+    #: ``require_open_interest`` is on. **Not** the absent case below.
     NO_OPEN_INTEREST = "no_open_interest"
     NO_GAMMA_SOURCE = "no_gamma_source"
     NON_FINITE_GAMMA = "non_finite_gamma"
@@ -300,6 +307,17 @@ class ExclusionReason(str, Enum):
     #: this contract. GEX scales by spot squared, so there is no number to
     #: report -- not a number computed against a different spot.
     NO_UNDERLYING_PRICE = "no_underlying_price"
+    #: No open-interest record exists for this identity in the resolved
+    #: settlement session, so there is no weight to apply and none may be
+    #: invented. Unconditional: ``require_open_interest=False`` says a zero
+    #: weight is acceptable, which is a statement about reported zeros and not
+    #: permission to manufacture one. See ``src/domain/analytical_universe.py``.
+    OPEN_INTEREST_NOT_REPORTED = "open_interest_not_reported"
+    #: The contract expired before this session opened and the vendor's snapshot
+    #: is still returning it -- observed on consecutive ThetaData sessions. It
+    #: is not part of the current analytical universe; it is counted here rather
+    #: than dropped, and it stays in the chain and in the evidence.
+    EXPIRED_BEFORE_SESSION = "expired_before_session"
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +374,17 @@ class ContractGexResult:
     # reason other than being unusable (i.e. DTE filtering). Contracts rejected by
     # validation have no trustworthy gamma, so they contribute nothing measurable.
     excluded_unsigned_gex: float = 0.0
+    #: The two data-eligibility findings, counted over the quotes as *supplied*.
+    #:
+    #: Separate from ``exclusions``, which is a breakdown of what each pipeline
+    #: stage dropped, and separate on purpose. An unreported open interest is
+    #: refused by validation when ``require_open_interest`` is on and by the
+    #: engine loop when it is off, so the stage a contract dies at depends on a
+    #: flag -- while the question "how many contracts had no settled
+    #: open-interest record" has one answer either way. This is that answer.
+    #: Empty when the chain has no such contract; see
+    #: ``src/domain/analytical_universe.py``.
+    analytical_exclusions: dict[str, int] = field(default_factory=dict)
 
     @property
     def usable_ratio(self) -> float:
@@ -434,8 +463,26 @@ def compute_contract_gex(
     shadow_count = 0
     excluded_expiries: set[str] = set()
 
+    # The session this chain belongs to, resolved once. Temporal eligibility is
+    # measured against the market's session date, never against the calendar day
+    # of whatever zone the instant happens to carry.
+    session_date = snapshot.market_session_date
+
     for quote in normalized.snapshot.quotes:
         contract = quote.contract
+        # Stale before anything else. ThetaData snapshot endpoints keep
+        # returning contracts that expired in an earlier session -- roughly five
+        # hundred of them, with the previous session's market timestamps, on
+        # every capture that has been checked. They are not part of this
+        # session's universe, and they are counted under their own reason so
+        # that "retained by the vendor" never reads as "expired at midday".
+        if not temporal_eligibility(
+            contract.expiry, market_session_date=session_date
+        ).is_eligible:
+            exclusions[ExclusionReason.EXPIRED_BEFORE_SESSION] += 1
+            excluded_expiries.add(contract.expiry.isoformat())
+            continue
+
         # One resolution per contract, reused by every downstream calculation.
         effective = resolve_effective_inputs(quote=quote, snapshot=snapshot, spec=spec)
         if ResolutionIssue.EXPIRED in effective.issues:
@@ -461,7 +508,22 @@ def compute_contract_gex(
             excluded_expiries.add(contract.expiry.isoformat())
             continue
 
-        open_interest = quote.open_interest or 0
+        # The state, before the number. ``quote.open_interest or 0`` used to
+        # stand here: it turned "the vendor said nothing about this contract"
+        # into a weight of zero, which sums to nothing and looks exactly like a
+        # contract that really has no open interest. Repeated live captures show
+        # unanswered identities acquiring positive open interest at the next
+        # settlement boundary -- 177 of 438 on one consecutive-session pair --
+        # so zero is not a conservative reading of silence. There is no number
+        # here, and the contract is ineligible rather than free.
+        if not quote.open_interest_state.permits_oi_weighting:
+            exclusions[ExclusionReason.OPEN_INTEREST_NOT_REPORTED] += 1
+            continue
+        open_interest = quote.open_interest
+        # Narrowed by ``permits_oi_weighting``: a reported state carries a
+        # non-negative integer. Asserted rather than defaulted, in the idiom
+        # already used for the effective spot below.
+        assert open_interest is not None
         if cfg.require_open_interest and open_interest <= 0:
             exclusions[ExclusionReason.NO_OPEN_INTEREST] += 1
             continue
@@ -529,6 +591,10 @@ def compute_contract_gex(
         excluded_expiries=tuple(sorted(excluded_expiries)),
         vendor_gamma_count=vendor_count,
         shadow_gamma_count=shadow_count,
+        # Read off the chain, not accumulated through the loop above: a contract
+        # validation rejected never reaches the loop, and the eligibility answer
+        # must not depend on which stage happened to catch it first.
+        analytical_exclusions=snapshot.analytical_exclusions(),
     )
 
 

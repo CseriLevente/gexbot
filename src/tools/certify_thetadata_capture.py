@@ -35,10 +35,16 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+from src.adapters.thetadata.analytical_universe import (
+    AnalyticalUniverseReport,
+    analytical_universe_of,
+)
 from src.adapters.thetadata.capture_certification import (
     CaptureCertificationError,
     CaptureCertificationReport,
+    capture_universe,
     certify_capture,
+    load_capture,
 )
 
 EXIT_OK = 0
@@ -46,9 +52,27 @@ EXIT_UNREADABLE = 2
 EXIT_CONFLICT = 3
 
 
-def _render(report: CaptureCertificationReport) -> str:
+def _render(
+    report: CaptureCertificationReport,
+    universe: AnalyticalUniverseReport | None = None,
+) -> str:
+    """The certification report, plus what a later analytical layer may use.
+
+    The two are separate objects with separate digests on purpose. Certification
+    answers what these bytes are and what they say about the vendor's
+    conventions; the analytical-universe partition answers which of the
+    contracts in them belong to the session the capture is of. Nesting the
+    second under its own key leaves ``report_hash`` covering exactly what it
+    covered before -- a capture certified under an earlier release still
+    reproduces its digest.
+    """
     payload: dict[str, Any] = report.as_dict()
     payload["report_hash"] = report.report_hash()
+    if universe is not None:
+        payload["analytical_universe"] = {
+            **universe.as_dict(),
+            "analytical_universe_report_hash": universe.report_hash(),
+        }
     return json.dumps(payload, indent=2, sort_keys=True, default=str)
 
 
@@ -193,6 +217,31 @@ def _summarise(report: CaptureCertificationReport) -> list[str]:
     return lines
 
 
+def _summarise_universe(universe: AnalyticalUniverseReport) -> list[str]:
+    """The temporal and open-interest partition, as an operator reads it."""
+    data = universe.as_dict()
+    counts = data["class_counts"]
+    lines = [
+        f"analysable      session {data['market_session_date']} "
+        f"({data['market_session_source']}, capture clock agrees="
+        f"{data['sessions_agree']})",
+        f"                {data['eligible_count']:,} of {data['listed_count']:,} "
+        f"listed identities are eligible "
+        f"({counts['ELIGIBLE_CURRENT']:,} current, "
+        f"{counts['ELIGIBLE_EXPIRING_THIS_SESSION']:,} expiring this session)",
+        f"                excluded: "
+        f"{counts['EXCLUDED_EXPIRED_BEFORE_SESSION']:,} expired before the "
+        f"session, {counts['EXCLUDED_OPEN_INTEREST_NOT_REPORTED']:,} with no "
+        "open-interest record (not zero -- unavailable)",
+        f"                trusted analytical universe="
+        f"{data['permits_trusted_analytical_universe']}",
+    ]
+    lines.extend(
+        f"    not usable  {reason}" for reason in data["analytical_universe_blockers"]
+    )
+    return lines
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.tools.certify_thetadata_capture",
@@ -238,15 +287,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"capture cannot be certified: {error}", file=sys.stderr)
         return EXIT_UNREADABLE
 
-    rendered = _render(report)
+    # The capture certified, so its bytes are what they claim to be. Which of
+    # the contracts in them this session's analysis may use is a second
+    # question, answered by a second report over the same verified universe.
+    root = pathlib.Path(args.capture_root)
+    universe = analytical_universe_of(capture_universe(load_capture(root)))
+
+    rendered = _render(report, universe)
     if args.json_path:
         pathlib.Path(args.json_path).write_text(rendered, encoding="utf-8")
         for line in _summarise(report):
+            print(line)
+        for line in _summarise_universe(universe):
             print(line)
         print(f"report          {args.json_path}")
     else:
         print(rendered)
     print(f"report_hash     {report.report_hash()}", file=sys.stderr)
+    print(
+        f"universe_hash   {universe.report_hash()}",
+        file=sys.stderr,
+    )
 
     return EXIT_CONFLICT if report.ledger.conflicts else EXIT_OK
 

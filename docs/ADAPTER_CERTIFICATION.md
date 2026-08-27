@@ -1896,3 +1896,85 @@ correct while the label beside it is a constant.
 The first capture's findings are unchanged and reproduce from the fixture:
 `ACT_365`, 16:00 ET front-week, whole calendar days beyond, documentation
 conflict retained, and still blocked from a trusted GEX.
+
+---
+
+# v2.1.28: two questions certification does not answer
+
+Certification answers whether a capture's bytes are what they claim to be, and
+what they say about the vendor's conventions. Two questions it never asked, both
+now established by repeated live observation, are answered by a **separate**
+report over the same verified bytes -- `src/adapters/thetadata/analytical_universe.py`,
+published under `analytical_universe` by
+`python -m src.tools.certify_thetadata_capture`.
+
+The separation is the point. Nothing about what a certification derives from a
+capture changed in v2.1.28, so `capture-certification/2.1.27` did not move,
+`report_hash` covers exactly what it covered before, and both committed
+live-capture reports still reproduce. This is the arrangement `oi_transition`
+was built under in v2.1.27, for the same reason.
+
+## Which of the listed contracts belong to this session
+
+Snapshot endpoints retain contracts past their expiration for about a session.
+On 2026-08-26 the contract list, the quote snapshot and the Greeks snapshot all
+still named roughly 500 contracts with a 2026-08-25 expiration, carrying
+2026-08-25 market timestamps; on 2026-08-27 those were gone and roughly 500
+2026-08-26 contracts had replaced them.
+
+So a capture like that earns
+`DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE` -- the strongest state in
+the universe vocabulary -- and is right to. The three responses really do name
+the same identities. **Set equality says they agree; it does not say they agree
+about this session.**
+
+`expiration_date < market_session_date` therefore makes an identity ineligible
+for the current analytical universe. `expiration_date == market_session_date`
+stays eligible: 0DTE is the series an intraday gamma model is mostly about, and
+a same-session series past its settlement clock is excluded elsewhere, by
+`ResolutionIssue.EXPIRED`, which measures the settlement instant root by root.
+
+## What an unanswered open interest is
+
+`OpenInterestCoverage` has counted the listed identities the open-interest
+endpoint did not answer since v2.1.24, and refuses a trusted aggregate while any
+exist. What it never said is what an unanswered identity *is*. The longitudinal
+captures do: Aug 26 -> Aug 27, all 438 previously unanswered identities acquired
+an explicit record -- 177 positive, 261 an explicit zero, none still absent. An
+absent record is a silence the settlement boundary breaks, and it breaks upward
+often enough that zero is not a conservative reading of it.
+
+The domain now carries three states rather than a number-or-nothing, and an
+unanswered identity is excluded as **unavailable** rather than weighted zero.
+That is an eligibility rule about what this repository computes over. It is not
+a claim that the vendor means zero by an absent record, and no imputation policy
+follows from it. See `docs/DATA_ELIGIBILITY.md`.
+
+## What this did not do to the blockers
+
+`OpenInterestCoverage` is **not** recomputed over a temporally filtered
+universe. It still counts every listed identity the open-interest endpoint did
+not answer, retained ones included, and both live captures' `gex_blockers`
+survive verbatim.
+
+That is checkable rather than asserted: every expiration in either capture's
+`missing_by_expiration` is on or after that capture's session -- the earliest is
+`2026-08-10` itself on the first capture (4 of 562 listed, a same-session 0DTE
+row the temporal rule keeps) and `2026-08-18` on the second -- so the temporal
+rule removes none of the 426 and 416 unanswered identities. Shrinking that
+blocker with a filter would have been this release clearing a gate it did not
+earn, and a rule written `<=` instead of `<` would have deleted four real 0DTE
+identities from the first capture.
+
+`trusted_for_gex` remains the constant `False`, `analytical_readiness` remains
+`ADAPTER_CERTIFICATION_EVIDENCE`, and the shipped default state remains
+`READY_FOR_RAW_CAPTURE_ONLY`.
+
+## The partition's own verdict
+
+`permits_trusted_analytical_universe` says whether the *listed universe* clears
+the two findings this report knows about. It is deliberately named for the
+universe and not for a calculation: a capture with no retained contract and no
+unanswered open interest still has no vendor-established settlement date (OD-26)
+and no independent universe evidence (OD-11), and each of those independently
+blocks a trusted GEX.

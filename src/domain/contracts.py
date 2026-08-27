@@ -18,6 +18,11 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from src.domain.analytical_universe import (
+    OpenInterestObservationState,
+    analytical_exclusion,
+    open_interest_observation_state,
+)
 from src.domain.completeness import ChainCompleteness, CompletenessStatus
 from src.domain.iv import ImpliedVolQuote, IVQualityFlag, missing_iv
 from src.domain.timestamps import ContractTimestamps
@@ -198,6 +203,30 @@ class OptionQuote:
         ``quote.iv.source`` available.
         """
         return self.iv.value if self.iv.is_usable else None
+
+    @property
+    def open_interest_state(self) -> OpenInterestObservationState:
+        """Whether the vendor answered for this contract, and how.
+
+        Derived rather than stored, so it cannot disagree with the number beside
+        it. ``open_interest`` keeps its three-valued meaning -- positive, an
+        explicit ``0``, or ``None`` for "no record exists for the resolved
+        settlement session" -- and this names the third case so that every
+        consumer has to decide about it rather than reaching for ``or 0``.
+
+        That reach is what this replaces. ``quote.open_interest or 0`` weighted
+        an unanswered contract at zero and summed it, which deletes the contract
+        from the aggregate without incrementing any counter -- and repeated live
+        captures show an unanswered identity acquiring a *positive* figure after
+        the settlement boundary far too often for zero to be the safe guess.
+        See ``src/domain/analytical_universe.py`` and ``docs/DATA_ELIGIBILITY.md``.
+        """
+        return open_interest_observation_state(self.open_interest)
+
+    @property
+    def has_reported_open_interest(self) -> bool:
+        """Whether this contract carries a usable open-interest observation."""
+        return self.open_interest_state.permits_oi_weighting
 
     @property
     def open_interest_as_of(self) -> date | None:
@@ -421,6 +450,44 @@ class ChainSnapshot:
         present = self._open_interest_dates()
         return max(present) if present else None
 
+    @property
+    def market_session_date(self) -> date:
+        """The trading session this chain's instant belongs to.
+
+        The one question temporal eligibility is decided against, answered
+        through :func:`src.gex.sessions.market_session_date` rather than
+        ``as_of.date()`` -- the two disagree for six hours out of every
+        twenty-four, and a contract must not become stale an hour early because
+        the machine holding the instant reasons in UTC.
+
+        Imported lazily: ``src.gex.sessions`` imports this module.
+        """
+        from src.gex.sessions import market_session_date as _session_of
+
+        return _session_of(self.as_of)
+
+    def analytical_exclusions(self) -> dict[str, int]:
+        """How many supplied quotes this session's analysis may not use, and why.
+
+        Counted over the quotes as supplied, before validation and before any
+        engine filter, so the answer does not depend on which stage a reader
+        happens to be looking at. Reasons come from
+        :class:`~src.domain.analytical_universe.AnalyticalExclusion`; an
+        eligible contract contributes to no key, and a key with a zero count is
+        omitted rather than published as a reassuring zero.
+        """
+        session = self.market_session_date
+        counts: dict[str, int] = {}
+        for quote in self.quotes:
+            reason = analytical_exclusion(
+                expiration=quote.contract.expiry,
+                market_session_date=session,
+                open_interest_state=quote.open_interest_state,
+            )
+            if reason is not None:
+                counts[reason.value] = counts.get(reason.value, 0) + 1
+        return dict(sorted(counts.items()))
+
     def _open_interest_dates(self) -> list[date]:
         return [
             q.timestamps.open_interest_as_of
@@ -473,6 +540,7 @@ __all__ = [
     "ContractTimestamps",
     "IVQualityFlag",
     "ImpliedVolQuote",
+    "OpenInterestObservationState",
     "OptionContract",
     "OptionQuote",
     "OptionRight",

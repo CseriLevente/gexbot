@@ -20,7 +20,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2355 tests, 90% coverage
+.venv/Scripts/python.exe -m pytest         # 2901 tests, 90% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no

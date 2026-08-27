@@ -131,6 +131,27 @@ class SyntheticVendor:
     #: row, which is how the real captures behave for newly listed contracts.
     #: Raising it resolves previously-missing identities in a later capture.
     oi_gap: int = 37
+    #: Expirations the vendor's snapshots still return although they precede
+    #: the session -- the T+1 retention observed on consecutive live captures,
+    #: where roughly five hundred contracts that expired yesterday were still
+    #: listed, quoted and Greeked with yesterday's market timestamps.
+    #:
+    #: Emitted into the contract list, the quote snapshot and the Greeks
+    #: snapshot, because that is the point: all three agree, set equality holds,
+    #: and the universe is still not this session's. Their rows bypass the
+    #: pricer -- a Black-Scholes input with negative time is degenerate, which
+    #: is exactly why the generator could not previously produce the behaviour
+    #: this release exists to account for -- and they carry ``delta`` and
+    #: ``implied_vol`` of zero, so ``_usable_greeks`` drops them and the
+    #: convention inference is not asked to reconstruct a dead contract.
+    #:
+    #: Defaults to ``()``, so every capture built without it is byte-identical
+    #: to the one the existing tests certify.
+    stale_expirations: tuple[date, ...] = ()
+    #: Give this many of the stale identities an open-interest row, so a test
+    #: can show that staleness is decided before open-interest availability
+    #: rather than standing in for it.
+    stale_with_open_interest: int = 0
     strikes: tuple[int, ...] = field(
         default_factory=lambda: tuple(range(3000, 12000, 50))
     )
@@ -225,7 +246,68 @@ def _rows(vendor: SyntheticVendor) -> tuple[list[dict[str, str]], ...]:
                 oi.append(
                     {**identity, "open_interest": "0" if index % 5 == 0 else "125"}
                 )
+    _stale_rows(vendor, quote=quote, oi=oi, greeks=greeks, listing=listing)
     return quote, oi, greeks, listing
+
+
+def _stale_rows(
+    vendor: SyntheticVendor,
+    *,
+    quote: list[dict[str, str]],
+    oi: list[dict[str, str]],
+    greeks: list[dict[str, str]],
+    listing: list[dict[str, str]],
+) -> None:
+    """Append identities the vendor retained past their expiration.
+
+    Appended rather than woven into the priced loop so the priced rows are bit
+    for bit what they were before this parameter existed. The stamp is the
+    expiration day's close, which is what a retained row carries: the market
+    timestamp of the session it was last live in, not this session's.
+    """
+    if not vendor.stale_expirations:
+        return
+    given_oi = 0
+    for expiration in vendor.stale_expirations:
+        if expiration >= vendor.valuation.date():
+            raise ValueError(
+                f"stale_expirations must precede the capture session; "
+                f"{expiration.isoformat()} does not precede "
+                f"{vendor.valuation.date().isoformat()}"
+            )
+        stamp = datetime.combine(
+            expiration, vendor.expiry_clock, tzinfo=EASTERN
+        ).strftime("%Y-%m-%dT%H:%M:%S.000")
+        for strike in vendor.strikes[:4]:
+            for right in (OptionRight.CALL, OptionRight.PUT):
+                identity = {
+                    "symbol": vendor.symbol,
+                    "expiration": expiration.isoformat(),
+                    "strike": f"{strike}.000",
+                    "right": right.value.upper(),
+                }
+                listing.append(dict(identity))
+                quote.append(
+                    {**identity, "timestamp": stamp, "bid": "0.05", "ask": "0.15"}
+                )
+                greeks.append(
+                    {
+                        **identity,
+                        "timestamp": stamp,
+                        "bid": "0.05",
+                        "ask": "0.15",
+                        "implied_vol": "0.0000",
+                        "delta": "0.0000",
+                        "iv_error": "0.0000",
+                        "underlying_timestamp": vendor.valuation.strftime(
+                            "%Y-%m-%dT%H:%M:%S.000"
+                        ),
+                        "underlying_price": f"{vendor.spot:.4f}",
+                    }
+                )
+                if given_oi < vendor.stale_with_open_interest:
+                    oi.append({**identity, "open_interest": "7"})
+                    given_oi += 1
 
 
 def _csv(rows: list[dict[str, str]], columns: tuple[str, ...]) -> str:

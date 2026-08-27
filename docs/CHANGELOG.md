@@ -1,5 +1,129 @@
 ﻿# Changelog
 
+## 2.1.28 - open interest that is absent, and contracts that already expired
+
+Repeated live ThetaData captures establish two vendor behaviours the analytical
+pipeline was not modelling. Both are now data-eligibility rules with named
+reasons and counts, and neither is a claim about vendor semantics —
+`docs/DATA_ELIGIBILITY.md` is the whole of that distinction.
+
+**Status:** `IMPLEMENTED` | `TESTED_SYNTHETICALLY` |
+`TESTED_WITH_OFFLINE_FIXTURES` | `VALIDATED_AGAINST_TWO_LIVE_THETADATA_CAPTURES` |
+`NOT_READY_FOR_ANALYTICAL_DATASET`.
+
+No capture was taken for this release, and no network request was made. **Neither
+live capture's blocker count changed**, and no certification gate was relaxed.
+
+### An absent open-interest record is not an open interest of zero
+
+Contracts present in the contract list, the quote snapshot and the Greeks
+snapshot but absent from the open-interest response acquire explicit records
+after a settlement boundary — often positive ones. Aug 26 → Aug 27 is the
+strongest consecutive-session reading:
+
+| | |
+|---|---|
+| Aug 26 | 13,310 list/quote/Greek identities, 12,872 open-interest identities, **438 with no record** |
+| Aug 27 | **all 438** carried an explicit record: **177** positive, **261** an explicit zero, **0** still missing, **0** gone |
+| Aug 27's own gaps | 302 identities with no record, **all 302 new** relative to Aug 26 |
+
+So the silence resolves, and it resolves upward 177 times out of 438. One
+expression was reading it as zero:
+
+```python
+open_interest = quote.open_interest or 0      # src/gex/formulas.py, until now
+```
+
+The contract was weighted zero, summed, counted among the included contracts,
+and no counter said why it contributed nothing. `OpenInterestObservationState`
+now names three readings — `OI_REPORTED_POSITIVE`, `OI_REPORTED_ZERO`,
+`OI_NOT_REPORTED` — and the third is not a number. `None` survives parsing, the
+join, `canonical_chain_payload` (as JSON `null`) and the calculation, where it
+produces `ExclusionReason.OPEN_INTEREST_NOT_REPORTED` rather than a weight.
+Unconditional: `require_open_interest=False` says a *reported* zero may
+contribute nothing, and has never been permission to manufacture one.
+
+Two truthiness readings of the same field went with it. `sum(1 for q in quotes
+if q.open_interest)` counted an explicit zero as an open interest that never
+arrived, so a chain the vendor answered in full read as partially answered; and
+`not any(q.open_interest for q in chain.quotes)` reported such a chain as
+carrying no open interest at all.
+
+### Set equality is not currency
+
+On Aug 26 all three snapshot endpoints still named approximately 500 Aug-25
+contracts, with Aug-25 market timestamps; by Aug 27 those were gone and
+approximately 500 Aug-26 contracts had replaced them. A capture like that earns
+`DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE` — the strongest universe
+state in the vocabulary — because the three responses genuinely do name the same
+identities. They agree. They do not agree about *this* session.
+
+```
+expiration_date <  market_session_date   ->  ineligible, counted
+expiration_date == market_session_date   ->  eligible (0DTE)
+```
+
+The second line is load-bearing: 0DTE is the series an intraday gamma model is
+mostly about, and a same-session series past its settlement *clock* is excluded
+separately by `ResolutionIssue.EXPIRED`, which measures the settlement instant
+root by root. The session is `market_session_date(as_of)` — the market's, not
+the calendar day of whatever zone an instant carries; 22:00 ET on the 17th is
+the 18th in UTC, and `as_of.date()` would retire a 0DTE series six hours early.
+
+### Excluded, not deleted
+
+An ineligible contract stays in the chain, in the normalized evidence and in the
+capture's universe. It is counted under its reason at four surfaces:
+`ChainSnapshot.analytical_exclusions()`, `ContractGexResult.analytical_exclusions`,
+the engine's `exclusions` breakdown, and — for a capture —
+`src/adapters/thetadata/analytical_universe.py`, which partitions one certified
+capture's listed universe into four classes with a set hash each, an
+exhaustiveness assertion, and its own content hash.
+
+`python -m src.tools.certify_thetadata_capture` publishes that partition beside
+the certification report under `analytical_universe`, with its own digest.
+
+### What did not move, and why
+
+The certification report did not change. Nothing about what a certification
+*derives from a capture* changed in v2.1.28 — only what a later analytical layer
+may do with the result — so `capture-certification/2.1.27` stands, `report_hash`
+covers exactly what it covered before, and **both committed live-capture
+fixtures still reproduce**. The partition is a second report over the same
+verified bytes, the separation `oi_transition` was built under in v2.1.27.
+
+`OpenInterestCoverage` is not recomputed over a filtered universe. It still
+counts every listed identity the open-interest endpoint did not answer, retained
+ones included, and both live captures' `gex_blockers` survive verbatim. That is
+checkable against the committed fixtures rather than asserted: every expiration
+in either capture's `missing_by_expiration` is on or after that capture's
+session — the earliest is `2026-08-10` itself on the first capture (4 unanswered
+of 562 listed, a same-session 0DTE row the rule keeps) and `2026-08-18` on the
+second — so the temporal rule removes none of the 426 / 416 unanswered
+identities.
+Quietly shrinking that blocker would have been this release clearing a gate it
+did not earn.
+
+`normalized-chain/2.1.18`, `thetadata-v3-parser/2.1.17`, `gex-engine/2.1.10`,
+`longitudinal-oi/2.1.27` and `oi-transition/1` are all unmoved. Raw capture is
+untouched: no row is dropped at capture time, and every eligibility statement is
+about bytes that were already stored.
+
+### Not resolved
+
+OD-26 (the open-interest settlement date is still `CALLER_ASSUMPTION`) and OD-11
+(no independent contract-universe evidence) stand. `trusted_for_gex` is still
+the constant `False`; `analytical_readiness` is still
+`ADAPTER_CERTIFICATION_EVIDENCE`. `OI_IMPUTATION_POLICY_UNRESOLVED` still holds:
+this release makes unavailability explicit and excludes on it, which is not the
+same as deciding what the absent value would have been. OD-37 is annotated and
+OD-38 is new.
+
+### Versions
+
+`analytical-universe/2.1.28`, `analytical-universe-report/2.1.28`,
+`analytical-universe/1`, package `2.1.28`.
+
 ## 2.1.27 - deterministic certification and longitudinal open-interest evidence
 
 Two live captures now exist, and the second one changes what can be asked. The

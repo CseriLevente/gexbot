@@ -79,7 +79,15 @@ def resolve_chain_completeness(
             )
         return ChainCompleteness(
             received_quote_count=len(snapshot.quotes),
-            received_oi_count=sum(1 for q in snapshot.quotes if q.open_interest),
+            # The *state*, not the truthiness of the number. ``if
+            # q.open_interest`` counted an explicit zero as an open interest
+            # that never arrived, so a chain the vendor answered in full for
+            # every contract reported as partially answered -- and the one
+            # reading that matters, "no record exists", was spelled the same way
+            # as a measurement of nobody holding the contract.
+            received_oi_count=sum(
+                1 for q in snapshot.quotes if q.open_interest_state.is_reported
+            ),
             received_iv_count=sum(1 for q in snapshot.quotes if q.iv.value),
             received_greeks_count=sum(
                 1 for q in snapshot.quotes if q.gamma is not None
@@ -364,6 +372,17 @@ def compute_gex_snapshot(
             "shadow_gamma_count": result.shadow_gamma_count,
             "dte0_dominance_ratio": dominance,
             "exclusions": result.exclusion_counts(),
+            # The two data-eligibility findings, published only when one of them
+            # fired. Same habit as ``exclusions`` itself, whose counter carries
+            # no key for a reason that never occurred: a count of zero printed
+            # for every snapshot reads as "checked and clean" in a field that
+            # really means "nothing to report", and it would move the replay
+            # hash of every chain the rule finds nothing in.
+            **(
+                {"analytical_exclusions": dict(result.analytical_exclusions)}
+                if result.analytical_exclusions
+                else {}
+            ),
             # After the adapter spread, deliberately: a caller-supplied
             # ExpectedContractUniverse is an independent statement and must
             # override the adapter measure taken without one.

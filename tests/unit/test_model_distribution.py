@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.27"
+    assert package["project"]["version"] == "2.1.28"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -349,6 +349,14 @@ def test_all_three_versions_are_documented():
         "capture-certification/2.1.27",
         "longitudinal-oi/2.1.27",
         "certification-report-canonical/1",
+        # v2.1.28: two new schemas, and the two above deliberately did not
+        # move. What certification derives from a capture is unchanged -- the
+        # analytical-universe partition is a *second* report over the same
+        # verified bytes, so both committed live-capture fixtures still
+        # reproduce their report_hash.
+        "analytical-universe/2.1.28",
+        "analytical-universe-report/2.1.28",
+        "analytical-universe/1",
         "pricing-compatibility/2.1.22",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",

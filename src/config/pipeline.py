@@ -47,6 +47,7 @@ from src.config.thetadata import (
     ThetaDataConfigError,
     ThetaDataRuntime,
 )
+from src.domain.analytical_universe import AnalyticalExclusion
 from src.domain.digests import digest_of, short_id
 from src.domain.iv import IVSource
 from src.domain.model_spec import (
@@ -4511,9 +4512,43 @@ class ThetaDataResearchPipeline:
             blockers.append("the spot was not read back out of a stored payload")
 
         if chain.meta.get("open_interest_as_of") is None and not any(
-            q.open_interest for q in chain.quotes
+            # The observation state, not the truthiness of the number: a chain
+            # in which the vendor answered zero for every contract carries open
+            # interest, and used to be reported as carrying none.
+            q.open_interest_state.is_reported
+            for q in chain.quotes
         ):
             blockers.append("the chain carries no open interest")
+
+        # The two data-eligibility findings, applied to the universe a trusted
+        # aggregate would actually run over. Both are counted rather than
+        # described, and neither removes a contract from the chain -- the
+        # exclusions stay auditable. See ``docs/DATA_ELIGIBILITY.md``.
+        eligibility = chain.analytical_exclusions()
+        stale = eligibility.get(AnalyticalExclusion.EXPIRED_BEFORE_SESSION.value, 0)
+        if stale:
+            blockers.append(
+                f"{stale} of {len(chain.quotes)} contracts expired before the "
+                f"{chain.market_session_date.isoformat()} session and are still "
+                "being returned by the vendor's snapshot endpoints. Set equality "
+                "between the contract list, the quotes and the greeks says the "
+                "three responses agree; it does not say they agree about this "
+                "session, so the universe an aggregate would run over is not the "
+                "current one."
+            )
+        unreported = eligibility.get(
+            AnalyticalExclusion.OPEN_INTEREST_NOT_REPORTED.value, 0
+        )
+        if unreported:
+            blockers.append(
+                f"{unreported} of {len(chain.quotes)} contracts have no "
+                "open-interest record for the resolved settlement session. Open "
+                "interest is the linear weight on every GEX term, an absent "
+                "record is not a zero -- identities unanswered in one session "
+                "have repeatedly acquired positive open interest in the next -- "
+                "and no evidence-backed policy exists for an absent one, so an "
+                "aggregate would be choosing silently."
+            )
 
         plan = self.capture_plan
         captured = set(_mapping(manifest.get("endpoint_records")))

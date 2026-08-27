@@ -991,6 +991,59 @@ Backdating it would be inventing coverage the source does not provide.
 responses actually carry. A document is a claim; the first raw session is how it
 gets compared against bytes.
 
+**v2.1.28: the third state now exists, and it settles nothing about the
+vendor.** Until v2.1.28 the domain had a number or a `None`, and the engine
+turned the `None` into a zero with `quote.open_interest or 0`.
+`OpenInterestObservationState` names all three readings -- reported positive,
+reported zero, no record for the resolved settlement session -- and the third
+makes the contract ineligible rather than free. That is an eligibility rule
+about what this repository computes over. It is **not** a resolution of this
+decision, and it is not a claim that the vendor means zero by an absent record:
+which settlement session a figure belongs to is still `CALLER_ASSUMPTION`, and
+`OI_IMPUTATION_POLICY_UNRESOLVED` still stands. See `docs/DATA_ELIGIBILITY.md`.
+
+---
+
+## 38. Snapshot endpoints retain expired contracts - **OBSERVED, excluded by policy**
+
+**The question.** ThetaData's snapshot endpoints keep returning contracts whose
+expiration precedes the session being captured. What is the analytical layer
+supposed to do with them?
+
+**The observation.** Reproduced independently on multiple dates. On 2026-08-26
+the contract list, the quote snapshot and the Greeks snapshot all still named
+approximately 500 contracts with a 2026-08-25 expiration, carrying 2026-08-25
+market timestamps. On 2026-08-27 those were gone and approximately 500
+2026-08-26 contracts were retained in their place, with 2026-08-26 timestamps.
+
+**Why it matters.** `UniverseCertification` can award
+`DEDICATED_CONTRACT_LIST_MATCHED_SNAPSHOT_UNIVERSE` -- the strongest universe
+state in the vocabulary -- to exactly such a capture, because the three
+responses really do name the same identities. Set equality says three endpoints
+agree. It does not say they agree about *this* session, and until v2.1.28
+nothing in the repository distinguished the two.
+
+**Current behaviour (v2.1.28).** `expiration_date < market_session_date` makes a
+contract ineligible for the current analytical universe. `expiration_date ==
+market_session_date` stays eligible -- 0DTE is the series an intraday gamma
+model is mostly about, and a rule that removed it would remove the product; a
+same-session series past its settlement *clock* is excluded separately by
+`ResolutionIssue.EXPIRED`. Excluded identities are counted under
+`EXPIRED_BEFORE_SESSION`, hashed into their class set, and left in the capture,
+the chain and the evidence.
+
+**What is not decided.** Why the vendor retains them. A snapshot endpoint that
+serves the last known state of a contract for a session after it expires is a
+defensible design, and nothing here establishes intent -- only that the rows are
+present and that they are not this session's universe. No vendor documentation
+covering retention has been found, extracted or pinned.
+
+**What would settle it.** A pinned documentary statement of the retention
+window, or a capture series long enough to establish that the window is exactly
+one session rather than approximately one. Today it is one observed behaviour on
+several dates, applied as an eligibility rule rather than as a model of the
+vendor.
+
 ---
 
 ## Deferred, with reasons

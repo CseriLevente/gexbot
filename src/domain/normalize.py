@@ -183,12 +183,23 @@ def validate_quote(
             code=ValidationCode.NEGATIVE_OPEN_INTEREST,
         )
     )
-    if require_open_interest and quote.open_interest is None:
+    # The state, not ``is None``. Same three-valued reading as everywhere else:
+    # a reported zero is a measurement and passes, an absent record is a silence
+    # and does not. The flag stays: it says whether *this* validation pass
+    # requires a weight. It has never been permission to invent one -- the
+    # engine excludes an unreported contract unconditionally, under
+    # ``ExclusionReason.OPEN_INTEREST_NOT_REPORTED``.
+    if require_open_interest and not quote.open_interest_state.is_reported:
         issues.append(
             ValidationIssue(
                 code=ValidationCode.MISSING_OPEN_INTEREST,
                 field="quote.open_interest",
-                detail="open interest is required to weight GEX",
+                detail=(
+                    "no open-interest record exists for the resolved settlement "
+                    "session; open interest is required to weight GEX and an "
+                    "absent record is not a zero"
+                ),
+                observed=quote.open_interest_state.value,
             )
         )
 

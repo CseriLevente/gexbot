@@ -114,12 +114,13 @@ make it look worse.
 rather than silently succeeding, so an accidental real call surfaces as a loud
 failure — `test_no_unit_test_performs_a_real_network_call` asserts exactly that.
 
-**What none of these layers prove.** The fixtures are vendor-*shaped* payloads
-written by this repository, not captured vendor responses. Passing them
-establishes that the parser, the join and the maths behave as specified on the
-inputs we imagined. It does not establish that ThetaData emits those inputs.
-Every integration claim in this repository is
-`NOT_VALIDATED_WITH_LIVE_THETADATA`.
+**What these layers prove.** Synthetic and integration fixtures remain offline
+and no test contacts ThetaData. Separately, the generated reports in
+tests/fixtures/live_capture/ are derived from preserved paid captures whose raw
+payloads are not committed. The 2026-09-02 report validates the live transport,
+parser, capture verification and v2.1.28 analytical-universe partition. It does
+not validate a trusted GEX: missing open interest and unresolved pricing evidence
+remain explicit blockers.
 
 ### Environment independence
 
@@ -220,7 +221,7 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
-Current: **92%** across 7,108 statements, against a `fail_under` of 90.
+Current: **90.62%** across 13,588 statements, against a fail_under of 90.
 
 ### Three versions, three meanings
 
@@ -228,7 +229,7 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.28` | `pyproject.toml` | anything ships |
+| Package version | `2.1.29` | `pyproject.toml` | anything ships |
 | Parser version | `thetadata-v3-parser/2.1.17` | `src/adapters/raw_store.py` | vendor-payload interpretation changes -- v2.1.15 replays the exact stored bytes under the captured content type and charset rather than a UTF-8-with-replacement reading of them |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
 | Manifest schema | `raw-capture-manifest/2.1.17` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |

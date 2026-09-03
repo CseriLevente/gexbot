@@ -1,8 +1,10 @@
 ﻿# Release procedure
 
-Status: `IMPLEMENTED` â€” the archive step, the integrity checks, and the CI job
-that runs them all exist and pass. `NOT_VALIDATED_WITH_LIVE_THETADATA` â€”
-no release has been cut against a live ThetaData subscription.
+Status: IMPLEMENTED. The archive step, integrity checks and CI job exist and
+pass. v2.1.28 was exercised by a controlled live ThetaData capture on 2026-09-02,
+and v2.1.29 commits the derived report as regression evidence. This validates the
+capture path, not a trusted GEX calculation; the report remains
+ADAPTER_CERTIFICATION_EVIDENCE.
 
 This repository is a **research engine**. A release publishes analysis code and
 its test evidence. It does not publish anything that can trade, and the release
@@ -51,6 +53,7 @@ python -m pip freeze --exclude-editable | sort > requirements-lock.txt
 Both ends of every range are bounded â€” including `build-system.requires` â€” so a
 future upstream release cannot change the produced artefact without a commit
 here. `tests/unit/test_release_integrity.py` enforces this.
+
 
 ---
 

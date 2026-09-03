@@ -1038,11 +1038,15 @@ defensible design, and nothing here establishes intent -- only that the rows are
 present and that they are not this session's universe. No vendor documentation
 covering retention has been found, extracted or pinned.
 
+**Later evidence.** The controlled 2026-09-02 capture reproduced the behaviour:
+all three identity sets agreed while 496 contracts expiring on 2026-09-01 were
+still present. The v2.1.28 partition excluded those identities and retained 496
+same-session contracts as eligible.
+
 **What would settle it.** A pinned documentary statement of the retention
 window, or a capture series long enough to establish that the window is exactly
-one session rather than approximately one. Today it is one observed behaviour on
-several dates, applied as an eligibility rule rather than as a model of the
-vendor.
+one session rather than approximately one. It remains an observed behaviour
+applied as an eligibility rule rather than as a model of the vendor.
 
 ---
 

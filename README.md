@@ -7,8 +7,10 @@ A **GEX research engine** for SPX/SPXW option chains.
 > architecture test enforces that none appear by accident. It computes gamma
 > exposure from an option chain and reports how much to trust the result.
 
-Everything it has been run against is synthetic or fixture data. It has never
-seen a live vendor response.
+The capture path has now been exercised against preserved live ThetaData
+responses.
+Trusted GEX is still blocked by missing open interest and unresolved pricing
+evidence.
 
 ---
 
@@ -20,7 +22,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2901 tests, 90% coverage
+.venv/Scripts/python.exe -m pytest         # 2907 tests, 90% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no
@@ -44,12 +46,14 @@ say and nothing more:
 | `TESTED_SYNTHETICALLY` | Verified against generated inputs and closed-form identities. |
 | `TESTED_WITH_OFFLINE_FIXTURES` | Verified against recorded vendor-shaped payloads. No network. |
 | `NOT_VALIDATED_WITH_LIVE_THETADATA` | Never run against a real subscription. |
+| `VALIDATED_WITH_LIVE_THETADATA_CAPTURE` | Exercised against a preserved live capture; this does not imply trusted analytical output. |
 | `READY_FOR_RAW_CAPTURE_ONLY` | Offline checks pass and the capture may proceed; one paid vendor session is the next evidence. Says nothing about whether a number computed from it could be trusted. |
 | `PLANNED` | Designed, not built. |
 | `NOT_IMPLEMENTED` | Absent. Some of these are absent on purpose. |
 
-**No component in this repository has ever been validated against live vendor
-data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
+**The raw capture, parser and certification path have been validated against live
+ThetaData.** The resulting dataset is not trusted for GEX; its blockers remain
+explicit.
 
 | Component | Status |
 |---|---|
@@ -67,11 +71,11 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Option-universe accounting, SPX/SPXW separation | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Confidence model | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; thresholds `NOT_IMPLEMENTED` (uncalibrated by design) |
 | Typed config, ThetaData config section, single client factory | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
-| ThetaData parsing, join, tier map | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` Â· `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| ThetaData parsing, join, tier map | `IMPLEMENTED` / `TESTED_WITH_OFFLINE_FIXTURES` / `VALIDATED_WITH_LIVE_THETADATA_CAPTURE` |
 | HTTP transport, retries, `Retry-After`, size caps | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` (deterministic fake) |
 | Raw-response store (atomic, collision-safe) | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` |
-| Real network transport (`HttpxTransport`) | `IMPLEMENTED` Â· **never executed** Â· `NOT_VALIDATED_WITH_LIVE_THETADATA` |
-| Chain completeness vs an independent source | `IMPLEMENTED`, reports `PARTIALLY_OBSERVED`/`UNKNOWN` end to end â€” the contract-list endpoint is captured as evidence and its scope has not been compared against a filtered request (OD-11) |
+| Real network transport (`HttpxTransport`) | `IMPLEMENTED` / `VALIDATED_WITH_LIVE_THETADATA_CAPTURE` |
+| Chain completeness vs an independent source | `IMPLEMENTED`; the Sep 2 contract list matched quote and Greeks identity sets, while temporal and missing-OI eligibility still block a trusted analytical universe |
 | Unknown completeness cannot score full confidence | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | ThetaData config â†’ effective runtime (`ThetaDataRuntime`) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Strict config validation (finite, typed, non-empty) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
@@ -98,7 +102,7 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | Derived certification (verifier and validator run inside readiness) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; a caller cannot supply a verdict |
 | Field-level provenance re-read from the payload | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` |
 | Capture plan: every endpoint the session needs | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
-| Vendor index spot captured in the same session | `IMPLEMENTED` Â· **never run against a vendor** Â· `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| Vendor index spot captured in the same session | `IMPLEMENTED` / `VALIDATED_WITH_LIVE_THETADATA_CAPTURE`; the embedded Greeks underlying remains the pricing source |
 | Trusted vs diagnostic calculation | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; unresolved pricing refuses a trusted GEX |
 | Exact decimal strike carried through the domain | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Typed capture and validation evidence | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; `verify_capture` checks a manifest against its store |
@@ -168,19 +172,19 @@ data.** Every integration row is `NOT_VALIDATED_WITH_LIVE_THETADATA`.
 | US Eastern via `zoneinfo` with pinned `tzdata` | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; the repeated autumn hour is two instants |
 | `READY_FOR_ANALYTICAL_DATASET` as a separate axis | `PLANNED` â€” the requirements are written down; nothing consumes an analytical dataset yet, by design |
 | Graded provenance (PLANNED / OBSERVED / VALIDATED) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; derived from a named raw record, never asserted |
-| Typed pricing dimensions and attestations | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; no comparison has been run, so nothing carries `LIVE_COMPARISON` evidence |
+| Typed pricing dimensions and attestations | `IMPLEMENTED` / `VALIDATED_WITH_LIVE_THETADATA_CAPTURE`; unresolved readings stay unresolved |
 | Canonical pipeline API (`capture_session` / `fetch_chain` / `compute_diagnostic_gex` / `compute_trusted_gex`) | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY`; `compute_gex` and `capture_and_compute` were removed in v2.1.5 when capturing and computing were separated |
-| ThetaData capture profile (`config/thetadata_capture.yaml`) | `IMPLEMENTED` Â· **never run** Â· `NOT_VALIDATED_WITH_LIVE_THETADATA` |
+| ThetaData capture profile (`config/thetadata_capture.yaml`) | `IMPLEMENTED` / `VALIDATED_WITH_LIVE_THETADATA_CAPTURE` |
 | Pricing mode derived from IV provenance | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
-| Vendor/local rate and dividend value comparison | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
+| Vendor/local rate and dividend value comparison | `IMPLEMENTED` / `VALIDATED_WITH_LIVE_THETADATA_CAPTURE`; Sep 2 did not identify the vendor effective rate |
 | Tier capability matrix | `IMPLEMENTED` Â· `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | One pipeline from `LoadedConfig` | `IMPLEMENTED` Â· `TESTED_SYNTHETICALLY` |
 | Raw-capture manifest linking payloads to snapshots | `IMPLEMENTED` Â· `TESTED_WITH_OFFLINE_FIXTURES` |
 | ThetaData NBBO bid/mid/ask IV | vendor-computed; an NBBO *price* basis does not make the IV local |
 | `LOCAL_IV_LOCAL_GAMMA` | `NOT_IMPLEMENTED` â€” needs a local IV solver; refused at config load |
 | `TRADE_IV`, `LOCALLY_SOLVED_MID_IV` | `NOT_IMPLEMENTED` â€” refused at config load, not silently substituted |
-| Local gamma vs vendor gamma | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
-| Whether ThetaData Standard tier suffices | `NOT_VALIDATED_WITH_LIVE_THETADATA` â€” it *appears* to expose the required inputs; that is not the same claim |
+| Local gamma vs vendor gamma | `VALIDATED_WITH_LIVE_THETADATA_CAPTURE`; this capture did not identify one admissible vendor pricing model |
+| Whether ThetaData Standard tier suffices | Live capture acquired all five planned responses; analytical sufficiency remains false because OI and pricing blockers remain |
 | Zero-gamma stability across real intraday sequences | `NOT_VALIDATED_WITH_LIVE_THETADATA` |
 | `STICKY_DELTA`, `SURFACE_REFIT` conventions | `NOT_IMPLEMENTED` (refuse explicitly rather than approximate) |
 | `CALENDAR_MIDNIGHT` expiration rule | `NOT_IMPLEMENTED` â€” declared but rejected; no index option settles at midnight |

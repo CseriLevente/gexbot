@@ -1,5 +1,25 @@
 ﻿# Changelog
 
+## 2.1.29 - the v2.1.28 rules meet a live capture
+
+The controlled 2026-09-02 ThetaData session was captured from the exact v2.1.28
+commit and certified offline against its preserved archive. This evidence-only
+release commits the generated certification report and regression assertions; it
+does not commit paid raw responses and changes no production source or schema.
+
+The contract list, quote snapshot and Greeks snapshot named the same 13,536
+identities. The analytical-universe partition was exhaustive and its session
+sources agreed: 11,816 current, 496 expiring in the session, 496 expired before
+the session and 728 with no open-interest record. Open-interest accounting kept
+9,435 positive answers, 3,373 explicit zeroes and 728 absent rows distinct.
+
+The capture remains untrusted for GEX. Its vendor pricing rate was not identified,
+and there is no evidence-backed imputation policy for the 728 missing OI records.
+No gate was relaxed.
+
+Status: IMPLEMENTED | TESTED_SYNTHETICALLY | TESTED_WITH_OFFLINE_FIXTURES |
+VALIDATED_WITH_LIVE_THETADATA_CAPTURE | NOT_READY_FOR_ANALYTICAL_DATASET.
+
 ## 2.1.28 - open interest that is absent, and contracts that already expired
 
 Repeated live ThetaData captures establish two vendor behaviours the analytical

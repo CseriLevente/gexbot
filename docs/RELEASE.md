@@ -188,7 +188,7 @@ python -m pytest tests/unit/test_release_integrity.py -q
 python -m pytest -m integration -q
 
 # Adapter-certification readiness
-python -m pytest tests/unit/test_adapter_certification.py tests/unit/test_certification_states.py -q
+python -m pytest tests/unit/test_adapter_validator.py tests/unit/test_certification_states.py -q
 ```
 
 ---

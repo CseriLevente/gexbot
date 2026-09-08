@@ -221,7 +221,7 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
-Current: **90.62%** across 13,588 statements, against a fail_under of 90.
+Current: **90.32%** across 13,850 statements, against a fail_under of 90.
 
 ### Three versions, three meanings
 
@@ -229,7 +229,7 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.29` | `pyproject.toml` | anything ships |
+| Package version | `2.1.30` | `pyproject.toml` | anything ships |
 | Parser version | `thetadata-v3-parser/2.1.17` | `src/adapters/raw_store.py` | vendor-payload interpretation changes -- v2.1.15 replays the exact stored bytes under the captured content type and charset rather than a UTF-8-with-replacement reading of them |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
 | Manifest schema | `raw-capture-manifest/2.1.17` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
@@ -260,6 +260,9 @@ They move independently, and conflating them is how a change hides.
 | Data-eligibility schema | `analytical-universe/2.1.28` | `src/domain/analytical_universe.py` | the *meaning* of an eligibility verdict changes -- when a contract that used to be eligible would now be excluded, or excluded under a different reason. New in v2.1.28: an open-interest record that does not exist stops being spelled `0`, and a contract whose expiration precedes the capture's market session stops being part of the current analytical universe |
 | Analytical-universe report schema | `analytical-universe-report/2.1.28` | `src/adapters/thetadata/analytical_universe.py` | what a capture's eligibility partition must carry changes. Separate from the certification schema **and deliberately not part of it**: nothing about what a certification derives from a capture changed in v2.1.28, so `capture-certification/2.1.27` did not move and both committed live-capture reports still reproduce their `report_hash` |
 | Analytical-universe algorithm | `analytical-universe/1` | `src/adapters/thetadata/analytical_universe.py` | the *classification* changes -- when an identity that used to land in one class would now land in another. Separate from the schema above for the same reason `oi-transition/1` is separate from `longitudinal-oi`: two reports with the same fields are incomparable if they were classified differently |
+| ThetaData support-evidence schema | `thetadata-support-evidence/2.1.30` | `src/adapters/thetadata/oi_policy.py` | what privacy-safe metadata and closed claims are extracted from a private vendor email changes |
+| OI-policy-resolution schema | `oi-policy-resolution/2.1.30` | `src/adapters/thetadata/oi_policy.py` | how vendor support claims are composed with a frozen capture report changes |
+| OI-policy derivation | `thetadata-oi-policy/1` | `src/adapters/thetadata/oi_policy.py` | the policy conclusions or capture-binding rules change |
 | Longitudinal-OI schema | `longitudinal-oi/2.1.27` | `src/adapters/thetadata/oi_transition.py` | what a cross-capture open-interest transition report must carry changes |
 | OI-transition algorithm | `oi-transition/1` | `src/adapters/thetadata/oi_transition.py` | the *classification* changes — when an identity that used to land in one transition class would now land in another. Separate from the schema above because two reports with the same fields are still incomparable if they were classified differently |
 | Archive-identity schema | `archive-identity/2.1.26` | `src/adapters/thetadata/capture_certification.py` | what it takes for an archive to *be* a capture's archive changes. New in v2.1.26, and separate from the certification schema because it moves for its own reasons: the archived manifest is now rebuilt from its own descriptors rather than read, the archived run intent must equal this capture's byte for byte, and an archive whose entry names collide once separators are normalised is refused rather than resolved by entry order |

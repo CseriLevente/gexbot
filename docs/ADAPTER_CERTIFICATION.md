@@ -1946,9 +1946,11 @@ often enough that zero is not a conservative reading of it.
 
 The domain now carries three states rather than a number-or-nothing, and an
 unanswered identity is excluded as **unavailable** rather than weighted zero.
-That is an eligibility rule about what this repository computes over. It is not
-a claim that the vendor means zero by an absent record, and no imputation policy
-follows from it. See `docs/DATA_ELIGIBILITY.md`.
+That began as an eligibility rule derived from the captures. ThetaData support
+confirmed on 2026-09-06 that absence is ambiguous and recommended the same
+handling: unavailable, excluded and never imputed. The clarification is composed
+with the frozen Sep-2 report under `oi-policy-resolution/2.1.30`; historical
+certification hashes are not rewritten. See `docs/DATA_ELIGIBILITY.md`.
 
 ## What this did not do to the blockers
 

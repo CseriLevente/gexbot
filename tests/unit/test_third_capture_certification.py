@@ -101,6 +101,25 @@ def test_same_session_expiry_is_kept_and_prior_session_expiry_is_not(third):
     }
 
 
+def test_the_fully_missing_expiration_is_named_not_explained(third):
+    coverage = third["open_interest_coverage"]
+    assert coverage["fully_missing_expirations"] == ["2026-10-23"]
+    missing = {row["expiration"]: row for row in coverage["missing_by_expiration"]}
+    assert missing["2026-10-23"] == {
+        "expiration": "2026-10-23",
+        "listed": 216,
+        "missing": 216,
+    }
+    eligibility = {
+        row["expiration"]: row for row in third["analytical_universe"]["per_expiration"]
+    }
+    assert eligibility["2026-10-23"] == {
+        "expiration": "2026-10-23",
+        "listed": 216,
+        "class_counts": {"EXCLUDED_OPEN_INTEREST_NOT_REPORTED": 216},
+    }
+
+
 def test_live_evidence_does_not_relax_the_trusted_gex_gate(third):
     assert third["trusted_for_gex"] is False
     assert third["analytical_readiness"] == "ADAPTER_CERTIFICATION_EVIDENCE"

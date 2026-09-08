@@ -591,11 +591,12 @@ def test_the_only_operator_commands_acquire_or_read_bytes() -> None:
     once" to appear, so the check is that every command is named.
 
     v2.1.22 added certification, which reads a capture already taken. v2.1.27
-    added the cross-capture comparison, which reads two. The guard was never
-    "one command" or "two" -- it is that a command here either acquires raw
-    bytes or reads bytes already acquired, and none of them trades. Adding a
-    name to this list is the moment somebody has to say which of those a new
-    command is.
+    added the cross-capture comparison, which reads two. v2.1.30 added the
+    offline policy resolver, which reads a private support email and one frozen
+    certification to emit a sanitized derivative. The guard was never "one
+    command" or "two" -- it is that a command here either acquires raw bytes or
+    reads bytes already acquired, and none of them trades. Adding a name to
+    this list is the moment somebody has to say which of those a new command is.
     """
     tools = SRC / "tools"
     modules = sorted(p.name for p in tools.glob("*.py") if p.name != "__init__.py")
@@ -608,6 +609,9 @@ def test_the_only_operator_commands_acquire_or_read_bytes() -> None:
         # network, and it decides nothing: the open-interest policy question it
         # gathers evidence for is left explicitly unresolved.
         "compare_thetadata_captures.py",
+        # Reads a private vendor email plus one frozen certification and emits a
+        # privacy-safe policy overlay. No network and no trading behavior.
+        "resolve_thetadata_oi_policy.py",
     ], modules
 
 

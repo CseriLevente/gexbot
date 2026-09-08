@@ -301,7 +301,7 @@ def test_all_three_versions_are_documented():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert package["project"]["version"] == "2.1.29"
+    assert package["project"]["version"] == "2.1.30"
 
     text = (root / "docs" / "VALIDATION.md").read_text(encoding="utf-8")
     # The engine stays at 2.1.10. Nothing about how rows become a gamma has
@@ -357,6 +357,12 @@ def test_all_three_versions_are_documented():
         "analytical-universe/2.1.28",
         "analytical-universe-report/2.1.28",
         "analytical-universe/1",
+        # v2.1.30: private support correspondence is reduced to a
+        # sanitized receipt, then composed with the frozen Sep-2 report.
+        # Neither historical report schema nor either classifier moves.
+        "thetadata-support-evidence/2.1.30",
+        "oi-policy-resolution/2.1.30",
+        "thetadata-oi-policy/1",
         "pricing-compatibility/2.1.22",
         "http-attempt/2.1.17",
         "analytical-readiness/2.1.13",

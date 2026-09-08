@@ -9,8 +9,11 @@ A **GEX research engine** for SPX/SPXW option chains.
 
 The capture path has now been exercised against preserved live ThetaData
 responses.
-Trusted GEX is still blocked by missing open interest and unresolved pricing
-evidence.
+Trusted full-universe GEX is still blocked by incomplete open-interest
+coverage and unresolved pricing evidence. ThetaData support has confirmed
+that a missing OI row is ambiguous and should be excluded as unavailable;
+v2.1.30 records that clarification without turning missing coverage into a
+complete universe.
 
 ---
 
@@ -22,7 +25,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2907 tests, 90% coverage
+.venv/Scripts/python.exe -m pytest         # 2933 tests, 90% coverage
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no

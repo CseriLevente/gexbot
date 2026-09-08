@@ -247,6 +247,16 @@ def test_no_environment_or_credential_file_is_tracked(in_git_repo):
     assert offenders == []
 
 
+def test_no_private_correspondence_is_tracked(in_git_repo):
+    private_suffixes = {".eml", ".msg"}
+    offenders = [
+        path
+        for path in tracked_files()
+        if pathlib.PurePosixPath(path).suffix.lower() in private_suffixes
+    ]
+    assert offenders == []
+
+
 def test_no_tracked_file_contains_something_shaped_like_a_credential(in_git_repo):
     offenders: list[str] = []
     for path in tracked_files():
@@ -321,6 +331,17 @@ def test_the_archive_carries_no_captured_payloads(in_git_repo, tmp_path):
     with zipfile.ZipFile(archive) as bundle:
         names = bundle.namelist()
     assert not [n for n in names if n.startswith("artifacts/") or n.endswith(".raw")]
+
+
+def test_the_archive_carries_no_private_correspondence(in_git_repo, tmp_path):
+    archive = tmp_path / "release.zip"
+    if git("archive", "--format=zip", f"--output={archive}", "HEAD").returncode != 0:
+        pytest.skip("git archive unavailable")
+    import zipfile
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+    assert not [name for name in names if name.lower().endswith((".eml", ".msg"))]
 
 
 def test_the_archive_contains_the_source_the_tests_and_the_docs(in_git_repo, tmp_path):

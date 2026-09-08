@@ -24,6 +24,11 @@ unusable), `mid`, `spread`, `spread_pct_of_mid`, `is_crossed`, `is_locked`,
 `effective_iv` is named that rather than `implied_vol` so that reading a bare
 volatility off a quote is impossible without also having `quote.iv.source`.
 
+ThetaData support confirmed in v2.1.30 that an absent OI row is ambiguous: it
+can represent zero or a message that is not yet available, and no status field
+distinguishes those cases. `None` therefore remains unavailable and excluded;
+the approximately 06:30 ET delivery schedule never converts it to `0`.
+
 ## `ContractTimestamps`
 
 | Field | Type | Meaning |

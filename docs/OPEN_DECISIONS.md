@@ -636,7 +636,7 @@ real session.
 
 ---
 
-## 26. Open-interest settlement date - **CALLER-SUPPLIED, unverified**
+## 26. Open-interest settlement date - **VENDOR-DOCUMENTED AND SUPPORT-CONFIRMED**
 
 **The question.** Which settlement date does ThetaData's open interest belong
 to?
@@ -652,8 +652,11 @@ own confidence rather than pointing at anything.
 
 **Why it matters.** Open interest is the weight on every GEX term.
 
-**What would settle it.** One live response inspected for a settlement-date
-field.
+**Resolution.** ThetaData's pinned OpenAPI document states that snapshot OI
+represents the previous trading day, and the 2026-09-06 support reply confirms
+the prior completed trading session and approximately 06:30 ET daily OPRA
+delivery. The delivery time is descriptive and is never used as a completeness
+threshold. Individual missing rows remain ambiguous.
 
 ---
 
@@ -881,7 +884,7 @@ manifest, the store and the provenance claims and derives the rest itself.
 
 ---
 
-## 37. Open interest: the number and the session are separate facts - **OPEN**
+## 37. Open interest: the number and the session are separate facts - **VENDOR-CLARIFIED; COVERAGE STILL BLOCKS**
 
 **The question.** An open-interest response carries a figure. Which settlement
 session does that figure belong to?
@@ -1002,9 +1005,17 @@ decision, and it is not a claim that the vendor means zero by an absent record:
 which settlement session a figure belongs to is still `CALLER_ASSUMPTION`, and
 `OI_IMPUTATION_POLICY_UNRESOLVED` still stands. See `docs/DATA_ELIGIBILITY.md`.
 
+**v2.1.30 vendor clarification.** ThetaData support confirms that a missing row
+cannot distinguish zero from not-yet-available OI and that no status field does
+so. The recommended handling is unavailable, excluded and never imputed. This
+settles the project-level handling policy while leaving the historical
+transition report unchanged: that report still states what its two captures
+alone could establish. Incomplete coverage continues to block a trusted
+full-universe aggregate.
+
 ---
 
-## 38. Snapshot endpoints retain expired contracts - **OBSERVED, excluded by policy**
+## 38. Snapshot endpoints retain expired contracts - **VENDOR-CONFIRMED, excluded by policy**
 
 **The question.** ThetaData's snapshot endpoints keep returning contracts whose
 expiration precedes the session being captured. What is the analytical layer
@@ -1032,21 +1043,21 @@ same-session series past its settlement *clock* is excluded separately by
 `EXPIRED_BEFORE_SESSION`, hashed into their class set, and left in the capture,
 the chain and the evidence.
 
-**What is not decided.** Why the vendor retains them. A snapshot endpoint that
-serves the last known state of a contract for a session after it expires is a
-defensible design, and nothing here establishes intent -- only that the rows are
-present and that they are not this session's universe. No vendor documentation
-covering retention has been found, extracted or pinned.
+**Vendor clarification.** ThetaData support says the retention is intentional:
+a contract is filtered only once it is more than one day past expiration, so a
+contract that expired yesterday remains available for session reconciliation.
+That explains the vendor response and changes no analytical eligibility rule.
 
 **Later evidence.** The controlled 2026-09-02 capture reproduced the behaviour:
 all three identity sets agreed while 496 contracts expiring on 2026-09-01 were
 still present. The v2.1.28 partition excluded those identities and retained 496
 same-session contracts as eligible.
 
-**What would settle it.** A pinned documentary statement of the retention
-window, or a capture series long enough to establish that the window is exactly
-one session rather than approximately one. It remains an observed behaviour
-applied as an eligibility rule rather than as a model of the vendor.
+**Open vendor follow-up.** The 2026-09-02 capture has one whole expiration,
+`SPXW 2026-10-23`, with all 216 listed identities absent from OI. Support called
+a full-expiration gap unusual and requested the exact case. The saved reply does
+not establish whether the cause is upstream OPRA data or ThetaData ingestion, so
+the status is `VENDOR_REQUESTED_DETAILS`, not a diagnosis.
 
 ---
 

@@ -31,10 +31,27 @@ serves the last known state of a contract for a day after it expires is a
 perfectly defensible design, and it is not the universe an intraday gamma model
 runs over.
 
-`OpenInterestTransitionReport.policy_status` has said
-`OI_IMPUTATION_POLICY_UNRESOLVED` since v2.1.27 and continues to. v2.1.28 does
-not resolve it. It makes the *unavailability* explicit and excludes on it, which
-is a different thing from deciding what the absent value would have been.
+`OpenInterestTransitionReport.policy_status` continues to carry
+`OI_IMPUTATION_POLICY_UNRESOLVED` because that historical comparison contains
+only capture observations. v2.1.30 does not rewrite it. Instead, a separate
+`oi-policy-resolution/2.1.30` report composes the frozen capture evidence with
+the later vendor support clarification.
+
+## v2.1.30 vendor clarification
+
+On 2026-09-06 ThetaData support confirmed that absence is ambiguous: it can
+mean zero OI or that the daily OPRA message is not available, and no response
+field distinguishes the two. Support recommended exactly the conservative
+handling already implemented here: treat the identity as unavailable, exclude
+it from aggregation, and do not impute zero. The private email remains outside
+Git; its SHA-256 and sanitized claims are bound in
+`tests/fixtures/live_capture/oi_policy_resolution_v2_1_30.json`. See
+`docs/evidence/THETADATA_OI_CLARIFICATION_2026-09-06.md`.
+
+That resolves the handling policy, not the missing number. Excluding an
+unknown prevents invented GEX; it does not make a full-universe aggregate
+complete. Every existing trust gate therefore stays closed when any listed
+identity lacks OI.
 
 ## Finding 1 — an absent open-interest record is not an open interest of zero
 
@@ -170,7 +187,9 @@ reconcile against the response the vendor actually sent.
   is the first capture's own session, 4 unanswered of 562 listed, and a rule
   written `<=` instead of `<` would have deleted four real 0DTE identities from
   it.
-- It does not establish an imputation policy. There is still none.
+- The capture comparison by itself does not establish a numeric imputation.
+  v2.1.30 adds the vendor-confirmed `NONE` / exclude-as-unavailable policy as
+  a separate evidence overlay; it does not alter this historical report.
 
 ## Reproducing the fixtures
 

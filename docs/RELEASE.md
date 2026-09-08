@@ -2,8 +2,9 @@
 
 Status: IMPLEMENTED. The archive step, integrity checks and CI job exist and
 pass. v2.1.28 was exercised by a controlled live ThetaData capture on 2026-09-02,
-and v2.1.29 commits the derived report as regression evidence. This validates the
-capture path, not a trusted GEX calculation; the report remains
+v2.1.29 commits its derived report, and v2.1.30 composes a privacy-safe vendor
+support clarification with that frozen evidence. This validates the capture and
+policy-evidence paths, not a trusted GEX calculation; the capture remains
 ADAPTER_CERTIFICATION_EVIDENCE.
 
 This repository is a **research engine**. A release publishes analysis code and
@@ -329,10 +330,11 @@ the universe change and does not make the captures incomparable.
 
 The report answers a question one capture cannot: whether a contract with no
 open-interest row is permanently unavailable or simply had not settled yet. It
-does **not** answer what to do about it, and deliberately says so —
-`analytical_evidence_status` carries `OI_IMPUTATION_POLICY_UNRESOLVED` and
-`imputation_policy` begins `NONE.` Treating a missing row as zero, or dropping
-the contract, remains a decision nobody has made.
+does **not** answer what to do about it and deliberately preserves
+`OI_IMPUTATION_POLICY_UNRESOLVED`: that historical report contains only the two
+captures. v2.1.30 adds a separate vendor-support overlay establishing `NONE` /
+exclude-as-unavailable as the handling policy. The overlay does not make missing
+coverage complete or relax a trust gate.
 
 Two runs over an untouched capture produce the same `report_hash`. A run over an
 edited one does not, and a run over a capture whose payloads no longer match

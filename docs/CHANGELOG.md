@@ -1,5 +1,33 @@
 ﻿# Changelog
 
+## 2.1.30 - vendor OI clarification without rewriting capture evidence
+
+ThetaData support confirmed that a missing open-interest row is ambiguous: it
+may mean zero or not-yet-available OI, no response field distinguishes those
+states, and the recommended handling is unavailable and excluded rather than
+zero. Support also confirmed the prior-completed-session daily OPRA cycle and
+the intentional one-day expired-contract retention window.
+
+This evidence-only release adds a standard-library EML extractor and a separate
+`oi-policy-resolution/2.1.30` report. The private message remains outside Git;
+the committed artifact carries only its SHA-256, sanitized mailbox metadata,
+closed claim identifiers and hashes. Resolution rereads the exact EML and
+requires its pinned content receipt; mailbox authentication-result headers are
+informational rather than authority. The resolver recomputes both bound report
+hashes, refuses stale-hash edits, and requires the certification and analytical
+report to identify the same capture. It composes the claims with the frozen
+Sep-2 certification, from which it derives the unusual `SPXW 2026-10-23` case
+as 216 listed and 216 missing. The vendor requested details; no OPRA-versus-
+ingestion diagnosis is claimed.
+
+All existing classification and trust behavior remains unchanged. Missing OI is
+still `OI_NOT_REPORTED`, never reaches arithmetic, and incomplete coverage still
+blocks a trusted full-universe aggregate. Historical capture, analytical-
+universe and transition fixtures retain their schemas and hashes.
+
+Status: IMPLEMENTED | TESTED_SYNTHETICALLY | TESTED_WITH_OFFLINE_FIXTURES |
+VENDOR_SUPPORT_CLARIFIED | NOT_READY_FOR_TRUSTED_GEX.
+
 ## 2.1.29 - the v2.1.28 rules meet a live capture
 
 The controlled 2026-09-02 ThetaData session was captured from the exact v2.1.28

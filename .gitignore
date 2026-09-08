@@ -22,6 +22,10 @@ htmlcov/
 config/local.yaml
 secrets/
 
+# Private vendor correspondence is external evidence, never source.
+*.eml
+*.msg
+
 # Runtime data and artefacts
 data/
 logs/

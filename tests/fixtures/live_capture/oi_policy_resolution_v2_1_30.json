@@ -1,0 +1,98 @@
+{
+  "capture_binding": {
+    "analytical_universe_report_hash": "27c3f69510bfe8b8f6aae6191ba8e004be37eb759096055b8f47cbfb36242b06",
+    "capture_manifest_hash": "78ea018613022e546001744be1b71b8d4ec853fc1bc627cc0d1f4222c5f2898d",
+    "capture_session_id": "capture-20260902T195700Z-0bccc563691a2ad9",
+    "certification_report_hash": "07dc84dd153e61638b0aece24956b8c5765c31c7093c4e9d115ca8474f626d7b",
+    "certification_schema_version": "capture-certification/2.1.27",
+    "contract_list_universe_hash": "a587cd563f53b5df7cc6bfad2d2f8bdfe861b23fc5e1afd3d16a63cf3ac7792e",
+    "market_session_date": "2026-09-02",
+    "symbol": "SPXW"
+  },
+  "derivation_version": "thetadata-oi-policy/1",
+  "findings": [
+    "ThetaData support confirms that absence alone cannot distinguish zero open interest from a message that is not available, so no number is imputed.",
+    "A missing identity is excluded as unavailable. Exclusion prevents invention; it does not make incomplete full-universe coverage complete.",
+    "The approximately 06:30 ET delivery time is descriptive and is not used as a readiness threshold.",
+    "This capture has 728 listed identities without an open-interest row and remains ineligible for a trusted full-universe aggregate."
+  ],
+  "full_expiration_review": {
+    "expiration": "2026-10-23",
+    "identity_source": "BOUND_CAPTURE_REPORT",
+    "interpretation": "ThetaData support described a fully absent expiration as unusual and requested the exact case. The saved reply does not determine whether the cause was OPRA or ThetaData ingestion.",
+    "listed": 216,
+    "missing": 216,
+    "status": "VENDOR_REQUESTED_DETAILS",
+    "symbol": "SPXW"
+  },
+  "open_interest_coverage": {
+    "coverage_state": "OI_MISSING",
+    "duplicate_oi_identity_count": 0,
+    "oi_covered": 12808,
+    "oi_explicit_zero": 3373,
+    "oi_missing": 728,
+    "permits_trusted_aggregate": false,
+    "unexpected_oi_count": 0,
+    "universe_count": 13536
+  },
+  "policy_resolution": {
+    "delivery": {
+      "cadence": "DAILY",
+      "qualifier": "APPROXIMATE",
+      "time_et": "06:30"
+    },
+    "delivery_schedule_role": "INFORMATIONAL_NOT_READINESS_GATE",
+    "expired_contract_retention": "UNTIL_MORE_THAN_ONE_DAY_PAST_EXPIRATION",
+    "full_universe_coverage_complete": false,
+    "gex_trust_gate_relaxed": false,
+    "imputation_policy": "NONE",
+    "missing_row_semantics": "AMBIGUOUS_ZERO_OR_NOT_YET_AVAILABLE",
+    "missing_row_treatment": "EXCLUDE_AS_UNAVAILABLE",
+    "new_listing_availability": "NEXT_OPRA_CYCLE",
+    "permits_trusted_full_universe_aggregate": false,
+    "recommended_treatment": "UNAVAILABLE_EXCLUDE_NO_IMPUTATION",
+    "settlement_session": "PRIOR_COMPLETED_TRADING_SESSION",
+    "status_discriminator": "NONE",
+    "zero_imputation_permitted": false
+  },
+  "report_hash": "339656fc086be98eda8281b0754f848836b5769068c21de620077cbf845ea575",
+  "schema_version": "oi-policy-resolution/2.1.30",
+  "support_evidence": {
+    "claims": [
+      "OI_ORIGIN_OPRA_DAILY_MESSAGE",
+      "MISSING_ROW_AMBIGUOUS_ZERO_OR_UNAVAILABLE",
+      "MISSING_ROW_EXCLUDE_AS_UNAVAILABLE",
+      "NEW_LISTING_WAITS_FOR_NEXT_OPRA_CYCLE",
+      "NO_ZERO_VS_PENDING_STATUS_FIELD",
+      "OI_REPRESENTS_PRIOR_COMPLETED_SESSION",
+      "ONE_DAY_EXPIRED_CONTRACT_RETENTION",
+      "FULL_EXPIRATION_GAP_VENDOR_REQUESTED_DETAILS"
+    ],
+    "evidence_hash": "7aef83fdde0778ccc5081afaad61d0574aa948d582340a0d30a948734a64b828",
+    "limitations": [
+      "Mailbox authentication-result headers are recorded, not cryptographically reverified by this parser.",
+      "message_date is normalized from the sender-authored Date header; it is not mailbox receipt telemetry.",
+      "The private source body, sender address, recipients and local filesystem path are deliberately omitted.",
+      "The message requests details for a 216-contract expiration gap but does not identify its symbol or expiration date."
+    ],
+    "mailbox_metadata": {
+      "message_date": "2026-09-06T20:57:48Z",
+      "message_id_sha256": "4fe3c3a43a714ea4f0357069e2c1ca9298dc365944f0125d2989ddf8166db550",
+      "reported_authentication_results": {
+        "dkim_pass": true,
+        "dkim_signature_present": true,
+        "dmarc_pass": true,
+        "spf_pass": true
+      },
+      "sender_domain": "thetadata.net",
+      "subject": "Re: Meaning of contracts omitted from the option open-interest snapshot"
+    },
+    "schema_version": "thetadata-support-evidence/2.1.30",
+    "source_artifact": {
+      "bytes": 31411,
+      "format": "RFC5322_EML",
+      "sha256": "29d6678e2fa3e3d1bd2886fb2fcee2ec7bdca73dda65666b05dbc9c0c3ce40fa",
+      "storage": "EXTERNAL_PRIVATE_EVIDENCE"
+    }
+  }
+}

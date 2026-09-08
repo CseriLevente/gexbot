@@ -580,7 +580,11 @@ Since v2.1.18 the capture *does* open under a documented open-interest
 settlement rule, derived from the vendor's own description of
 `/option/snapshot/open_interest`. That is documentary evidence and stays
 classified as such: the rule is chosen when a session opens and there is no
-argument through which one can be supplied later (OD-26).
+argument through which one can be supplied later (OD-26). A 2026-09-06 vendor
+support reply independently confirms the prior-completed-session semantics and
+clarifies that missing rows remain ambiguous. v2.1.30 records that private
+correspondence through a sanitized, hash-bound policy overlay; it does not
+rewrite a capture report.
 
 > Earlier drafts of this page described `pipeline.capture_and_compute(...)`,
 > removed in v2.1.5, alongside `pipeline.compute_gex(...)`, removed in the same

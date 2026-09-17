@@ -274,6 +274,11 @@ _CLOCK_ALLOWED = {
     "test_evidence_binding.py",
     # This file: proving the guard works needs the thing it forbids.
     "test_deterministic_clock.py",
+    # v2.1.36: tests the clock abstraction itself. ``FakeClock.now()`` is not
+    # the wall clock, and ``SystemClock.now()`` is read only to show that
+    # sleeping until a past instant returns promptly; no market question is
+    # decided from either.
+    "test_collection_schedule.py",
 }
 
 #: The call names that read the machine's clock.

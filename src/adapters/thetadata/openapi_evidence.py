@@ -642,6 +642,42 @@ class VendorDocumentationBundle:
         }
 
 
+class _YamlError(Exception):
+    """Raised by :func:`_parsed_yaml` for anything PyYAML refuses."""
+
+
+_PARSED_DOCUMENTS: dict[str, Any] = {}
+_PARSED_DOCUMENTS_LIMIT = 4
+
+
+def _parsed_yaml(body: bytes) -> Any:
+    """Parse document bytes, memoised by their SHA-256.
+
+    The bytes are still reread from disk and re-hashed by every caller, so a
+    document that changed on disk is a different digest and is parsed afresh;
+    what is saved is re-parsing *identical* bytes, which the one-shot capture
+    did seven times per run for an 800 KB document (v2.1.36 measured about
+    five seconds per cycle of an intraday collector spent parsing the same
+    pinned file). Callers receive a deep copy, so nothing they do to the
+    structure can reach another caller.
+    """
+    import copy
+
+    import yaml
+
+    digest = hashlib.sha256(body).hexdigest()
+    parsed = _PARSED_DOCUMENTS.get(digest)
+    if parsed is None:
+        try:
+            parsed = yaml.safe_load(body.decode("utf-8"))
+        except yaml.YAMLError as error:
+            raise _YamlError(str(error)) from error
+        if len(_PARSED_DOCUMENTS) >= _PARSED_DOCUMENTS_LIMIT:
+            _PARSED_DOCUMENTS.clear()
+        _PARSED_DOCUMENTS[digest] = parsed
+    return copy.deepcopy(parsed)
+
+
 def load_vendor_documentation_bundle(
     *,
     root: pathlib.Path | str,
@@ -656,13 +692,11 @@ def load_vendor_documentation_bundle(
     save a few milliseconds once per process and would mean a bundle could
     outlive the file it describes.
     """
-    import yaml
-
     holder = pathlib.Path(root)
     body = document.read_bytes(holder)
     try:
-        parsed = yaml.safe_load(body.decode("utf-8"))
-    except (yaml.YAMLError, UnicodeDecodeError) as error:
+        parsed = _parsed_yaml(body)
+    except (_YamlError, UnicodeDecodeError) as error:
         raise OpenApiExtractionError(
             f"{document.content_location} is not parseable YAML: {error}. The "
             "bytes are held and nothing can be read out of them."
@@ -919,8 +953,6 @@ def endpoint_drift(
     that is too low is refused at the vendor, and a field list that has moved is
     the v2.1.16 index defect returning under a different column name.
     """
-    import yaml
-
     from src.adapters.thetadata.endpoints import (
         MINIMUM_TIER,
         RESPONSE_FIELDS,
@@ -929,7 +961,7 @@ def endpoint_drift(
 
     if endpoints is None:
         endpoints = FIRST_SESSION_ENDPOINTS
-    parsed = yaml.safe_load(document.read_bytes(pathlib.Path(root)).decode("utf-8"))
+    parsed = _parsed_yaml(document.read_bytes(pathlib.Path(root)))
     prefix = _server_base_path(parsed)
     paths = parsed.get("paths") or {}
     findings: list[EndpointDriftFinding] = []

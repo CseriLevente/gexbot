@@ -189,7 +189,29 @@ python -m pytest -m integration -q
 
 # Adapter-certification readiness
 python -m pytest tests/unit/test_adapter_validator.py tests/unit/test_certification_states.py -q
+
+# Offline replay of the frozen synthetic bundle (v2.1.34); the output path must
+# not exist and must be outside the bundle. The printed report_hash must equal
+# the one in tests/fixtures/replay/synthetic_2026-09-08_report.json.
+python -m src.tools.replay_research_session tests/fixtures/replay/synthetic_2026-09-08 --json /tmp/replay-smoke.json
+python -m pytest tests/regression/test_synthetic_replay_fixture.py -q
+
+# Native normalization of the frozen synthetic native-schema capture (v2.1.35):
+# the builder must reproduce every pinned capture digest and the command must
+# reproduce the frozen events, plan and readiness bytes.
+python -m pytest tests/regression/test_native_capture_fixture.py tests/unit/test_native_normalization.py -q
+
+# Intraday collection, assembly and summary, end to end on a fake clock and a
+# fake vendor (v2.1.36): two synthetic sessions are collected, assembled,
+# replayed and summarised; every artefact must say SYNTHETIC. Nothing is sent.
+python -m pytest tests/regression/test_synthetic_session_end_to_end.py tests/unit/test_session_collector.py tests/unit/test_session_assembly.py -q
+# The schedule for any session date needs no approval and writes nothing:
+python -m src.tools.collect_intraday_session --show-schedule 2026-09-15
 ```
+
+The Git-dependent release-integrity tests (`in_git_repo`) skip inside an
+extraction because the archive carries no `.git`; they must have *passed*, not
+skipped, in the checkout the archive was produced from.
 
 ---
 

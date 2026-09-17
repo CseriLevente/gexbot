@@ -1,0 +1,200 @@
+{
+  "schema_version": "intraday-pilot-collection/2.1.36",
+  "status": "IMPLEMENTED_OFFLINE_TESTED_NOT_EXECUTED_LIVE",
+  "purpose": "Collect a small set of genuine intraday sessions with recorded receipts so the v2.1.34 replay can measure data usability. Not a strategy, GEX or profitability study; no order is placed and no purchase is made by this file. v2.1.36 implements the collector and the multi-cycle assembler; no live session has been collected under it.",
+  "grounding": {
+    "vendor_document_sha256": "1b65f93c879a5ca4477a0ff9177235138e0c81840e0c7dddfbd9e34164b40b50",
+    "vendor_document_title": "Theta Data v3 (OpenAPI 3.1.0, 66 paths)",
+    "observed_capture": "capture-20260902T195700Z-0bccc563691a2ad9",
+    "existing_command": "python -m src.tools.capture_thetadata_once (one approved snapshot cycle per invocation; writes manifest, raw payloads, run intent and an attempt log with per-attempt receive times). The collector runs exactly this command once per slot with an explicit endpoint scope; its preflight, per-request authorisation, manifest and verification are unchanged.",
+    "normalizer": "python -m src.tools.normalize_thetadata_capture (one capture directory per run, unchanged single-capture rule) and python -m src.tools.assemble_intraday_session (every executed cycle of one session, merged by recorded availability; implemented in v2.1.36)",
+    "collector": "python -m src.tools.collect_intraday_session (dry run by default; --execute-live --approve <session approval>; --resume; --show-schedule DATE)",
+    "summary": "python -m src.tools.summarize_intraday_pilot (several session readiness reports into one multi-session summary)"
+  },
+  "sessions": {
+    "minimum": 5,
+    "selection": "Regular (non-early-close) trading sessions named in advance in the run intent; consecutive where possible so prior-session open interest is itself observed the day before.",
+    "calendar_check": "/v3/calendar/on_date for each named session, recorded with the run intent.",
+    "preparation": "The dry run must be taken on the session day (after midnight ET) because both approvals bind the market session date; the session approval additionally binds the schedule fingerprint, the request budget, the policy and the destination."
+  },
+  "research_contract": {
+    "cadence_seconds": 60,
+    "close_buffer_minutes": 15,
+    "max_dte": 7,
+    "max_market_age_seconds": 60.0,
+    "max_market_skew_seconds": 2.0,
+    "open_delay_minutes": 5,
+    "root": "SPXW",
+    "schema_version": "intraday-research-contract/2.1.33"
+  },
+  "cycle": {
+    "cadence_seconds": 60,
+    "first_cycle_et": "09:30:00",
+    "last_cycle_et": "15:59:00",
+    "slots": "One slot per cadence from the calendar open (09:30:00 ET) while the slot instant is before the calendar close: 09:30:00 .. 15:59:00 ET on a regular session (390 slots), 09:30:00 .. 12:59:00 ET on an early close (210 slots). The 09:29 first cycle of the v2.1.35 specification was outside the one-shot's capture window and is corrected, not overridden.",
+    "scopes": {
+      "MARKET": [
+        "/v3/index/snapshot/price",
+        "/v3/option/snapshot/quote",
+        "/v3/option/snapshot/greeks/first_order"
+      ],
+      "FULL": [
+        "/v3/index/snapshot/price",
+        "/v3/option/snapshot/quote",
+        "/v3/option/snapshot/greeks/first_order",
+        "/v3/option/snapshot/open_interest",
+        "/v3/option/list/contracts/quote"
+      ],
+      "rule": "FULL on the first slot and every refresh_every_seconds thereafter (09:30, 10:00, ..., 15:30 ET); MARKET otherwise."
+    },
+    "alignment": "One cycle in flight. A cycle may start until start_tolerance_seconds after its slot boundary. A cycle that spans later boundaries is recorded as overrunning; the slots it spans are recorded MISSED_OVERRUN and collection resumes at the next boundary still in the future. No overlap, no catch-up burst.",
+    "request_order": [
+      "/v3/index/snapshot/price",
+      "/v3/option/snapshot/quote",
+      "/v3/option/snapshot/open_interest",
+      "/v3/option/snapshot/greeks/first_order",
+      "/v3/option/list/contracts/quote"
+    ],
+    "request_order_note": "The order the existing request plan issues (verified against config/thetadata_intraday.yaml by test_the_intraday_profile_plans_the_specified_requests). The v2.1.35 specification listed Greeks before open interest; the pipeline has always issued open interest between the quote and Greeks requests, and the collector reuses the plan rather than reordering it. On the September 2 capture the quote and Greeks receipts were 1.08 s apart, inside the two-second skew budget; a MARKET cycle issues no open-interest request, so its quote and Greeks requests are adjacent.",
+    "why_quote_before_greeks": "The Greeks endpoint re-reads quotes; issuing it after the quote request keeps the two market observations inside the two-second skew budget where the vendor allows."
+  },
+  "requests": [
+    {
+      "endpoint": "/v3/index/snapshot/price",
+      "parameters": {
+        "symbol": "SPX"
+      },
+      "cadence": "every slot",
+      "yields": "spx_price"
+    },
+    {
+      "endpoint": "/v3/option/snapshot/quote",
+      "parameters": {
+        "symbol": "SPXW",
+        "expiration": "*",
+        "max_dte": 7
+      },
+      "cadence": "every slot",
+      "yields": "option_quote",
+      "note": "The pinned parameter max_dte is not documented as calendar or trading days; the replay applies its own 0-7 calendar-day filter regardless."
+    },
+    {
+      "endpoint": "/v3/option/snapshot/greeks/first_order",
+      "parameters": {
+        "symbol": "SPXW",
+        "expiration": "*",
+        "max_dte": 7,
+        "rate_type": "sofr",
+        "rate_value": 0.042,
+        "annual_dividend": 0.0,
+        "version": "latest"
+      },
+      "cadence": "every slot",
+      "yields": "greeks, model_evidence",
+      "note": "Model parameters are fixed in the run intent before the first request; the normalizer derives model_id from the verified request and never from a later choice."
+    },
+    {
+      "endpoint": "/v3/option/snapshot/open_interest",
+      "parameters": {
+        "symbol": "SPXW",
+        "expiration": "*",
+        "max_dte": 7
+      },
+      "cadence": "FULL slots: first cycle, then every refresh_every_seconds (30 minutes)",
+      "yields": "open_interest",
+      "note": "OPRA publishes open interest around 06:30 ET for the prior session; repeated requests exist to observe revisions, and a missing row stays unavailable."
+    },
+    {
+      "endpoint": "/v3/option/list/contracts/quote",
+      "parameters": {
+        "symbol": "SPXW",
+        "date": "<session>",
+        "max_dte": 7
+      },
+      "cadence": "FULL slots: first cycle, then every refresh_every_seconds (30 minutes)",
+      "yields": "contract_list"
+    }
+  ],
+  "receipt_recording": {
+    "required_per_attempt": [
+      "request_started_at (UTC, microseconds)",
+      "received_at (UTC, microseconds, taken when the last body byte is read)",
+      "status_code or transport_error_code",
+      "response body SHA-256 and byte length",
+      "logical_request_id linking the attempt to its manifest record"
+    ],
+    "existing_implementation": "src/adapters/http_attempts.HttpAttemptLog (append-only index.jsonl, fsync per line, content-addressed bodies) and RawCaptureManifest.response_received_at inside the verified manifest hash.",
+    "clock": "One UTC wall clock per host, read by the collector through one injected clock that also stamps every request's attempt receipt. The collector does not measure NTP synchronisation; the runbook has the operator check it (w32tm /query /status) before the open and note the result with the session. Vendor row timestamps that postdate the local receipt are counted, never corrected; the normalizer's default tolerance is 0 ms."
+  },
+  "recovery": {
+    "missing_request": "The failed attempt (transport error or non-2xx) is recorded in the cycle's attempt log; the cycle continues with its remaining requests; nothing is retried past the cycle boundary. The cycle is assembled with the endpoints it acquired and the failure is reported per cycle and per endpoint.",
+    "interruption": "Every cycle is its own one-shot capture directory under <session>/cycles/<HHMMSS>/. A restart (--resume with the same session approval) reopens the session log; slots that passed during the gap are recorded MISSED_RESTART_GAP and collection resumes at the next future boundary. Gaps are reported by the assembler and the replay as decisions without availability; they are never backfilled from history or at_time endpoints, which carry no receipt for the historical instant.",
+    "partial_payload": "A body that fails its manifest digest, or a response too large to read, is refused as a whole; no partial rows are normalized.",
+    "self_stop": "The session stops itself after max_consecutive_failed_cycles cycles that acquired nothing, or when the one-shot reports AUTHENTICATION_REJECTED or STORAGE_FAILURE; the stop is logged and the summary written."
+  },
+  "normalization_merge_rule": {
+    "status": "IMPLEMENTED",
+    "implementation": "src/adapters/thetadata/session_assembly.py (assemble_session), on top of the unchanged single-capture normalizer research_events.normalize_capture with expected_endpoints and allow_unacquired",
+    "rule": [
+      "Verify the session structure first: intent, session approval, schedule fingerprint, log, and every executed cycle's manifest, session id, scope, session date and approval against the log.",
+      "Normalize every executed cycle under the scope it was scheduled to issue; apply the single-capture rules inside each payload first (repeated identities grouped, identical duplicates coalesced, conflicts excluded whole).",
+      "Merge all cycles' records in recorded-availability order with the deterministic tie-break (available_at, cycle label, kind, key, event_at, row_index).",
+      "For each (kind, key, event_at) keep the CURRENT KNOWN REVISION. A record equal to it is a re-observation: not emitted, counted REOBSERVED_UNCHANGED; the original keeps its original availability and the event's age is never refreshed by re-observation.",
+      "A record that differs from the current revision is the next revision (sequence + 1) available at its own receipt. A -> B -> A yields three revisions; the final A is never discarded because it once appeared.",
+      "A new event_at is a new event with sequence 0, also when an older event_at arrives after a newer one (counted LATE_OLDER_EVENT); the replay's selection by (event_at, sequence) before validity is unchanged.",
+      "Each contract-list receipt is its own inventory event (event_at = receipt). Open interest and inventory acquired in a FULL cycle are reused between refreshes only through their own earlier availability; nothing is relabelled as observed in a later cycle, and a missing open-interest row stays unavailable.",
+      "An ambiguous (conflicting) observation revises nothing and revives nothing: the previously available state stands on its original receipt; the incident is counted AMBIGUOUS_AFTER_KNOWN_STATE or AMBIGUOUS_WITHOUT_KNOWN_STATE.",
+      "A MARKET cycle's option records are membership-checked against the latest listing available at their receipt (NOT_IN_LATEST_INVENTORY excluded, counted); before any listing is available they are retained and counted UNCHECKED_NO_INVENTORY_YET.",
+      "Every merged record's lineage names cycle, request_id, raw payload sha256, native row index, rule version and availability basis; the document's provenance names the session approval, the schedule fingerprint, the intent and log digests and every cycle's manifest."
+    ],
+    "tests": "tests/unit/test_session_collector.py, tests/unit/test_session_assembly.py, tests/regression/test_synthetic_session_end_to_end.py"
+  },
+  "futures": {
+    "status": "UNSUPPORTED_BY_PINNED_SOURCE",
+    "finding": "None of the 66 pinned paths serves futures; the observed capture contains no futures contract, quote, size, tick size, point value or fee.",
+    "required_fields": {
+      "futures_quote": [
+        "instrument identity ROOT|YYYY-MM-DD",
+        "bid",
+        "ask",
+        "bid_size",
+        "ask_size",
+        "vendor event time",
+        "recorded receipt"
+      ],
+      "instrument": [
+        "tick_size",
+        "point_value",
+        "currency",
+        "valid_from",
+        "valid_to",
+        "recorded receipt of the declaration"
+      ],
+      "costs": [
+        "fee_per_contract_side",
+        "extra_slippage_ticks",
+        "valid_from",
+        "valid_to",
+        "recorded receipt of the declaration"
+      ]
+    },
+    "action": "Identify a futures source that records receive times before the pilot. Choosing or paying for one is an operational decision outside this repository; this file does not name a contract or a provider it has not inspected."
+  },
+  "not_covered_by_this_specification": [
+    "Any endpoint outside the pinned document.",
+    "Historical or at_time downloads as availability evidence.",
+    "Subscription or purchase decisions.",
+    "Strategy, position, PnL or GEX computation."
+  ],
+  "collection": {
+    "cadence_seconds": 60,
+    "refresh_every_seconds": 1800,
+    "start_tolerance_seconds": 5,
+    "max_consecutive_failed_cycles": 5
+  },
+  "operational_preconditions_validated": [
+    "The one-shot refuses requests outside the market session window unless explicitly overridden; the schedule's first slot is the calendar open, 09:30:00 ET, inside that window, and no override is passed. The 09:29 ET first cycle proposed in v2.1.35 is corrected.",
+    "Bounded concurrency: one cycle in flight; an overrunning cycle is recorded, the slots it spans are MISSED_OVERRUN, and the next cycle starts at the next future boundary.",
+    "Raw request parameters (rate_value, annual_dividend) are recorded as wire values; a resolved economic rate and dividend yield need their own evidence before any GEX arithmetic. The assembler promotes neither."
+  ]
+}

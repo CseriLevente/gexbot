@@ -67,6 +67,11 @@ class IVQualityFlag(str, Enum):
 # A data-quality threshold, not a market hypothesis.
 DEFAULT_WIDE_IV_SPREAD = 0.10
 
+# Above this absolute vendor-reported solver error the vendor's own implied
+# volatility is not accepted. Shared with the capture normalizer so both paths
+# refuse the same rows for the same reason.
+VENDOR_IV_ERROR_LIMIT = 0.5
+
 
 @dataclass(frozen=True, slots=True)
 class ImpliedVolQuote:
@@ -213,7 +218,7 @@ def _classify(
         return IVQualityFlag.CROSSED_MARKET
     if value <= 0.0:
         return IVQualityFlag.OUT_OF_RANGE
-    if vendor_iv_error is not None and abs(vendor_iv_error) > 0.5:
+    if vendor_iv_error is not None and abs(vendor_iv_error) > VENDOR_IV_ERROR_LIMIT:
         return IVQualityFlag.VENDOR_ERROR
     if zero_bid:
         return IVQualityFlag.ZERO_BID

@@ -1,0 +1,26 @@
+{
+  "contract": {
+    "cadence_seconds": 60,
+    "close_buffer_minutes": 15,
+    "max_dte": 7,
+    "max_market_age_seconds": 60.0,
+    "max_market_skew_seconds": 2.0,
+    "open_delay_minutes": 5,
+    "root": "SPXW",
+    "schema_version": "intraday-research-contract/2.1.33"
+  },
+  "fill_policy": {
+    "latency_ms": 250,
+    "max_quote_age_ms": 1000,
+    "max_wait_ms": 2000
+  },
+  "probes": [],
+  "schema_version": "research-replay-plan/2.1.34",
+  "session_date": "2026-09-08",
+  "sources": [
+    {
+      "path": "events.json",
+      "sha256": "6bffebc571040172a9023b99d65a0b013131b557de21c1c3c9a6d4ec88f08aa3"
+    }
+  ]
+}

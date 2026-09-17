@@ -2240,8 +2240,15 @@ class ThetaDataResearchPipeline:
         capture: Any,
         as_of: datetime,
         plan: Any = None,
+        scheduled_endpoints: frozenset[str] | None = None,
     ) -> Any:
         """Request every planned endpoint and store whatever comes back.
+
+        ``scheduled_endpoints`` (v2.1.36) issues only that subset of the
+        approved plan. Every request issued is still authorised against the
+        full approved plan; an endpoint outside the plan is refused. The
+        outcome's ``planned_endpoints`` is the subset, so it describes the
+        sweep that ran rather than the plan it was cut from.
 
         ``plan`` is the **already-authorized** request plan. The operator
         derives it once, proves it is the approved one, and hands the object
@@ -2303,6 +2310,18 @@ class ThetaDataResearchPipeline:
                 "different session."
             )
         planned = self.raw_request_parameters(as_of=as_of)
+        if scheduled_endpoints is not None:
+            known = {endpoint.value for endpoint, _ in planned}
+            if not scheduled_endpoints or not set(scheduled_endpoints) <= known:
+                raise PipelineConsistencyError(
+                    f"scheduled endpoints {sorted(scheduled_endpoints)} are not a "
+                    f"nonempty subset of the planned endpoints {sorted(known)}"
+                )
+            planned = tuple(
+                (endpoint, params)
+                for endpoint, params in planned
+                if endpoint.value in scheduled_endpoints
+            )
         client = self.runtime.client
         observer = getattr(getattr(client, "transport", None), "attempt_observer", None)
 

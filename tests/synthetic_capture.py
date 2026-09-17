@@ -476,10 +476,27 @@ def _documentation(root: pathlib.Path, vendor: SyntheticVendor) -> dict[str, Any
     }
 
 
-def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
-    """Write a capture directory that passes every verification in load_capture."""
+def write_capture(
+    root: pathlib.Path,
+    vendor: SyntheticVendor,
+    *,
+    bodies: dict[str, str] | None = None,
+    timing: dict[str, tuple[datetime, datetime]] | None = None,
+    attempts: dict[str, datetime | None] | None = None,
+    origin: CaptureOrigin = CaptureOrigin.LOCAL_TERMINAL_CAPTURE,
+) -> pathlib.Path:
+    """Write a capture directory that passes every verification in load_capture.
+
+    The keyword options exist for the v2.1.35 normalizer tests and leave the
+    default capture byte-identical: ``bodies`` replaces the generated payloads
+    with native-schema text per endpoint, ``timing`` stamps ``(request_started_at,
+    response_received_at)`` on the manifest records that name it, ``attempts``
+    writes an attempt log whose entries carry the given ``received_at`` (``None``
+    records the attempt without a receipt), and ``origin`` is the transport
+    origin stamped into the manifest hash.
+    """
     (root / "raw").mkdir(parents=True, exist_ok=True)
-    bodies = _bodies(vendor)
+    bodies = _bodies(vendor) if bodies is None else bodies
     session_id = "capture-synthetic"
     stamp = vendor.valuation.astimezone(ZoneInfo("UTC"))
     documentation = _documentation(root, vendor)
@@ -492,6 +509,17 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
         (root / "raw" / name).write_bytes(raw)
         canonical = canonical_parameters(_parameters(vendor, endpoint))
         stamped = planned_request_hash(SPEC_FINGERPRINT, endpoint, canonical)
+        started, received = (timing or {}).get(endpoint, (None, None))
+        if attempts is not None and endpoint in attempts:
+            _record_attempt(
+                root,
+                endpoint=endpoint,
+                request_id=f"req-{sequence:04d}",
+                sequence=sequence,
+                raw=raw,
+                started=started or stamp,
+                received=attempts[endpoint],
+            )
         records.append(
             ManifestRecord(
                 record_id=f"{session_id}-{sequence:04d}",
@@ -504,8 +532,10 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
                 request_id=f"req-{sequence:04d}",
                 request_sequence=sequence,
                 http_status=200,
+                request_started_at=started,
+                response_received_at=received,
                 byte_length=len(raw),
-                capture_origin=CaptureOrigin.LOCAL_TERMINAL_CAPTURE,
+                capture_origin=origin,
                 capture_session_id=session_id,
                 request_spec_fingerprint=SPEC_FINGERPRINT,
                 planned_request_hash=stamped,
@@ -561,6 +591,43 @@ def write_capture(root: pathlib.Path, vendor: SyntheticVendor) -> pathlib.Path:
     return root
 
 
+def _record_attempt(
+    root: pathlib.Path,
+    *,
+    endpoint: str,
+    request_id: str,
+    sequence: int,
+    raw: bytes,
+    started: datetime,
+    received: datetime | None,
+) -> None:
+    """Append one attempt to ``root/attempts`` exactly as the transport would."""
+    from src.adapters.http_attempts import HttpAttemptLog, HttpAttemptRecord
+
+    store = root / "attempts"
+    log = (
+        HttpAttemptLog(store)
+        if (store / "index.jsonl").exists()
+        else HttpAttemptLog.create_new(store)
+    )
+    log.observe(
+        HttpAttemptRecord(
+            logical_request_id=request_id,
+            attempt_number=1,
+            endpoint=endpoint,
+            safe_url=f"http://127.0.0.1:25503{endpoint}",
+            request_parameters_hash=hashlib.sha256(
+                f"{endpoint}:{sequence}".encode()
+            ).hexdigest(),
+            started_at=started,
+            received_at=received,
+            status_code=200,
+            response_headers={"content-type": "text/csv"},
+        ),
+        body=raw,
+    )
+
+
 def _rate_intent(vendor: SyntheticVendor) -> Any:
     """The capture's statement of what it meant to buy."""
     from src.adapters.thetadata.live_behavior import CaptureRateIntent
@@ -583,12 +650,13 @@ def _approval(vendor: SyntheticVendor, bundle_fingerprint: str) -> Any:
     approval binds the documentation bundle but carries no rate-intent
     fingerprint, which is exactly the shape of the real first capture's.
     """
-    from datetime import date as _date
-
     from src.adapters.thetadata.preflight_approval import CapturePreflightApproval
 
     return CapturePreflightApproval(
-        market_session_date=_date(2026, 8, 10),
+        # The session the capture's own valuation instant falls in. A fixed
+        # date here disagreed with any scenario taken on another day, which the
+        # v2.1.36 normalizer cross-checks against the listing date.
+        market_session_date=vendor.valuation.astimezone(EASTERN).date(),
         request_plan_hash="b" * 64,
         capture_plan_fingerprint="c" * 64,
         pipeline_fingerprint="d" * 64,

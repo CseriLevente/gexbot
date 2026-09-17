@@ -1,0 +1,208 @@
+# ThetaData intraday collection profile (v2.1.36) -- NOT YET RUN LIVE.
+#
+# The profile the session collector (`python -m src.tools.collect_intraday_session`)
+# runs once per approved slot through the one-shot capture command. It is the
+# capture profile `config/thetadata_capture.yaml` with one change: the vendor
+# filter `thetadata.max_dte` (and the matching `data.max_dte`) is 7 instead of
+# 60, the scope `config/intraday_pilot.json` specifies, so each cycle's quote and
+# Greeks payloads stay in the hundreds of kilobytes rather than the megabytes the
+# September 2, 2026 close capture carried at `max_dte=60`. The replay applies its
+# own 0-7 calendar-day filter regardless of what the vendor parameter means.
+#
+# Everything else -- the pinned documentation, the rate and dividend wire values,
+# the refusal of synthetic provenance, the raw-capture-only readiness -- is the
+# reviewed capture profile, unchanged. A dry run of the collector prints the
+# per-cycle approval this profile yields and the session approval that binds it
+# to the day's schedule; nothing is sent without both.
+#
+# **No session has been collected with this file.** Nothing in this repository
+# can place an order: there is no broker adapter and no order-placement code.
+
+stage: DEVELOPMENT
+enabled: true
+
+data:
+  options_source: thetadata
+  futures_source: none # not implemented
+  max_dte: 7
+
+model:
+  pricing_model: black_scholes_merton
+  day_count_convention: ACT/365F
+  risk_free_rate_source: configured_constant
+  # `zero`, not `configured_constant: 0.0`. The two are numerically identical
+  # and declaratively different: the vendor side says ZERO_DIVIDEND, and a model
+  # calling the same thing a continuous yield that happens to be zero reads as a
+  # convention mismatch -- correctly, because that is what the field says.
+  dividend_yield_source: zero
+  expiration_timestamp_rule: root_specific_settlement
+  # A real vendor print, not an invented one. `synthetic` here is refused.
+  underlying_price_source: vendor_index_snapshot
+  iv_price_source: NBBO_MID_IV
+  # Sent to the vendor as rate_value below, so both sides of the comparison are
+  # ours and RISK_FREE_RATE resolves. Omitting it would let ThetaData apply a
+  # default we cannot name.
+  risk_free_rate: 0.042
+  # Zero, stated. `annual_dividend: 0.0` with `dividend_convention:
+  # ZERO_DIVIDEND` says the same thing on the vendor side, so the two agree.
+  dividend_yield: 0.0
+  min_time_to_expiry_minutes: 60.0
+
+data_quality:
+  max_quote_greeks_skew_seconds: 5.0
+  max_quote_iv_skew_seconds: 5.0
+  max_quote_underlying_skew_seconds: 2.0
+  max_future_timestamp_seconds: 2.0
+  max_snapshot_age_seconds: 60.0
+  max_open_interest_age_sessions: 2
+
+gex:
+  spot_move_pct: 0.01
+  sign_convention: dealer_long_calls_short_puts
+  # Vendor gamma is compared, never aggregated. See thetadata.vendor_gamma_policy.
+  prefer_vendor_gamma: false
+  drop_crossed_quotes: true
+  require_open_interest: true
+
+zero_gamma:
+  grid_span_pct: 0.04
+  grid_step_pct: 0.001
+  conventions: [sticky_strike, frozen_iv, sticky_moneyness]
+  max_dte_for_grid: 60
+  min_points_for_smile_fit: 5
+  boundary_tolerance_pct: 0.10
+  max_grid_expansions: 3
+  grid_expansion_factor: 1.75
+
+walls:
+  node_min_share_of_max: 0.25
+  max_nodes_per_side: 5
+  void_max_share_of_max: 0.05
+  void_min_width_pct: 0.002
+  band_pct: 0.10
+  directional_wall_min_distance_pct: 0.0
+  directional_wall_band_pct: 0.10
+  irregular_spacing_factor: 1.5
+  min_observed_strikes_for_true_void: 2
+  min_ladder_coverage_for_true_void: 0.80
+
+confidence:
+  min_chain_completeness_ratio: 0.90
+  crossed_quote_zero_score_ratio: 0.10
+  min_universe_coverage_ratio: 0.70
+  min_good_iv_ratio: 0.90
+  ambiguous_root_spacing_pct: 0.50
+  steep_slope_threshold: 0.20
+  max_zero_gamma_shift_pct: UNSPECIFIED_CALIBRATE
+  max_sign_model_disagreement: UNSPECIFIED_CALIBRATE
+  max_0dte_dominance_ratio: UNSPECIFIED_CALIBRATE
+
+thetadata:
+  base_url: http://127.0.0.1:25503
+  auth_mode: local_terminal
+  tier: standard
+  timeout_seconds: 30.0
+  max_retries: 3
+  backoff_base_seconds: 0.25
+  username_env: THETADATA_USERNAME
+  password_env: THETADATA_PASSWORD
+
+  # The capture is the deliverable. Turning this off makes the profile invalid.
+  raw_capture_enabled: true
+
+  # **A fallback, not an instruction.** The operator command writes to
+  # `<--output>/raw` and passes that store to the session, so this path receives
+  # nothing during a capture and is not created by one. It names where a caller
+  # that opens no session of its own would store responses.
+  #
+  # Since v2.1.13 nothing constructs a store from it eagerly: it used to be
+  # built during pipeline construction for every caller, which created
+  # `artifacts/raw` inside the checkout -- including during a dry run whose
+  # whole promise is that it writes nothing.
+  #
+  # The effective store is reported as `effective_raw_store_path` in the run
+  # summary. That is the one that received the bytes.
+  raw_capture_path: artifacts/raw
+
+  greeks_version: latest
+  rate_type: sofr
+
+  # CORRECTED IN v2.1.22 AFTER THE FIRST LIVE CAPTURE.
+  #
+  # The intended economic rate has not changed and is 4.2% annual. What changed
+  # is the number that expresses it on the wire.
+  #
+  #   economic rate            4.2%
+  #   local model r            0.042      (model.risk_free_rate above)
+  #   vendor request value     0.042      (rate_value below)
+  #
+  # Until v2.1.21 this read `rate_value: 4.2` with `rate_units:
+  # PERCENT_ANNUAL_RATE`, on the authority of the pinned OpenAPI description --
+  # "The interest rate, as a percent". The first capture was taken that way and
+  # its Greeks are only reproducible with r = 4.2, i.e. 420%. The v3
+  # implementation puts the number into Black-Scholes unchanged.
+  #
+  # So the documented unit and the observed unit disagree, permanently and on
+  # the record: docs/ADAPTER_CERTIFICATION.md keeps both. `rate_units` below
+  # states what the *implementation* does, because that is what decides the
+  # number the vendor prices with. The pinned document is not edited.
+  #
+  # A dry run reports this as RATE_UNITS_AGREE_WITH_OBSERVED_IMPLEMENTATION and
+  # names the documentation conflict. That is the expected state, not a defect
+  # to be silenced.
+  rate_value: 0.042
+  rate_units: DECIMAL_ANNUAL_RATE
+  annual_dividend: 0.0
+  dividend_convention: ZERO_DIVIDEND
+
+  stock_price_source: vendor_default
+  max_dte: 7
+  strike_range: null
+  min_time: null
+  use_market_value: null
+
+  # Must match the top-level `model:` block; the loader refuses a file where
+  # they disagree.
+  iv_source: NBBO_MID_IV
+  underlying_price_source: vendor_index_snapshot
+  min_time_to_expiry_minutes: 60.0
+  expiration_rule: root_specific_settlement
+
+  pricing_mode: VENDOR_IV_LOCAL_GAMMA
+  # Standard cannot serve second-order greeks. Switch to COMPARE_ONLY on a Pro
+  # subscription to fetch the vendor's gamma alongside ours; it is compared and
+  # never aggregated, and it does not relax the vendor-IV checks.
+  vendor_gamma_policy: DISABLED
+
+  # Deliberately empty. Six load-bearing dimensions are still the vendor's to
+  # define -- IV price basis, underlying source, underlying timestamp,
+  # expiration timestamp, day count and the dividend convention -- and this
+  # repository has not compared any of them against real vendor output. The
+  # rate units and the minimum time floor left this list in v2.1.18, settled
+  # from the pinned OpenAPI document rather than from a response. Until the
+  # rest have been compared against real output, the honest
+  # entry is no entry, and every trusted calculation is refused.
+  #
+  # After a capture, each answered question becomes an *observation*:
+  #
+  #   pricing_attestations:
+  #     - dimension: DAY_COUNT
+  #       source: VENDOR_DOCUMENTATION
+  #       reference: docs/THETADATA_INTEGRATION.md
+  #       observed_at: "2026-08-XX"
+  #       vendor_value: "ACT/365F"
+  #
+  # `vendor_value` is what the vendor *does*, and a comparator decides what
+  # follows: recording ACT/360 against a local ACT/365F produces MISMATCHED, not
+  # agreement. v2.1.4 treated the entry's presence as the answer.
+  #
+  # `source: LIVE_COMPARISON` is **refused here**. A configuration file cannot
+  # witness an event; editing this line does not make a request. Live evidence
+  # is emitted by AdapterValidator and bound to the capture it was read from.
+  # `VENDOR_DOCUMENTATION` is accepted, its reference must resolve to a real
+  # file, and it never reaches ADAPTER_CERTIFIED.
+  pricing_attestations: []
+
+execution:
+  broker: none
+  trading_enabled: false

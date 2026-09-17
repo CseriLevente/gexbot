@@ -1,0 +1,166 @@
+{
+  "origin": "SYNTHETIC",
+  "records": [
+    {
+      "available_at": "2026-09-08T09:30:00-04:00",
+      "data": {
+        "contracts": [
+          "SPXW|2026-09-08|6000|CALL"
+        ]
+      },
+      "event_at": "2026-09-08T09:30:00-04:00",
+      "key": "SPXW",
+      "kind": "contract_list",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:30:00-04:00",
+      "data": {
+        "iv_price_basis": "ILLUSTRATIVE",
+        "iv_source": "SYNTHETIC",
+        "model_ids": [
+          "SYNTHETIC_MODEL_1"
+        ]
+      },
+      "event_at": "2026-09-08T09:30:00-04:00",
+      "key": "MODEL",
+      "kind": "model_evidence",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:30:00-04:00",
+      "data": {
+        "as_of": "2026-09-04",
+        "quantity": 0
+      },
+      "event_at": "2026-09-08T09:30:00-04:00",
+      "key": "SPXW|2026-09-08|6000|CALL",
+      "kind": "open_interest",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:30:00-04:00",
+      "data": {
+        "currency": "USD",
+        "point_value": "10",
+        "tick_size": "0.25",
+        "valid_from": "2026-09-08T09:30:00-04:00",
+        "valid_to": "2026-09-09T00:00:00-04:00"
+      },
+      "event_at": "2026-09-08T09:30:00-04:00",
+      "key": "SIMFUT|2026-09-18",
+      "kind": "instrument",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:30:00-04:00",
+      "data": {
+        "extra_slippage_ticks": 1,
+        "fee_per_contract_side": "0.70",
+        "valid_from": "2026-09-08T09:30:00-04:00",
+        "valid_to": "2026-09-09T00:00:00-04:00"
+      },
+      "event_at": "2026-09-08T09:30:00-04:00",
+      "key": "SIMFUT|2026-09-18",
+      "kind": "costs",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:35:00-04:00",
+      "data": {
+        "ask": "10.5",
+        "bid": "10"
+      },
+      "event_at": "2026-09-08T09:34:59-04:00",
+      "key": "SPXW|2026-09-08|6000|CALL",
+      "kind": "option_quote",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:35:00-04:00",
+      "data": {
+        "delta": 0.5,
+        "dividend_yield": 0.0,
+        "implied_vol": 0.2,
+        "model_id": "SYNTHETIC_MODEL_1",
+        "rate": 0.042
+      },
+      "event_at": "2026-09-08T09:34:59-04:00",
+      "key": "SPXW|2026-09-08|6000|CALL",
+      "kind": "greeks",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:35:00-04:00",
+      "data": {
+        "price": "6000"
+      },
+      "event_at": "2026-09-08T09:34:59-04:00",
+      "key": "SPX",
+      "kind": "spx_price",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:35:00.400000-04:00",
+      "data": {
+        "ask": "100.25",
+        "ask_size": 5,
+        "bid": "100.00",
+        "bid_size": 5
+      },
+      "event_at": "2026-09-08T09:35:00.300000-04:00",
+      "key": "SIMFUT|2026-09-18",
+      "kind": "futures_quote",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:36:00-04:00",
+      "data": {
+        "ask": "10.5",
+        "bid": "10"
+      },
+      "event_at": "2026-09-08T09:35:59-04:00",
+      "key": "SPXW|2026-09-08|6000|CALL",
+      "kind": "option_quote",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:36:00-04:00",
+      "data": {
+        "delta": 0.5,
+        "dividend_yield": 0.0,
+        "implied_vol": 0.2,
+        "model_id": "SYNTHETIC_MODEL_1",
+        "rate": 0.042
+      },
+      "event_at": "2026-09-08T09:35:59-04:00",
+      "key": "SPXW|2026-09-08|6000|CALL",
+      "kind": "greeks",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:36:00-04:00",
+      "data": {
+        "price": "6000"
+      },
+      "event_at": "2026-09-08T09:35:59-04:00",
+      "key": "SPX",
+      "kind": "spx_price",
+      "sequence": 0
+    },
+    {
+      "available_at": "2026-09-08T09:36:00.400000-04:00",
+      "data": {
+        "ask": "100.25",
+        "ask_size": 5,
+        "bid": "100.00",
+        "bid_size": 5
+      },
+      "event_at": "2026-09-08T09:36:00.300000-04:00",
+      "key": "SIMFUT|2026-09-18",
+      "kind": "futures_quote",
+      "sequence": 0
+    }
+  ],
+  "schema_version": "research-events/2.1.34"
+}

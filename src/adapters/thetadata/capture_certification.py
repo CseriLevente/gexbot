@@ -337,6 +337,14 @@ class LoadedCapture:
     #: an archived copy has to equal to be this capture's run intent rather than
     #: a file with the right name.
     run_intent_sha256: str = ""
+    #: The market session the verified preflight approval names (v2.1.36), or
+    #: ``None`` for a capture that recorded no approval. Proved by the approval
+    #: hash recomputation and the manifest stamps, so a partial-scope cycle
+    #: without a contract listing still states its session on evidence.
+    market_session_date: date | None = None
+    #: The approved endpoints this capture was scheduled to issue (v2.1.36):
+    #: what its run intent declares, or ``None`` when it issued the whole plan.
+    scheduled_endpoints: tuple[str, ...] | None = None
 
     @property
     def record_count(self) -> int:
@@ -411,9 +419,16 @@ def _verified_manifest(root: pathlib.Path) -> tuple[dict[str, Any], Any]:
 
 
 def _bind_request(
-    root: pathlib.Path, manifest: dict[str, Any]
+    root: pathlib.Path, manifest: dict[str, Any], *, require_greeks: bool = True
 ) -> CaptureRequestBinding:
-    """Recover the parameters the capture actually sent, and prove them."""
+    """Recover the parameters the capture actually sent, and prove them.
+
+    ``require_greeks`` is the single-capture rule: a capture without a verified
+    Greeks response cannot be certified, because that request carries the rate.
+    The session assembler (v2.1.36) passes ``False`` for a cycle whose Greeks
+    request failed, so the cycle's other payloads can still be normalized; the
+    cycle then carries no model evidence and no Greeks, and says so.
+    """
     from src.adapters.thetadata.request_plan import planned_request_hash
 
     intent_path = root / "run-intent.json"
@@ -463,7 +478,7 @@ def _bind_request(
         parameters[endpoint] = dict(canonical)
         verified.append(endpoint)
 
-    if OPTION_GREEKS not in parameters:
+    if require_greeks and OPTION_GREEKS not in parameters:
         raise CaptureCertificationError(
             "no verified request was found for "
             f"{OPTION_GREEKS}. The Greeks request carries the rate the whole "
@@ -474,7 +489,9 @@ def _bind_request(
     )
 
 
-def load_capture(root: pathlib.Path | str) -> LoadedCapture:
+def load_capture(
+    root: pathlib.Path | str, *, require_greeks_request: bool = True
+) -> LoadedCapture:
     """Read a capture directory and re-verify everything it claims about itself.
 
     Three independent checks, none of which trusts a stored value on the
@@ -528,6 +545,17 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
     intent_bytes = intent_path.read_bytes()
     intent = json.loads(intent_bytes)
     approval = _verified_approval(intent, manifest)
+    approved_session = (
+        date.fromisoformat(str(approval["market_session_date"]))
+        if approval and approval.get("market_session_date")
+        else None
+    )
+    declared_scope = intent.get("scheduled_endpoints")
+    scheduled = (
+        tuple(sorted(str(e) for e in declared_scope))
+        if isinstance(declared_scope, list)
+        else None
+    )
 
     return LoadedCapture(
         root=root,
@@ -542,7 +570,7 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
         record_hashes=record_hashes,
         verified_records=verified,
         parser_version=str(manifest.get("parser_version", "")),
-        request=_bind_request(root, manifest),
+        request=_bind_request(root, manifest, require_greeks=require_greeks_request),
         bound_rate_intent=_bind_rate_intent(intent, manifest, approval=approval),
         documentation=_verified_documentation(
             intent, approval=approval, capture_root=root
@@ -550,6 +578,8 @@ def load_capture(root: pathlib.Path | str) -> LoadedCapture:
         intent_schema_version=str(intent.get("schema_version", "")),
         rebuilt_manifest=rebuilt,
         run_intent_sha256=hashlib.sha256(intent_bytes).hexdigest(),
+        market_session_date=approved_session,
+        scheduled_endpoints=scheduled,
     )
 
 

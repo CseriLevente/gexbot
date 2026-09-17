@@ -1,5 +1,254 @@
 ﻿# Changelog
 
+## 2.1.36 - intraday session collector and multi-cycle assembler
+
+Adds a bounded intraday collection session on top of the existing one-shot
+capture command, an assembler that merges a session's cycles into one
+availability-ordered event stream with per-record cycle lineage, a session
+readiness report and a multi-session summary. Everything is offline-tested on
+a fake clock and a fake vendor; no live session has been collected, no paid
+request was sent and nothing here is a trading result.
+
+**Collector** (`src/ingest/{clock,schedule,session_collector}.py`,
+`python -m src.tools.collect_intraday_session`). One schedule
+(`intraday-collection-schedule/2.1.36`) is built from the repository calendar
+and the policy in `config/intraday_pilot.json`: one slot per minute from the
+calendar open, 09:30:00 ET, while the slot instant is before the calendar close
+(390 slots on a regular session, 210 on an early close). The v2.1.35
+specification's 09:29 first cycle was outside the one-shot's capture window
+and is corrected, not overridden; the collector has no out-of-session or
+unsettled override. Quotes, Greeks and the index print are requested every
+slot (`MARKET` scope); open interest and the contract listing on the first
+slot and every 30 minutes (`FULL` scope). Every cycle is the one-shot
+`run_capture` with an explicit `scheduled_endpoints` subset of the approved
+plan: its preflight, per-request authorisation, manifest, attempt log and
+verification are unchanged, and the run intent records the scope. A second
+approval, printed by the dry run and required by `--execute-live`, binds the
+session date, the schedule fingerprint, the policy, the request budget and the
+destination; an approval for another day, schedule or directory is refused
+before any request, as is an existing destination. One cycle is in flight: a
+cycle may start until five seconds after its boundary; a cycle that spans
+later boundaries finishes, is recorded as overrunning, the slots it spans are
+recorded `MISSED_OVERRUN`, and collection resumes at the next future boundary
+with no catch-up. Late starts and `--resume` after an interruption record the
+passed slots (`MISSED_LATE_START`, `MISSED_RESTART_GAP`) the same way; a
+resume must present the same session approval and finds no live lock. The
+session stops itself after five consecutive cycles that acquired nothing or on
+`AUTHENTICATION_REJECTED` / `STORAGE_FAILURE`. The session log
+(`intraday-session-log/2.1.36`) records planned and actual instants, duration,
+acquired and missing endpoints, run state, manifest hash and stop reasons per
+slot, plus start, restart, stop and end events; a summary
+(`intraday-session-summary/2.1.36`) is written however the process ends. The
+clock is injected end to end (`RetryingTransport` now takes one), so offline
+sessions have deterministic receipts. `config/thetadata_intraday.yaml` is the
+reviewed capture profile with `max_dte=7`, the scope the specification names.
+
+**Assembler** (`src/adapters/thetadata/session_assembly.py`,
+`python -m src.tools.assemble_intraday_session`). Verifies the session
+structure first -- session approval and schedule fingerprint recomputed, every
+executed cycle loaded and checked against the log's manifest hash, session id,
+scope, session date and per-cycle approval; orphan directories reported, never
+read -- then normalizes each cycle under its scheduled scope. The
+single-capture normalizer (`thetadata-research-events/2.1.36`, row rules
+unchanged at revision 2) gains `expected_endpoints` and `allow_unacquired`:
+endpoints outside the scope are `NOT_SCHEDULED`, a scheduled request that
+produced no verified payload is `NOT_ACQUIRED` with the attempt log's evidence,
+receipts carry the logical `request_id`, and a cycle without Greeks carries no
+model evidence. The single-capture command keeps refusing partial captures.
+Cycles are merged in recorded-availability order with the tie-break
+`(available_at, cycle, kind, key, event_at, row_index)`: an observation equal
+to the current known revision of its `(kind, key, event_at)` is not emitted
+and the original keeps its original availability, so a re-observed quote is
+never made younger; a differing observation is the next revision at its own
+receipt, so A -> B -> A yields three revisions; an older event arriving after a
+newer one is emitted and counted, and the replay's selection by
+`(event_at, sequence)` before validity keeps the newer state. Open interest
+and inventory are reused between refreshes only through their original
+receipts; a missing open-interest row stays unavailable; each listing receipt
+is its own inventory event, and a MARKET cycle's option records are checked
+against the latest listing available at their receipt. A conflicting
+(ambiguous) observation excludes its identity for that cycle only, revises and
+revives nothing, and is counted against the known state. Output is
+`research-events/2.1.36`: lineage adds `cycle` and `request_id`, provenance
+names the session approval, schedule fingerprint, intent and log digests, and
+every cycle's manifest and payload digests; the event store refuses lineage
+outside them. `session-assembly.json` (`intraday-session-assembly/2.1.36`)
+carries per-cycle acquisition, exclusions, conflicting groups, clock leads and
+merge outcomes.
+
+**Readiness and summary.** `research-pilot-readiness/2.1.36`
+(`src/replay/session_readiness.py`) judges the assembled session:
+`option_side_usable` separately from `usable_for_intraday_pilot` (which stays
+false without recorded futures data; none is fabricated), with coverage,
+missed slots, overruns, restarts, request failures, open-interest gaps, stale
+and skewed decisions and clock leads. `research-pilot-summary/2.1.36`
+(`src/replay/pilot_summary.py`, `python -m src.tools.summarize_intraday_pilot`)
+restates several readiness reports per session and in total, refuses to mix
+synthetic and recorded sessions or two reports for one date, and is itself
+synthetic whenever a synthetic session is included. The single-capture
+readiness (`research-pilot-readiness/2.1.35`) is unchanged and summarises as
+`SINGLE_CAPTURE` with lower-bound counts.
+
+Tests: schedule and policy (calendar, early close, phases, fingerprint),
+collector (approval binding, refusals, scoped cycles, late start, overrun,
+restart, failed endpoints, consecutive failures, systemic stop, budget,
+interrupt), assembly (A -> B -> A, unchanged re-observation, late older
+revision, ambiguity after a known state, sparse refresh reuse, failed Greeks,
+membership, tampered payload / log / intent / lineage refusals, receipt-tie
+determinism), the 2.1.36 event schema, and an end-to-end synthetic session
+pair through every command whose artefacts all say `SYNTHETIC`. The frozen
+native fixture was regenerated once: the synthetic capture's approval now
+names its own session date (the normalizer cross-checks it against the
+listing) and the provenance names the 2.1.36 normalizer; its records are
+byte-identical otherwise. The v2.1.34 replay regressions and the r2 duplicate
+reproduction are retained. `config/intraday_pilot.json` moves to
+`intraday-pilot-collection/2.1.36` with the `collection` policy block, the
+corrected schedule, the request order the plan actually issues (open interest
+between quotes and Greeks) and the implemented merge rule;
+`docs/INTRADAY_PILOT_COLLECTION.md` is the operator runbook for the actual
+commands. Historical captures, certification reports, vendor correspondence,
+frozen fixtures other than the regenerated native one, the research contract
+and every trust gate are unchanged. Not done: a live session; a futures source;
+any strategy, GEX, PnL, sizing or order logic.
+
+## 2.1.35 - native-data normalization and intraday replay readiness
+
+Adds a deterministic normalizer from one verified ThetaData v3 capture directory
+to hash-bound research events (`src/adapters/thetadata/research_events.py`,
+schema `research-events/2.1.35`), an offline command that normalizes, replays
+and reports (`python -m src.tools.normalize_thetadata_capture`), a pilot-
+readiness report (`research-pilot-readiness/2.1.35`) and a collection
+specification for a small multi-session intraday pilot
+(`config/intraday_pilot.json`, `docs/INTRADAY_PILOT_COLLECTION.md`).
+
+The normalizer re-verifies the capture through the existing `load_capture`
+(manifest hash, payload digests, planned-request binding, re-derived
+documentation), refuses payloads whose native columns are not the ones its
+versioned rules were written for, and binds every emitted record to the raw
+payload SHA-256, the native row index and the rule name; the document names the
+capture (session id, manifest and run-intent digests, every payload digest and
+location). Availability comes only from recorded receipts -- the manifest's
+`response_received_at` inside the verified manifest hash, corroborated by the
+attempt log's `received_at` for the same request and body -- and a payload with
+no recorded receipt yields no events (`AVAILABILITY_UNKNOWN`). Event times are
+the vendor's row timestamps read as America/New_York. A vendor timestamp that
+postdates the local receipt is excluded and counted by default; a bounded,
+labelled tolerance may defer availability to the vendor time, and availability
+is never moved earlier. Open interest is attributed by the re-derived documented
+convention (`PRIOR_TRADING_SESSION`) applied to the row's own Eastern date, and
+an identity without an open-interest row stays unavailable, never zero. Greeks
+carry the verified request's rate and dividend and a `model_id` derived from
+those parameters; model evidence becomes available with the Greeks receipt.
+Identities are canonicalised and checked against the inventory; zero IV, vendor
+IV error, out-of-range delta, non-finite input, zero or invalid ask, duplicate,
+unlisted, non-SPXW, unparseable and weekend-stamped rows are refused with named
+reasons. The events' origin follows the capture origin inside the manifest
+hash: only a live transport is `RECORDED_NORMALIZED`; fixtures stay
+`SYNTHETIC`.
+
+The event store accepts `research-events/2.1.34` unchanged and the new schema
+with mandatory `lineage` and `provenance`; `Event.reference()` keeps its v2.1.34
+shape, so the frozen synthetic replay report is byte-identical. Readiness
+reports state which pilot inputs are present, partial or missing, usable and
+blocked decisions, refusal reasons and reproducible hashes, and keep every
+trust flag false. Applied to the preserved 2026-09-02 close capture under the
+research default, all 371 decisions are blocked (`INVENTORY_NOT_AVAILABLE`:
+everything was received at 15:57 ET, after the last 15:45 grid decision); a
+labelled diagnostic run shows the pipeline passing 1,109 of 2,534 in-scope
+contract frames at 15:58 ET. Neither is a trading result. The pinned vendor
+document has no futures endpoint, so futures quotes, sizes, instrument metadata
+and costs are reported missing and the collection specification names them as
+inputs a separate operational decision must supply. Historical captures,
+fixtures, the v2.1.33 research contract, the v2.1.34 replay semantics and every
+trust gate are unchanged.
+
+Before promotion, an independent review of the first cut (imported-history
+commit `a07ca7832efa`) reproduced one defect: a repeated identity inside one
+snapshot payload was resolved by keeping the first row, so CSV order decided
+whether a conflicting observation (a crossed quote beside a clean one, or two
+valid but different quotes) reached the replay. The re-cut groups repeated
+identities before anything is emitted: rows that agree on every column the
+rule reads are coalesced to one record with explicit accounting
+(`IDENTICAL_DUPLICATE_COALESCED`), rows that disagree are excluded whole
+(`CONFLICTING_DUPLICATE_OBSERVATIONS`) while the identity stays in the
+inventory, so the replay refuses the frame as missing input in either order.
+The same policy applies to quotes, Greeks, open interest and the index rows;
+the four row rules moved to revision 2 and the normalizer identifies itself as
+`thetadata-research-events/2.1.35-r2`. The reviewer's five cases and further
+both-order, identical, unread-column and malformed-twin cases are regression
+tests; the frozen native fixture was regenerated once under the revised rules
+with a conflicting pair and a verbatim repeat added to its scenario. The
+September 2 results are unchanged (no repeated identity occurs in that
+capture); its digests moved because every record names its rule.
+
+## 2.1.34 - source-verified session replay and conservative fill probes
+
+Adds an offline replay of one research session from hash-bound normalized event
+files (`research-events/2.1.34`) under a declared plan
+(`research-replay-plan/2.1.34`), reported as `research-session-replay/2.1.34`.
+Source bytes are verified against the plan's SHA-256 digests; duplicate JSON
+keys, duplicate bytes or record revisions, unsupported schemas or origins,
+malformed quantities, timestamps or identities, and paths escaping the bundle
+refuse the run before anything is computed. State is availability-indexed: a
+decision sees only records available by that instant, a late delivery of an
+older event never regresses a newer known state, and revisions, inventories and
+model evidence obey the same clock. Every declared grid instant (371 on a
+regular session, calendar-aware) is accounted for with as-of in-scope contracts,
+exclusions, missing inputs and blockers; empty or absent inventories cannot pass.
+
+Fill probes are independent counterfactuals against explicitly identified
+futures expirations: first quote observed after declared latency inside a
+bounded wait, BUY at the ask and SELL at the bid with adverse slippage and
+per-side fees in exact decimal arithmetic, instrument and cost profiles known at
+the decision and effective when used, and explicit refusal reasons for stale,
+crossed, off-tick, undersized, expired or unavailable inputs. Overlapping probes
+on one instrument are refused so displayed liquidity is never reused. No
+position, portfolio, order or PnL exists. Before promotion, an independent
+review reproduced one defect in the first cut of this release: effective-dated
+profiles were filtered by interval before revisions were collapsed, so a known
+correction that shortened a profile's validity could leave its superseded
+version usable. The release collapses each declaration to its highest known
+revision first, adds the reviewer's acceptance cases as regression tests, and
+was re-gated and re-archived under a new commit. The shipped example under
+`tests/fixtures/replay/` is synthetic and labelled so; the report keeps
+`authenticity_verified`, `normalization_verified`, `ready_for_backtest`,
+`trusted_for_gex`, `gex_computed`, `strategy_tested` and `pnl_computed` false
+and `orders_placed` at zero. Historical captures, fixtures, the v2.1.33 research
+contract and every trust gate are unchanged.
+
+## 2.1.33 - point-in-time research contract and gamma sensitivity
+
+Adds a strict declared-input audit with availability/event clocks, holiday-aware
+prior-session OI, fixed scope, early-close windows, cadence and freshness/skew
+checks. Source declarations never authorize a backtest or claim verified bytes.
+Adds a separate offline gamma-sensitivity report: rerun capture-bound v2.1.32
+screening, retain the shared models and compare per-contract gamma on one common
+OI-answered population. Report unweighted relative and absolute ranges by expiry
+and research scope. No OI weighting, signed GEX, signal or profitability claim.
+The intraday specification defines data still needed for replay and cost-aware
+strategy evaluation. Historical captures, fixtures and trust gates are unchanged.
+
+## 2.1.32 - floor-aware inference and cross-capture replication
+
+Adds an offline inference report on the unchanged 192-candidate pricing grid.
+All adequate near-best alternatives survive; ambiguity is not replaced by a
+single minimum-RMSE model. A second common population excludes floor-binding
+rows from clock inference. Finite-grid clock support cannot identify an exact
+expiration instant. Cross-capture replication recomputes each input from its
+verified archive and requires individual agreement across distinct sessions.
+No original certification, calculation engine, trust rule or historical fixture
+changes. See docs/FLOOR_AWARE_INFERENCE.md for the frozen evaluation protocol.
+
+## 2.1.31 - direct pricing diagnostics and explicit OI coverage
+
+Adds an offline, fixed 192-candidate delta comparison with a controlled
+0-versus-60-minute floor contrast and per-expiration residuals. On the saved
+September 2 capture the floor reduces the same-population RMSE about 68 times.
+Reports contract-count OI coverage and a separately identified pricing sample.
+The diagnostic identifies no vendor model and grants no GEX or trading trust.
+Historical certification code, thresholds and evidence hashes are unchanged.
+See docs/PRICING_DIAGNOSTICS.md for the command, findings and limitations.
+
 ## 2.1.30 - vendor OI clarification without rewriting capture evidence
 
 ThetaData support confirmed that a missing open-interest row is ambiguous: it

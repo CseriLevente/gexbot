@@ -573,8 +573,14 @@ def verify_capture(
     expected_identity: Any = None,
     expected_request_spec: Any = None,
     expected_request_plan: Any = None,
+    scheduled_endpoints: Any = None,
 ) -> CaptureVerification:
     """Check that a manifest describes the capture it claims to describe.
+
+    ``scheduled_endpoints`` (v2.1.36) names the subset of the plan a
+    partial-scope cycle was scheduled to issue; only required endpoints inside
+    it are demanded. Every other check is unchanged, and a manifest claiming an
+    endpoint outside the schedule is still verified record by record.
 
     Three questions. v2.1.4 asked only the first -- are the named records in the
     store? -- so a one-record quote snapshot with no open interest, no implied
@@ -924,6 +930,11 @@ def verify_capture(
             served.setdefault(records[record_id].endpoint, set()).add(record_id)
 
         for endpoint in plan.required_endpoints:
+            if (
+                scheduled_endpoints is not None
+                and endpoint.value not in scheduled_endpoints
+            ):
+                continue
             claimed_ids: set[str] = set(manifest.records_for(endpoint.value))
             actually = served.get(endpoint.value, set())
             if not actually:

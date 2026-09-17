@@ -601,21 +601,56 @@ def test_the_only_operator_commands_acquire_or_read_bytes() -> None:
     tools = SRC / "tools"
     modules = sorted(p.name for p in tools.glob("*.py") if p.name != "__init__.py")
     assert modules == [
+        # Reads one collection session's verified cycles and writes hash-bound
+        # research events with cycle lineage, a replay report and a session
+        # readiness report. No network, no GEX.
+        "assemble_intraday_session.py",
+        # Reads declarations or verified captures; no network, GEX or trading.
+        "audit_research_inputs.py",
         # Acquires raw bytes, once, under an explicit approval.
         "capture_thetadata_once.py",
         # Reads one capture's bytes. No network.
         "certify_thetadata_capture.py",
+        # Acquires raw bytes once per approved slot of one session, each slot
+        # being the one-shot command above under a second approval that binds
+        # the date, the schedule, the budget and the destination. No GEX, no
+        # orders.
+        "collect_intraday_session.py",
         # Reads two captures' bytes and compares contract identities. No
         # network, and it decides nothing: the open-interest policy question it
         # gathers evidence for is left explicitly unresolved.
         "compare_thetadata_captures.py",
+        # Reads a capture and compares fixed delta models and OI counts.
+        # Offline diagnostics only; cannot compute GEX or trade.
+        "diagnose_thetadata_pricing.py",
+        "infer_thetadata_pricing.py",
+        # Reads one verified capture's bytes and writes hash-bound research
+        # events, a replay report and a readiness report. No network, no GEX.
+        "normalize_thetadata_capture.py",
+        # Reads normalized replay bytes and simulates quotes; no live placement.
+        "replay_research_session.py",
         # Reads a private vendor email plus one frozen certification and emits a
         # privacy-safe policy overlay. No network and no trading behavior.
         "resolve_thetadata_oi_policy.py",
+        # Reads several session readiness reports and restates them as one
+        # multi-session summary. No network, no GEX.
+        "summarize_intraday_pilot.py",
     ], modules
 
 
-def test_the_capture_command_cannot_trade_or_calculate() -> None:
+@pytest.mark.parametrize(
+    "module",
+    [
+        SRC / "tools" / "capture_thetadata_once.py",
+        # v2.1.36: the session collector loops the one-shot; it may do nothing
+        # the one-shot may not.
+        SRC / "tools" / "collect_intraday_session.py",
+        SRC / "ingest" / "session_collector.py",
+        SRC / "ingest" / "schedule.py",
+    ],
+    ids=lambda path: path.name,
+)
+def test_the_capture_command_cannot_trade_or_calculate(module: pathlib.Path) -> None:
     """It captures bytes. Anything else it did would be unreviewed.
 
     AST-based, so the docstring explaining that it computes nothing does not
@@ -623,9 +658,7 @@ def test_the_capture_command_cannot_trade_or_calculate() -> None:
     """
     import ast
 
-    tree = ast.parse(
-        (SRC / "tools" / "capture_thetadata_once.py").read_text(encoding="utf-8")
-    )
+    tree = ast.parse(module.read_text(encoding="utf-8"))
     called = {
         node.func.attr
         for node in ast.walk(tree)

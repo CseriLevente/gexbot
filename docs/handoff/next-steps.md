@@ -1,5 +1,16 @@
 # Next steps
 
+Current progress and the next development boundary are recorded in
+[V2_1_36_COMPLETION.md](V2_1_36_COMPLETION.md) (the v2.1.35 report is
+[V2_1_35_COMPLETION.md](V2_1_35_COMPLETION.md)); the runbook for the intraday
+pilot's collection, assembly and summary commands is
+[INTRADAY_PILOT_COLLECTION.md](../INTRADAY_PILOT_COLLECTION.md).
+The plan below is the historical
+early-project roadmap; it predates the captured data and later evidence releases.
+Use [INTRADAY_RESEARCH.md](../INTRADAY_RESEARCH.md) for current implementation
+and data requirements. Old prices, subscriptions and operational instructions
+below are historical, not a current purchase or capture recommendation.
+
 Ordered by dependency, not by appeal. Each step is a thing that can be finished and
 verified before the next one starts.
 

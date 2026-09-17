@@ -1,0 +1,582 @@
+{
+  "authenticity_verified": false,
+  "blocked_decisions": 370,
+  "blocking_reasons": [
+    "futures_bid_ask_size",
+    "futures_instrument_metadata",
+    "futures_costs",
+    "multi_session_coverage"
+  ],
+  "coverage": {
+    "acquired_endpoints": [
+      "/v3/index/snapshot/price",
+      "/v3/option/list/contracts/quote",
+      "/v3/option/snapshot/greeks/first_order",
+      "/v3/option/snapshot/open_interest",
+      "/v3/option/snapshot/quote"
+    ],
+    "attempt_log": {
+      "findings": [],
+      "index_sha256": "adaa0c8335f1f9faad4667811244a47c3fa8a4183146265c97b20f4245e408c4",
+      "present": true,
+      "usable": true
+    },
+    "capture": {
+      "captured_at": "2026-09-08T13:40:10+00:00",
+      "documentation_sha256": "8c02604c865969fc03973b089249a8e8b28d14429f87e4ebc780561731c1165e",
+      "intent_schema_version": "raw-capture-intent/2.1.24",
+      "manifest_sha256": "4444426dd432976d026ad2742df27ea8f5b5a9cd84bacda42a0146a6ffbfa3fb",
+      "parser_version": "thetadata-v3-parser/2.1.17",
+      "run_intent_sha256": "67cfc7f9413b2ae226cced1e3ba30624ae8f9d10faddfec2eae881e02d751b5c",
+      "session_id": "capture-synthetic",
+      "verified_endpoints": [
+        "/v3/index/snapshot/price",
+        "/v3/option/list/contracts/quote",
+        "/v3/option/snapshot/greeks/first_order",
+        "/v3/option/snapshot/open_interest",
+        "/v3/option/snapshot/quote"
+      ],
+      "verified_records": 5
+    },
+    "capture_origins": [
+      "OFFLINE_FIXTURE"
+    ],
+    "endpoints": {
+      "/v3/index/snapshot/price": {
+        "columns": [
+          "timestamp",
+          "symbol",
+          "price"
+        ],
+        "duplicate_groups": {
+          "conflicting_excluded": 0,
+          "conflicting_keys": [],
+          "identical_coalesced": 0
+        },
+        "emitted": 1,
+        "excluded": {},
+        "kind": "spx_price",
+        "receipt": {
+          "attempt_received_at": "2026-09-08T13:40:10.500000+00:00",
+          "available_at": "2026-09-08T13:40:10.500000+00:00",
+          "detail": null,
+          "endpoint": "/v3/index/snapshot/price",
+          "evidence": [
+            "manifest.response_received_at",
+            "attempts.received_at"
+          ],
+          "location": "raw/v3-index-snapshot-price.raw",
+          "manifest_received_at": "2026-09-08T13:40:10.500000+00:00",
+          "payload_sha256": "ed37143a3cf00f70baa1aa5dd4997bdb4791b81a9fe7b14c7ea9ae20aa54522e",
+          "refusal": null,
+          "request_id": "req-0001",
+          "request_started_at": "2026-09-08T13:40:09.900000+00:00"
+        },
+        "rows": 1,
+        "rule": "thetadata-v3/index_price/2",
+        "unused_columns": [],
+        "vendor_clock_lead": {
+          "max_ms": 0,
+          "rows_after_receipt": 0
+        },
+        "vendor_event_time": {
+          "max": "2026-09-08T13:40:10+00:00",
+          "min": "2026-09-08T13:40:10+00:00"
+        }
+      },
+      "/v3/option/list/contracts/quote": {
+        "columns": [
+          "symbol",
+          "expiration",
+          "strike",
+          "right"
+        ],
+        "duplicate_groups": {
+          "conflicting_excluded": 0,
+          "conflicting_keys": [],
+          "identical_coalesced": 0
+        },
+        "emitted": 19,
+        "excluded": {},
+        "kind": "contract_list",
+        "receipt": {
+          "attempt_received_at": "2026-09-08T13:40:13+00:00",
+          "available_at": "2026-09-08T13:40:13+00:00",
+          "detail": null,
+          "endpoint": "/v3/option/list/contracts/quote",
+          "evidence": [
+            "manifest.response_received_at",
+            "attempts.received_at"
+          ],
+          "location": "raw/v3-option-list-contracts-quote.raw",
+          "manifest_received_at": "2026-09-08T13:40:13+00:00",
+          "payload_sha256": "a35e18eda310050f2b25427cf64eb420b0b5667c377da1971937849c3cc6a9a7",
+          "refusal": null,
+          "request_id": "req-0005",
+          "request_started_at": "2026-09-08T13:40:12.400000+00:00"
+        },
+        "rows": 19,
+        "rule": "thetadata-v3/contract_list/1",
+        "unused_columns": [],
+        "vendor_clock_lead": {
+          "max_ms": 0,
+          "rows_after_receipt": 0
+        },
+        "vendor_event_time": {
+          "max": "2026-09-08T13:40:13+00:00",
+          "min": "2026-09-08T13:40:13+00:00"
+        }
+      },
+      "/v3/option/snapshot/greeks/first_order": {
+        "columns": [
+          "symbol",
+          "expiration",
+          "strike",
+          "right",
+          "timestamp",
+          "bid",
+          "ask",
+          "delta",
+          "theta",
+          "vega",
+          "rho",
+          "epsilon",
+          "lambda",
+          "implied_vol",
+          "iv_error",
+          "underlying_timestamp",
+          "underlying_price"
+        ],
+        "duplicate_groups": {
+          "conflicting_excluded": 1,
+          "conflicting_keys": [
+            "SPXW|2026-09-18|6200|CALL"
+          ],
+          "identical_coalesced": 0
+        },
+        "emitted": 8,
+        "excluded": {
+          "CONFLICTING_DUPLICATE_OBSERVATIONS": 2,
+          "DELTA_OUT_OF_RANGE": 1,
+          "IV_OUT_OF_RANGE": 3,
+          "NON_FINITE_INPUT": 1,
+          "VENDOR_IV_ERROR": 1
+        },
+        "kind": "greeks",
+        "receipt": {
+          "attempt_received_at": "2026-09-08T13:40:12+00:00",
+          "available_at": "2026-09-08T13:40:12+00:00",
+          "detail": null,
+          "endpoint": "/v3/option/snapshot/greeks/first_order",
+          "evidence": [
+            "manifest.response_received_at",
+            "attempts.received_at"
+          ],
+          "location": "raw/v3-option-snapshot-greeks-first_order.raw",
+          "manifest_received_at": "2026-09-08T13:40:12+00:00",
+          "payload_sha256": "e37b502fbcc3636b4a0b31aec2fa96b5f47e6808cfa86c5691b19e4edc0e5d56",
+          "refusal": null,
+          "request_id": "req-0004",
+          "request_started_at": "2026-09-08T13:40:11.400000+00:00"
+        },
+        "rows": 16,
+        "rule": "thetadata-v3/greeks_first_order/2",
+        "unused_columns": [
+          "bid",
+          "ask",
+          "theta",
+          "vega",
+          "rho",
+          "epsilon",
+          "lambda",
+          "underlying_timestamp",
+          "underlying_price"
+        ],
+        "vendor_clock_lead": {
+          "max_ms": 0,
+          "rows_after_receipt": 0
+        },
+        "vendor_event_time": {
+          "max": "2026-09-08T13:40:10.400000+00:00",
+          "min": "2026-09-08T13:40:10.400000+00:00"
+        }
+      },
+      "/v3/option/snapshot/open_interest": {
+        "columns": [
+          "timestamp",
+          "symbol",
+          "expiration",
+          "strike",
+          "right",
+          "open_interest"
+        ],
+        "duplicate_groups": {
+          "conflicting_excluded": 0,
+          "conflicting_keys": [],
+          "identical_coalesced": 1
+        },
+        "emitted": 11,
+        "excluded": {
+          "IDENTICAL_DUPLICATE_COALESCED": 1,
+          "INVALID_OPEN_INTEREST": 1,
+          "OI_TIMESTAMP_NOT_TRADING_SESSION": 1
+        },
+        "kind": "open_interest",
+        "receipt": {
+          "attempt_received_at": "2026-09-08T13:40:11.300000+00:00",
+          "available_at": "2026-09-08T13:40:11.300000+00:00",
+          "detail": null,
+          "endpoint": "/v3/option/snapshot/open_interest",
+          "evidence": [
+            "manifest.response_received_at",
+            "attempts.received_at"
+          ],
+          "location": "raw/v3-option-snapshot-open_interest.raw",
+          "manifest_received_at": "2026-09-08T13:40:11.300000+00:00",
+          "payload_sha256": "673fa5dbd6100ae944b69f9709e3f5d6925813a58e49009939e17206ad2580e7",
+          "refusal": null,
+          "request_id": "req-0003",
+          "request_started_at": "2026-09-08T13:40:10.700000+00:00"
+        },
+        "rows": 14,
+        "rule": "thetadata-v3/open_interest_prior_session/2",
+        "unused_columns": [],
+        "vendor_clock_lead": {
+          "max_ms": 0,
+          "rows_after_receipt": 0
+        },
+        "vendor_event_time": {
+          "max": "2026-09-08T10:30:03+00:00",
+          "min": "2026-09-04T10:30:03+00:00"
+        }
+      },
+      "/v3/option/snapshot/quote": {
+        "columns": [
+          "timestamp",
+          "symbol",
+          "expiration",
+          "strike",
+          "right",
+          "bid_size",
+          "bid_exchange",
+          "bid",
+          "bid_condition",
+          "ask_size",
+          "ask_exchange",
+          "ask",
+          "ask_condition"
+        ],
+        "duplicate_groups": {
+          "conflicting_excluded": 1,
+          "conflicting_keys": [
+            "SPXW|2026-09-18|6200|CALL"
+          ],
+          "identical_coalesced": 1
+        },
+        "emitted": 14,
+        "excluded": {
+          "CONFLICTING_DUPLICATE_OBSERVATIONS": 2,
+          "IDENTICAL_DUPLICATE_COALESCED": 1,
+          "NOT_IN_INVENTORY": 1,
+          "UNEXPECTED_SYMBOL": 1,
+          "UNPARSEABLE_TIMESTAMP": 1,
+          "VENDOR_TIMESTAMP_AFTER_RECEIPT": 1,
+          "ZERO_OR_INVALID_ASK": 1
+        },
+        "kind": "option_quote",
+        "receipt": {
+          "attempt_received_at": "2026-09-08T13:40:11+00:00",
+          "available_at": "2026-09-08T13:40:11+00:00",
+          "detail": null,
+          "endpoint": "/v3/option/snapshot/quote",
+          "evidence": [
+            "manifest.response_received_at",
+            "attempts.received_at"
+          ],
+          "location": "raw/v3-option-snapshot-quote.raw",
+          "manifest_received_at": "2026-09-08T13:40:11+00:00",
+          "payload_sha256": "016dd65744ab5aee3cb501aa0dcfdf38651dd2f506e57cb9471436283cd832ab",
+          "refusal": null,
+          "request_id": "req-0002",
+          "request_started_at": "2026-09-08T13:40:10.400000+00:00"
+        },
+        "rows": 22,
+        "rule": "thetadata-v3/option_quote/2",
+        "unused_columns": [
+          "bid_size",
+          "bid_exchange",
+          "bid_condition",
+          "ask_size",
+          "ask_exchange",
+          "ask_condition"
+        ],
+        "vendor_clock_lead": {
+          "max_ms": 200,
+          "rows_after_receipt": 1
+        },
+        "vendor_event_time": {
+          "max": "2026-09-08T13:40:11.200000+00:00",
+          "min": "2026-09-04T19:59:31.827000+00:00"
+        }
+      }
+    },
+    "identities": {
+      "greeked": 8,
+      "listed": 19,
+      "listed_by_expiration": {
+        "2026-09-04": 2,
+        "2026-09-08": 4,
+        "2026-09-09": 4,
+        "2026-09-18": 9
+      },
+      "quoted": 14,
+      "with_open_interest": 11,
+      "without_open_interest": 8
+    },
+    "inventory_membership_checked": true,
+    "model_evidence": {
+      "dividend_yield": 0.0,
+      "emitted": 1,
+      "excluded": {},
+      "iv_price_basis": "UNDOCUMENTED_BY_VENDOR",
+      "iv_source": "VENDOR_DEFAULT_IV",
+      "model_fixed_at": "2026-09-08T13:40:10+00:00",
+      "model_id": "thetadata-v3/option/snapshot/greeks/first_order|rate_type=sofr|rate_value=0.042|annual_dividend=0.0|version=latest",
+      "rate": 0.042,
+      "request_parameters": {
+        "annual_dividend": "0.0",
+        "rate_type": "sofr",
+        "rate_value": "0.042",
+        "version": "latest"
+      },
+      "rule": "thetadata-v3/model_evidence/1"
+    },
+    "normalizer": "thetadata-research-events/2.1.36",
+    "open_interest": {
+      "as_of_basis": "settlement rule applied to the vendor row timestamp's Eastern date",
+      "identities_with_open_interest": 11,
+      "identities_without_open_interest": 8,
+      "rows_by_as_of": {
+        "2026-09-03": 3,
+        "2026-09-04": 8
+      },
+      "settlement_rule": {
+        "calendar_id": "US_EQUITY_INDEX_OPTIONS",
+        "description": "open interest settles on the prior trading session",
+        "fingerprint": "2328b848509d3ada85080e4e0fa0b70c4e8d9bf7ad449362d969c034d7e9b072",
+        "kind": "PRIOR_TRADING_SESSION",
+        "schema_version": "settlement-evidence/2.1.10",
+        "trading_session_offset": null
+      }
+    },
+    "origin": "SYNTHETIC",
+    "receipt_clock_tolerance_ms": 0,
+    "records": 36,
+    "records_by_kind": {
+      "contract_list": 1,
+      "greeks": 8,
+      "model_evidence": 1,
+      "open_interest": 11,
+      "option_quote": 14,
+      "spx_price": 1
+    },
+    "scheduled_endpoints": [
+      "/v3/index/snapshot/price",
+      "/v3/option/list/contracts/quote",
+      "/v3/option/snapshot/greeks/first_order",
+      "/v3/option/snapshot/open_interest",
+      "/v3/option/snapshot/quote"
+    ],
+    "session_date": "2026-09-08",
+    "unacquired_endpoints": [],
+    "vendor_timestamp_policy": {
+      "ambiguous_wall_clock": "EARLIER",
+      "assumed_timezone": "America/New_York",
+      "nonexistent_wall_clock": "EXCLUDED",
+      "vendor_timestamp_after_receipt": "EXCLUDED"
+    }
+  },
+  "generated_from": {
+    "capture": {
+      "captured_at": "2026-09-08T13:40:10+00:00",
+      "documentation_sha256": "8c02604c865969fc03973b089249a8e8b28d14429f87e4ebc780561731c1165e",
+      "intent_schema_version": "raw-capture-intent/2.1.24",
+      "manifest_sha256": "4444426dd432976d026ad2742df27ea8f5b5a9cd84bacda42a0146a6ffbfa3fb",
+      "parser_version": "thetadata-v3-parser/2.1.17",
+      "run_intent_sha256": "67cfc7f9413b2ae226cced1e3ba30624ae8f9d10faddfec2eae881e02d751b5c",
+      "session_id": "capture-synthetic",
+      "verified_endpoints": [
+        "/v3/index/snapshot/price",
+        "/v3/option/list/contracts/quote",
+        "/v3/option/snapshot/greeks/first_order",
+        "/v3/option/snapshot/open_interest",
+        "/v3/option/snapshot/quote"
+      ],
+      "verified_records": 5
+    },
+    "events_sha256": "6bffebc571040172a9023b99d65a0b013131b557de21c1c3c9a6d4ec88f08aa3",
+    "normalizer": "thetadata-research-events/2.1.36",
+    "plan_sha256": "47c198afa8051b45e9558ea474938c732d9fc02738bbbef1600dce6227b47fb4",
+    "replay_report_hash": "7e289ef457e62c7fde86e8eb956b000dbd048c819daa0e63588664cb27ee16bf",
+    "replay_schema_version": "research-session-replay/2.1.34"
+  },
+  "gex_computed": false,
+  "label": null,
+  "limitations": [
+    "Readiness measures whether recorded inputs satisfy the declared research contract; it is not a strategy, GEX or profitability result.",
+    "Receipts are the capturing process's own clocks, verified as recorded bytes, not independently authenticated time.",
+    "A single close-of-session snapshot cannot reconstruct the session's intraday history; missing history stays missing.",
+    "Exclusion counts describe rows this normalizer refused under versioned rules; they are not vendor error rates."
+  ],
+  "normalization_verified": false,
+  "observed_source_origins": [
+    "SYNTHETIC"
+  ],
+  "orders_placed": 0,
+  "parameters": {
+    "contract": {
+      "cadence_seconds": 60,
+      "close_buffer_minutes": 15,
+      "max_dte": 7,
+      "max_market_age_seconds": 60.0,
+      "max_market_skew_seconds": 2.0,
+      "open_delay_minutes": 5,
+      "root": "SPXW",
+      "schema_version": "intraday-research-contract/2.1.33"
+    },
+    "contract_hash": "5512402968f8a1e5e655e9f8d96059d2c4a8c7d17dd96c896a7a0062b6cefc08",
+    "contract_is_research_default": true,
+    "diagnostic": false,
+    "receipt_clock_tolerance_ms": 0
+  },
+  "partial_requirements": [
+    "prior_session_open_interest",
+    "intraday_coverage"
+  ],
+  "pnl_computed": false,
+  "ready_for_backtest": false,
+  "replay": {
+    "best_decision": {
+      "blocked_contracts": 0,
+      "blocker_counts": {},
+      "decision_at": "2026-09-08T13:41:00+00:00",
+      "decision_hash": "76806b0c5cb8cbe9e9fd2cec56a6504de48e1447243f5381ce0f5940b9e12544",
+      "excluded_inventory_contracts": 11,
+      "expected_contracts": 8,
+      "passing_contracts": 8
+    },
+    "blocked_decisions": 370,
+    "blocker_contract_decision_counts": {
+      "INVENTORY_NOT_AVAILABLE": 6,
+      "STALE_GREEKS": 2912,
+      "STALE_OPTION_QUOTE": 2912,
+      "STALE_SPX_PRICE": 2912
+    },
+    "blocker_decision_counts": {
+      "INVENTORY_NOT_AVAILABLE": 6,
+      "STALE_GREEKS": 364,
+      "STALE_OPTION_QUOTE": 364,
+      "STALE_SPX_PRICE": 364
+    },
+    "decisions_with_inventory": 365,
+    "expected_decisions": 371,
+    "fill_probes": {
+      "refusal_reasons": {},
+      "simulated_fills": 0,
+      "total": 0,
+      "unfilled": 0
+    },
+    "grid": {
+      "first": "2026-09-08T13:35:00+00:00",
+      "last": "2026-09-08T19:45:00+00:00"
+    },
+    "passing_decisions": 1
+  },
+  "report_hash": "2a67899f375bea6c8c5a8ed5e2008f5f1fe2bfe62b917ef76870a9faa148031b",
+  "requirements": [
+    {
+      "description": "SPXW option inventory with a recorded receipt",
+      "detail": "19 of 19 native rows usable; received 2026-09-08T13:40:13+00:00",
+      "requirement": "option_inventory",
+      "source": "/v3/option/list/contracts/quote",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Option bid/ask observations with vendor event times",
+      "detail": "14 of 22 native rows usable; received 2026-09-08T13:40:11+00:00; excluded CONFLICTING_DUPLICATE_OBSERVATIONS 2, IDENTICAL_DUPLICATE_COALESCED 1, NOT_IN_INVENTORY 1, UNEXPECTED_SYMBOL 1, UNPARSEABLE_TIMESTAMP 1, VENDOR_TIMESTAMP_AFTER_RECEIPT 1, ZERO_OR_INVALID_ASK 1",
+      "requirement": "option_quotes",
+      "source": "/v3/option/snapshot/quote",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Implied volatility, delta and a model fixed before receipt",
+      "detail": "8 of 16 native rows usable; received 2026-09-08T13:40:12+00:00; excluded CONFLICTING_DUPLICATE_OBSERVATIONS 2, DELTA_OUT_OF_RANGE 1, IV_OUT_OF_RANGE 3, NON_FINITE_INPUT 1, VENDOR_IV_ERROR 1; model thetadata-v3/option/snapshot/greeks/first_order|rate_type=sofr|rate_value=0.042|annual_dividend=0.0|version=latest fixed at 2026-09-08T13:40:10+00:00",
+      "requirement": "iv_model_inputs",
+      "source": "/v3/option/snapshot/greeks/first_order",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Open interest attributed to the prior session",
+      "detail": "11 of 14 native rows usable; received 2026-09-08T13:40:11.300000+00:00; excluded IDENTICAL_DUPLICATE_COALESCED 1, INVALID_OPEN_INTEREST 1, OI_TIMESTAMP_NOT_TRADING_SESSION 1; 8 of 19 listed identities have no open-interest row (left unavailable, never zero); rows by as-of 2026-09-03 3, 2026-09-04 8",
+      "requirement": "prior_session_open_interest",
+      "source": "/v3/option/snapshot/open_interest",
+      "status": "PARTIAL"
+    },
+    {
+      "description": "SPX index observations",
+      "detail": "1 of 1 native rows usable; received 2026-09-08T13:40:10.500000+00:00",
+      "requirement": "spx_observations",
+      "source": "/v3/index/snapshot/price",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Executable futures bid/ask with displayed sizes",
+      "detail": "no futures_quote source in this capture; the pinned vendor document describes no futures endpoint",
+      "requirement": "futures_bid_ask_size",
+      "source": null,
+      "status": "MISSING"
+    },
+    {
+      "description": "Effective-dated futures tick size and point value",
+      "detail": "no instrument source in this capture; the pinned vendor document describes no futures endpoint",
+      "requirement": "futures_instrument_metadata",
+      "source": null,
+      "status": "MISSING"
+    },
+    {
+      "description": "Effective-dated fees and slippage assumptions",
+      "detail": "no costs source in this capture; the pinned vendor document describes no futures endpoint",
+      "requirement": "futures_costs",
+      "source": null,
+      "status": "MISSING"
+    },
+    {
+      "description": "A recorded receipt for every payload used",
+      "detail": "5 of 5 payloads carry a recorded receipt (5 corroborated by the attempt log)",
+      "requirement": "receive_times",
+      "source": null,
+      "status": "PRESENT"
+    },
+    {
+      "description": "Observations available inside the research decision grid",
+      "detail": "365 of 371 grid decisions had an inventory available; first receipt 2026-09-08T13:40:10.500000+00:00",
+      "requirement": "intraday_coverage",
+      "source": null,
+      "status": "PARTIAL"
+    },
+    {
+      "description": "More than one recorded trading session",
+      "detail": "one recorded session (2026-09-08); a pilot needs several",
+      "requirement": "multi_session_coverage",
+      "source": null,
+      "status": "MISSING"
+    }
+  ],
+  "schema_version": "research-pilot-readiness/2.1.35",
+  "session_date": "2026-09-08",
+  "strategy_tested": false,
+  "synthetic_only": true,
+  "trusted_for_gex": false,
+  "usable_decisions": 1,
+  "usable_for_intraday_pilot": false
+}

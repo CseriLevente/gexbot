@@ -60,6 +60,7 @@ __all__ = [
     "ExitCode",
     "RawCaptureRunState",
     "build_parser",
+    "destination_refusals",
     "main",
     "new_run_id",
     "plan_capture",
@@ -338,6 +339,12 @@ def _destination_refusals(destination: pathlib.Path) -> tuple[str, ...]:
                 "this one a path that does not exist yet; the parent may."
             )
     return tuple(reasons)
+
+
+#: Public name for the destination policy, so the intraday collector (v2.1.36)
+#: refuses the same places for a session root that this command refuses for a
+#: capture, from the same code.
+destination_refusals = _destination_refusals
 
 
 # =============================================================================
@@ -688,6 +695,9 @@ class _Preflight:
     #: authority. Recorded, like the session override, because a capture taken
     #: this way is permanently unable to become a trusted GEX.
     unsettled_allowed: bool = False
+    #: Every endpoint the approved plan will request (v2.1.36), so a cycle's
+    #: scheduled scope can be checked against it before anything is claimed.
+    planned_endpoints: tuple[str, ...] = ()
     #: The approval this run was checked against. Carried rather than
     #: recomputed downstream: a second derivation could differ from the one the
     #: refusal was decided on, which would make the stamped hash a claim about
@@ -904,6 +914,9 @@ def _preflight(
         documentation=_documentation_section(pipeline, settlement),
         unsettled_allowed=allow_unsettled_raw_only,
         approval=approval,
+        planned_endpoints=tuple(
+            sorted(e.value for e in pipeline.capture_plan.acquisition_endpoints)
+        ),
     )
 
 
@@ -1246,6 +1259,36 @@ class _Run:
     #: raw state.
     parser_report: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    #: The approved endpoints this run was scheduled to issue (v2.1.36), or
+    #: ``None`` for the whole plan. Measured against, never widened.
+    scheduled: frozenset[str] | None = None
+
+
+def _scheduled_scope(
+    checked: _Preflight, scheduled_endpoints: frozenset[str] | None
+) -> frozenset[str] | None:
+    """Validate a cycle's scope against the approved plan before anything exists."""
+    if scheduled_endpoints is None:
+        return None
+    planned = set(checked.planned_endpoints)
+    scope = frozenset(str(e) for e in scheduled_endpoints)
+    if not scope or not scope <= planned:
+        raise CaptureRunError(
+            f"scheduled endpoints {sorted(scope)} are not a nonempty subset of the "
+            f"approved plan {sorted(planned)}; a cycle may issue fewer approved "
+            "requests, never different ones"
+        )
+    return scope
+
+
+def _required_in_scope(run: _Run) -> set[str]:
+    required = {e.value for e in run.pipeline.capture_plan.required_endpoints}
+    return required if run.scheduled is None else required & run.scheduled
+
+
+def _evidence_in_scope(run: _Run) -> set[str]:
+    evidence = {e.value for e in run.pipeline.capture_plan.evidence_endpoints}
+    return evidence if run.scheduled is None else evidence & run.scheduled
 
 
 def run_capture(
@@ -1257,8 +1300,21 @@ def run_capture(
     allow_out_of_session: bool = False,
     allow_unsettled_raw_only: bool = False,
     approved: str = "",
+    clock: Any = None,
+    scheduled_endpoints: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """One capture operation, preserved, finalized and verified.
+
+    ``clock`` (v2.1.36) stamps the request and receipt instants of every
+    attempt and record; ``None`` is the wall clock. ``scheduled_endpoints``
+    (v2.1.36) restricts this run to a subset of the **approved** plan -- what
+    the intraday collector calls a market cycle. The approval, the preflight
+    and every per-request authorisation are unchanged; the subset only decides
+    which approved requests are issued, and the run intent, the summary and
+    the manifest's ``partial`` flag are measured against that subset, so a
+    three-endpoint cycle is a complete three-endpoint capture and never
+    pretends to be a five-endpoint one. An empty subset or an endpoint outside
+    the plan is refused before the destination is claimed.
 
     ``transport`` exists so the tests can drive this against the deterministic
     fake. **No test makes a network request.** When it is ``None``,
@@ -1296,6 +1352,7 @@ def run_capture(
     )
     destination = checked.destination
     loaded = checked.loaded
+    scope = _scheduled_scope(checked, scheduled_endpoints)
 
     # ---- Phase B: claim the destination, then build what writes into it ----
     #
@@ -1396,10 +1453,12 @@ def run_capture(
         pipeline = ThetaDataResearchPipeline.from_loaded_config(
             loaded,
             transport=transport,
+            clock=clock,
             attempt_observer=attempts,
             default_raw_store=store,
         )
         run.pipeline = pipeline
+        run.scheduled = scope
         # Recorded here rather than at preflight because it needs the built
         # pipeline's documentation bundle. It reaches the run intent, which is
         # written before the first request goes out.
@@ -1472,12 +1531,15 @@ def run_capture(
         # ---- Acquire every planned endpoint. Parsing comes later. -----------
         run.state = RawCaptureRunState.IN_PROGRESS
         outcome = pipeline.capture_required_endpoints_raw(
-            capture=run.session, as_of=moment, plan=run.request_plan
+            capture=run.session,
+            as_of=moment,
+            plan=run.request_plan,
+            scheduled_endpoints=scope,
         )
         run.acquisition = outcome
         # The first failure that matters to a chain. An evidence endpoint that
         # did not answer is reported, but it is not the run's error.
-        required_values = {e.value for e in pipeline.capture_plan.required_endpoints}
+        required_values = _required_in_scope(run)
         first = next(
             (
                 result
@@ -1529,8 +1591,7 @@ def _acquisition_state(run: _Run, outcome: Any) -> RawCaptureRunState:
             if run.attempts.records
             else RawCaptureRunState.FAILED_BEFORE_REQUEST
         )
-    required = {e.value for e in run.pipeline.capture_plan.required_endpoints}
-    if required - set(outcome.acquired_endpoints):
+    if _required_in_scope(run) - set(outcome.acquired_endpoints):
         return RawCaptureRunState.FAILED_PARTIAL_ACQUISITION
     return RawCaptureRunState.IN_PROGRESS
 
@@ -1768,8 +1829,9 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         plan=run.pipeline.capture_plan,
         expected_pipeline_fingerprint=run.pipeline.fingerprint(),
         expected_request_plan=run.request_plan,
+        scheduled_endpoints=run.scheduled,
     )
-    required = {e.value for e in run.pipeline.capture_plan.required_endpoints}
+    required = _required_in_scope(run)
     captured_endpoints = set(manifest.endpoints)
 
     # **Two questions, two answers.** ``required`` is what a chain is built
@@ -1778,7 +1840,7 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
     # *every* planned endpoint, so a failed listing produced
     # ``FAILED_PARTIAL_ACQUISITION`` beside ``partial: false`` and an empty
     # ``missing_endpoints`` -- three fields disagreeing about one capture.
-    evidence = {e.value for e in run.pipeline.capture_plan.evidence_endpoints}
+    evidence = _evidence_in_scope(run)
     missing_required = sorted(required - captured_endpoints)
     missing_evidence = sorted(evidence - captured_endpoints)
     partial = bool(missing_required)
@@ -1892,6 +1954,12 @@ def _finalize(run: _Run, *, chain: Any) -> dict[str, Any]:
         "missing_evidence_endpoints": missing_evidence,
         "captured_at": run.started_at.isoformat(),
         "finalized_at": datetime.now(UTC).isoformat(),
+        # v2.1.36: the approved endpoints this run was scheduled to issue. The
+        # whole plan when absent; a subset names a partial-scope cycle whose
+        # completeness above is measured against the subset.
+        "scheduled_endpoints": (
+            sorted(run.scheduled) if run.scheduled is not None else None
+        ),
         "session_id": run.session.session_id,
         "operation_id": run.session.operation_id,
         "operation_fingerprint": run.session.operation_fingerprint,
@@ -2062,6 +2130,11 @@ def _write_intent(run: _Run, *, config_path: str) -> None:
             "capture_plan_fingerprint": run.pipeline.capture_plan.fingerprint,
             "requested_endpoints": sorted(
                 e.value for e in run.pipeline.capture_plan.acquisition_endpoints
+            ),
+            # v2.1.36: the subset of the approved plan this run will issue, or
+            # null for the whole plan. Written before the first request.
+            "scheduled_endpoints": (
+                sorted(run.scheduled) if run.scheduled is not None else None
             ),
             # The exact requests, on disk before the first one is sent, so a run
             # that dies mid-flight still says what it was going to ask for.

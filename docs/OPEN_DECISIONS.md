@@ -1070,3 +1070,152 @@ the status is `VENDOR_REQUESTED_DETAILS`, not a diagnosis.
 | Cboe DataShop Open-Close | From $2,499/mo, and only needed for the flow-adjusted sign model | A specific hypothesis justifies the price |
 | Futures data (Databento) | Out of scope for this pass | Feature store needs VWAP/realised vol |
 | Risk engine, broker, strategies | Out of scope, and deliberately absent | Never, from this repository |
+
+## v2.1.33 research-design decisions still open
+
+The data contract in `INTRADAY_RESEARCH.md` now fixes an initial 0-7 DTE scope
+and decision grid. Its 60-second age and 2-second skew budgets are uncalibrated
+research choices. Intraday coverage/availability must be measured before those
+budgets can justify performance evaluation. No complete intraday dataset or
+verified futures execution quotes are supplied by the close captures.
+
+Retrospective gamma sensitivity preserves six complete pricing alternatives.
+Most admitted short-dated contracts have small within-set differences, while
+the largest observed relative range is 15.17%. These unweighted ranges do not
+resolve model truth, missing-OI exposure, dealer positioning or strategy-level
+stability. No materiality threshold, profitable strategy or safe sizing follows.
+A future replay must verify raw-source joins, point-in-time inventory and model
+availability, then evaluate frozen strategies with measured costs and held-out
+sessions. Existing full-universe GEX blockers remain unchanged.
+
+## v2.1.34 replay and fill-probe assumptions still open
+
+The replay verifies bytes against declared digests and honours declared
+availability clocks. Neither is authenticity: a normalized file with matching
+digests can still misrepresent the vendor, the normalization or the clock. The
+following policy choices are explicit, tested and **uncalibrated**; each must be
+measured on a genuine development dataset before a performance claim:
+
+- A fill probe uses only the first quote observed after latency inside a
+  bounded wait; a standing pre-arrival quote is never used and no later quote
+  is searched. This is conservative and can undercount fills.
+- Fees, extra slippage ticks, tick size and point value are supplied,
+  effective-dated declarations, not observed costs or contract specifications.
+- The research window ends at the option session close from the repository
+  calendar; futures exchange hours are not modelled, and an instrument's
+  expiration is checked at New York calendar-date granularity.
+- Integer inputs are bounded at `10**9` and decimals at twelve integer and
+  twelve fractional digits so the cost arithmetic stays exact; these are
+  research bounds, not market limits.
+- The 60-second market-age and 2-second skew limits of the v2.1.33 contract
+  remain research design assumptions.
+
+No position, portfolio, order, strategy or PnL is evaluated, and the shipped
+example is synthetic. Existing full-universe GEX blockers remain unchanged.
+
+## v2.1.35 normalization choices still open
+
+The normalizer's rules are explicit, versioned (`thetadata-v3/<kind>/1`) and
+tested, and several of them are choices a later reader should be able to
+revisit rather than facts about the vendor:
+
+- **Vendor clock lead.** On the September 2 capture 254 quote rows and the SPX
+  row carry vendor timestamps 86–357 ms *after* the local receipt. The default
+  excludes them; a bounded tolerance defers availability to the vendor time.
+  Whether the lead is vendor rounding, a vendor clock ahead of the host, or a
+  receipt recorded early is not established; the pilot must record NTP status
+  and measure the lead across sessions before any tolerance becomes a default.
+- **Open-interest as-of basis.** The documented convention ("previous trading
+  day") is applied to each row's own Eastern timestamp date, so a row the vendor
+  last updated a day earlier settles a day earlier and the replay refuses it.
+  Applying the convention to the request session instead would attribute those
+  rows to the prior session. The chosen basis is the conservative one; it is a
+  reading, not a vendor statement.
+- **Receipt evidence.** The later of the manifest and attempt receipts is
+  taken, with a five-second agreement bound. Both clocks belong to the capturing
+  process; neither is independently authenticated time.
+- **IV price basis.** The vendor does not document which price its implied
+  volatility is solved from; `model_evidence` records
+  `iv_source = VENDOR_DEFAULT_IV`, `iv_price_basis = UNDOCUMENTED_BY_VENDOR`.
+- **Displayed option sizes** are present in the raw bytes and not normalized:
+  the replay does not consume them. If a later rule does, the record shape
+  changes and the schema moves.
+- **Repeated identities inside one snapshot** are refused whole when they
+  disagree and coalesced when they agree on every read column (revision 2 of
+  the row rules, after the independent review). A vendor statement that one
+  of the rows is authoritative, or a within-payload revision marker, would be
+  the only grounds for choosing between them; none is documented.
+- **Multi-cycle merge** for repeated snapshots of one session is implemented
+  in v2.1.36 (`src/adapters/thetadata/session_assembly.py`) exactly as
+  specified: a re-observation is compared with the *current known revision*
+  of its event, so observations A → B → A yield a third revision, never a
+  discard of the final A because it once appeared.
+- **Wire parameters are not a resolved model.** `greeks.rate` and
+  `greeks.dividend_yield` copy the verified request's `rate_value` and
+  `annual_dividend`; the vendor's observed reading of the rate unit is
+  recorded separately by certification. Before any normalized model field
+  enters GEX arithmetic, a resolved economic rate and dividend yield with
+  their own evidence must be distinguished from these copied wire values.
+- **Futures source.** None exists in the pinned vendor document; futures
+  bid/ask/size, instrument metadata and costs remain missing inputs. Choosing or
+  paying for a source is an operational decision outside this repository.
+
+None of this evaluates a position, strategy or PnL. Existing full-universe GEX
+blockers remain unchanged.
+
+## v2.1.36 collection and assembly choices still open
+
+The collector and the assembler are tested offline only; the first live
+session will be the first evidence about several choices made here:
+
+- **Refresh cadence and a failed refresh.** Open interest and the listing are
+  requested on the first slot and every 30 minutes. If a refresh request fails,
+  the next attempt is the next refresh slot, not the next minute: a MARKET
+  cycle never adds a request outside its approved scope. Until the next
+  successful listing, quotes are membership-checked against the previous
+  listing (or retained unchecked if none exists yet), and open interest stays
+  on its last original receipt. A policy with a shorter refresh interval is a
+  different approved schedule, not an override.
+- **Start tolerance and the sleep granularity.** Five seconds after a slot
+  boundary is the latest a cycle may start; the system clock sleeps in
+  one-second slices. On the host the real preflight takes a fraction of a
+  second, and a cycle's five requests took about 3.5 s on September 2. Whether
+  a real day produces late starts near the tolerance is something the session
+  log will show (`start_delay_seconds` per slot).
+- **Overrun accounting.** A cycle that spans later boundaries is complete and
+  its data are used; the spanned slots are recorded missed. The alternative --
+  interrupting the cycle at the boundary -- would discard payloads already in
+  flight and was not chosen. A vendor that routinely takes longer than a minute
+  per cycle would show as `cycles_overrunning_a_boundary` and missed slots, and
+  would call for a longer cadence approved as its own schedule.
+- **Self-stop thresholds.** Five consecutive cycles that acquired nothing, or
+  `AUTHENTICATION_REJECTED` / `STORAGE_FAILURE` from the one-shot, stop the
+  session. Rate limiting stops one cycle's sweep (the one-shot's policy) but
+  not the session, so a temporary limit costs at most a few slots.
+- **Membership of a MARKET cycle** is checked against the latest listing
+  available at the record's receipt; a quote for an identity that appears
+  intraday before the next refresh lists it is excluded (counted
+  `NOT_IN_LATEST_INVENTORY`), consistent with the single-capture rule and with
+  the replay, which only expects listed contracts. The raw payload is kept, so
+  a later rule can revisit this without a new capture.
+- **Ambiguity after a known state** leaves the previous state standing with
+  its original event time; it is neither withdrawn nor made stale by fiat. The
+  replay's freshness budget is what retires it. Whether repeated conflicts for
+  one identity should count against a session's usability is a research
+  choice the summary makes visible (`ambiguity_after_known_state`) without
+  deciding.
+- **Host clock discipline.** The collector records nothing about NTP; the
+  runbook has the operator check `w32tm /query /status` before the open. The
+  vendor clock lead observed on September 2 remains unexplained and is counted
+  per cycle and per session.
+- **Session-date approval.** Both approvals bind the market session date, so
+  the dry run must be taken on the session day. An operator who wants to
+  prepare the evening before can review `--show-schedule DATE`, which needs no
+  approval; the approval itself cannot be produced early by design.
+- **Futures source.** Unchanged: none exists in the pinned vendor document;
+  the option side is judged on its own and the pilot as a whole stays
+  unusable until a futures source with recorded receipts is chosen outside
+  this repository.
+
+None of this evaluates a position, strategy or PnL. Existing full-universe GEX
+blockers remain unchanged.

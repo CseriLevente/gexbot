@@ -406,3 +406,244 @@ identity-stable; `match_roots` answers the identity question.
 
 `None` when the chain was priced under more than one effective model. Read
 `model_distribution` instead, which can answer honestly.
+
+## v2.1.34 fields (`research-session-replay/2.1.34`)
+
+Emitted by `python -m src.tools.replay_research_session`; the event and plan
+formats it reads are specified in `INTRADAY_RESEARCH.md`.
+
+### Report
+
+`schema_version`, `session_date`, `plan_sha256` (digest of the plan bytes),
+`contract` and `contract_hash` (the unchanged v2.1.33 research contract),
+`sources` (one receipt per bound file: `source_sha256`, `bytes`, `origin`,
+`records`), `observed_source_origins`, `synthetic_only`, `expected_decisions`,
+`passing_decisions`, `blocked_decisions`, `declared_grid_complete`,
+`decisions`, `fill_policy`, `fill_probes`, `probe_counts`, `limitations`,
+`report_hash`. `declared_grid_complete` means every declared grid instant
+passed for every in-scope contract of the *supplied* inventory; it is not
+exchange completeness.
+
+Trust flags: `source_bytes_verified` is `true` whenever a report exists (a
+mismatch refuses the run). `authenticity_verified`, `normalization_verified`,
+`ready_for_backtest`, `trusted_for_gex`, `gex_computed`, `strategy_tested` and
+`pnl_computed` are always `false`; `orders_placed` is always `0`.
+
+### `decisions[]`
+
+`decision_at` (UTC), `inventory_source` (`source_sha256`, `record_index`, or
+`null`), `expected_contracts` (as-of in-scope identities),
+`excluded_inventory_contracts` (supplied but outside 0–7 DTE),
+`passing_contracts`, `blocked_contracts`, `blocker_counts` (v2.1.33 audit
+blockers plus `CROSSED_OPTION_QUOTE`, `MODEL_NOT_AVAILABLE`,
+`INVENTORY_NOT_AVAILABLE`, `EMPTY_AS_OF_SCOPE`), `decision_passed`,
+`frame_set_hash` (digest over every per-contract frame hash), `decision_hash`.
+
+### `fill_probes[]`
+
+`probe` (the declared probe), `arrival_at`, `deadline`, `status`
+(`SIMULATED_FILL` or `UNFILLED`), `reason` (`null` when filled, otherwise one
+of `RESEARCH_FRAME_BLOCKED`, `EXPIRED_INSTRUMENT`, `OUTSIDE_RESEARCH_SESSION`,
+`METADATA_OR_COSTS_NOT_AVAILABLE_AT_DECISION`,
+`METADATA_OR_COSTS_NOT_EFFECTIVE_AT_ARRIVAL`, `NO_QUOTE_WITHIN_WAIT`,
+`QUOTE_PREDATES_ARRIVAL`, `QUOTE_DELIVERY_TOO_OLD`,
+`METADATA_OR_COSTS_EXPIRED_BEFORE_FILL`, `CROSSED_QUOTE`, `OFF_TICK_QUOTE`,
+`INSUFFICIENT_DISPLAYED_SIZE`, `INVALID_ADVERSE_PRICE`,
+`DECIMAL_PRECISION_EXCEEDED`). Once profiles were selected: `instrument_source`,
+`cost_source`. Once an update was observed: `update_at`, `quote_source`,
+`quote_event_at`, `quote_available_at`. On a simulated fill: `fill_at`, `price`
+(executable side plus adverse slippage), `quoted_side_price`, `spread_points`
+(reported once, never added to costs), `fee`, `additional_slippage_cost`,
+`fee_plus_additional_slippage`, `currency`, `point_value`,
+`liquidity_guaranteed` (always `false`). Prices and costs are decimal strings.
+
+### `probe_counts`
+
+`total`, `simulated_fills`, `unfilled`, `refusal_reasons` (reason → count).
+
+## v2.1.35 fields
+
+### `research-events/2.1.35` (emitted by `src/adapters/thetadata/research_events.py`)
+
+Document: `schema_version`, `origin` (`RECORDED_NORMALIZED` only when every
+manifest record's capture origin is a live transport, else `SYNTHETIC`),
+`provenance`, `records`.
+
+`provenance`: `capture_session_id`, `manifest_sha256` (the verified manifest
+hash), `run_intent_sha256` (digest of `run-intent.json`), `normalizer`
+(`thetadata-research-events/2.1.35`), `session_date` (the verified listing
+`date` parameter, cross-checked against the capture's valuation instant),
+`payloads` (endpoint → `sha256`, `location` relative to the capture directory).
+
+`records[]`: the 2.1.34 fields (`kind`, `key`, `event_at`, `available_at`,
+`sequence`, `data`) plus `lineage`: `raw_sha256` (must be one of the
+provenance payload digests), `row_index` (1-based data row inside that payload,
+`null` for the whole-payload `contract_list` and `model_evidence` records),
+`rule` (`thetadata-v3/<kind>/2` for quote, Greeks, open-interest and index
+rows; `/1` for the inventory and model evidence), `availability_basis` (`RECEIPT`,
+`RECEIPT_DEFERRED_TO_VENDOR_EVENT_TIME`, `GREEKS_RECEIPT`).
+
+Replay receipts (`sources[]`) for such files add `schema_version` and the
+`provenance` object; 2.1.34 receipts are unchanged.
+
+### `research-pilot-readiness/2.1.35` (emitted by `python -m src.tools.normalize_thetadata_capture`)
+
+`schema_version`, `label`, `session_date`, `generated_from` (`normalizer`,
+`capture` identity, `events_sha256`, `plan_sha256`, `replay_report_hash`,
+`replay_schema_version`), `parameters` (`receipt_clock_tolerance_ms`,
+`contract`, `contract_hash`, `contract_is_research_default`, `diagnostic`),
+`coverage` (the normalizer's accounting: `origin`, `capture_origins`,
+`capture`, `session_date`, `vendor_timestamp_policy`, `attempt_log`,
+`endpoints` with `rows`, `emitted`, `excluded` by reason, `columns`,
+`unused_columns`, `receipt` (`request_started_at`, `manifest_received_at`,
+`attempt_received_at`, `available_at`, `evidence`, `refusal`),
+`vendor_event_time`, `vendor_clock_lead`, `duplicate_groups`
+(`identical_coalesced`, `conflicting_excluded`, `conflicting_keys`);
+`model_evidence`; `open_interest`
+with `settlement_rule`, `as_of_basis`, `rows_by_as_of`; `identities`;
+`records_by_kind`), `replay` (`expected_decisions`, `passing_decisions`,
+`blocked_decisions`, `grid`, `decisions_with_inventory`,
+`blocker_decision_counts`, `blocker_contract_decision_counts`,
+`best_decision`, `fill_probes`), `requirements[]` (`requirement`,
+`description`, `status` PRESENT/PARTIAL/MISSING, `detail`, `source`),
+`usable_decisions`, `blocked_decisions`, `usable_for_intraday_pilot`,
+`blocking_reasons` (MISSING requirements plus `NO_PASSING_DECISIONS` and
+`DIAGNOSTIC_PARAMETERS_NOT_RESEARCH_DEFAULT`), `partial_requirements`,
+`observed_source_origins`, `synthetic_only`, the trust flags (all `false`),
+`orders_placed` (`0`), `limitations`, `report_hash`.
+
+Exclusion reasons the normalizer can report per endpoint:
+`AVAILABILITY_UNKNOWN`, `RECEIVE_TIME_CONFLICT`, `RECEIVED_BEFORE_REQUEST`,
+`INVALID_IDENTITY`, `UNEXPECTED_SYMBOL`, `NOT_IN_INVENTORY`,
+`DUPLICATE_IDENTITY` (inventory rows), `IDENTICAL_DUPLICATE_COALESCED`,
+`CONFLICTING_DUPLICATE_OBSERVATIONS`, `UNPARSEABLE_TIMESTAMP`,
+`NONEXISTENT_WALL_CLOCK`,
+`VENDOR_TIMESTAMP_AFTER_RECEIPT`, `INVALID_PRICE`, `ZERO_OR_INVALID_ASK`,
+`INVALID_OPEN_INTEREST`, `OI_TIMESTAMP_NOT_TRADING_SESSION`,
+`NON_FINITE_INPUT`, `IV_OUT_OF_RANGE`, `VENDOR_IV_ERROR`,
+`DELTA_OUT_OF_RANGE`, `MODEL_FIXED_AFTER_GREEKS_RECEIPT`. Counts describe rows
+refused under these rules; they are not vendor error rates.
+
+## v2.1.36 fields
+
+### Coverage additions of the single-capture normalizer (`thetadata-research-events/2.1.36`)
+
+`scheduled_endpoints` (the scope the capture was to issue: all five for a
+single capture), `acquired_endpoints`, `unacquired_endpoints`,
+`inventory_membership_checked` (false for a cycle without a listing). Each
+endpoint's `receipt` adds `request_id` (the manifest record's logical request
+id) and `detail` (for an unacquired endpoint: `attempts`, `last_status_code`,
+`last_started_at`, `last_received_at`, `succeeded` from the verified attempt
+log; otherwise `null`). Two new receipt refusals: `NOT_SCHEDULED` (outside the
+cycle's scope) and `NOT_ACQUIRED` (scheduled, no verified payload). The
+provenance `normalizer` is `thetadata-research-events/2.1.36`; the row rules
+stay at `thetadata-v3/<kind>/2`.
+
+### `intraday-collection-schedule/2.1.36` (`src/ingest/schedule.py`)
+
+`session_date`, `policy` (`cadence_seconds`, `refresh_every_seconds`,
+`start_tolerance_seconds`, `max_consecutive_failed_cycles`, `contract`,
+`one_cycle_in_flight`, `missed_slot_policy`), `session_open`,
+`session_close`, `early_close`, `preparation_opens` (midnight Eastern of the
+session day), `slots[]` (`index`, `label` HHMMSS Eastern, `scheduled_at`,
+`kind` FULL/MARKET, `scope`), `request_budget` (`cycles`, `requests`,
+`max_attempts_per_request`, `max_attempts`), `decision_coverage`,
+`endpoint_cadence`, `fingerprint` (digest of everything above).
+
+### `intraday-session-intent/2.1.36`, `-approval`, `-log`, `-summary` (`src/ingest/session_collector.py`)
+
+Intent (`session-intent.json`): `collector_version`, `mode` (`LIVE` or
+`OFFLINE_TRANSPORT`), `session_date`, `created_at`, `config_path`,
+`schedule`, `policy`, `cycle_approval` (the one-shot's preflight approval),
+`session_approval` (`session_date`, `cycle_approval_hash`,
+`schedule_fingerprint`, `destination`, `request_budget`, `approval_hash`),
+`request_budget`, `destination`, `expected_capture_origin`,
+`pipeline_fingerprint`, `capture_plan_fingerprint`, `market_session`,
+`overrides` (both `false`, always).
+
+Log (`session-log.jsonl`, one JSON object per line): `event` `SESSION_START` /
+`RESTART` / `SLOT` / `STOP` / `SESSION_END`. A `SLOT` entry carries `slot`,
+`label`, `scheduled_at`, `kind`, `scope`, `status` (`EXECUTED`,
+`FAILED_TO_START`, `MISSED_OVERRUN`, `MISSED_RESTART_GAP`,
+`MISSED_LATE_START`, `STOPPED`) and, when executed, `started_at`,
+`finished_at`, `duration_seconds`, `start_delay_seconds`, `cycle_dir`,
+`run_state`, `acquired`, `missing`, `manifest_hash`, `capture_session_id`,
+`stop_reason`, `error_code`, `overran_next_boundary`; a missed slot carries
+`observed_at`, `late_by_seconds`, `cause`.
+
+Summary (`session-summary.json`): `status` (`COMPLETED`, `STOPPED`,
+`INTERRUPTED`), `stop_reason`, `slots_planned`, `slots_by_status`,
+`cycles_executed`, `cycles_with_every_scheduled_endpoint`,
+`cycles_overrunning_a_boundary`, `endpoint_failures`, `requests_issued`,
+`request_budget`, `restarts`, `cycle_duration_seconds`, `log_entries`,
+`session_root`, `ended_at`.
+
+### `research-events/2.1.36` (emitted by `src/adapters/thetadata/session_assembly.py`)
+
+Document: `schema_version`, `origin`, `provenance`, `records`.
+
+`provenance`: `session_date`, `session_approval_hash`, `schedule_fingerprint`,
+`session_intent_sha256`, `session_log_sha256`, `collector`, `normalizer`,
+`assembler` (`thetadata-session-assembly/2.1.36`), `cycles` (label →
+`capture_session_id`, `manifest_sha256`, `run_intent_sha256`, `payloads`
+(endpoint → `sha256`, `location` relative to the session directory)).
+
+`records[]`: the 2.1.35 fields; `lineage` adds `cycle` (must name a
+provenance cycle whose payloads include `raw_sha256`) and `request_id`.
+`sequence` counts revisions of one `(kind, key, event_at)` in availability
+order across cycles. Replay receipts carry `schema_version` and the session
+`provenance`.
+
+### `intraday-session-assembly/2.1.36` (`session-assembly.json`)
+
+`assembler`, `normalizer`, `collector`, `origin`, `capture_origins`,
+`session_date`, `verification` (`intent_sha256`, `log_sha256`,
+`executed_cycles`, `orphan_cycle_directories`, `findings`,
+`structure_verified`), `session` (mode, approvals, policy, budget, slots by
+status, cycles executed / assembled / skipped / complete / overrunning,
+restarts, stops, ended, `endpoint_failures`, `requests_issued`),
+`receipt_clock_tolerance_ms`, `merge` (`rule`, `outcomes_by_kind` with
+`NEW_EVENT`, `REOBSERVED_UNCHANGED`, `REVISION`, `REVERTED_REVISION`,
+`LATE_OLDER_EVENT`; `membership` with `NOT_IN_LATEST_INVENTORY`,
+`UNCHECKED_NO_INVENTORY_YET`; `ambiguity` with `incidents[]` (`cycle`,
+`kind`, `key`, `observed_at`, `outcome` `AMBIGUOUS_AFTER_KNOWN_STATE` /
+`AMBIGUOUS_WITHOUT_KNOWN_STATE`, `known_event_at`, `effect`),
+`after_known_state`, `without_known_state`, `policy`), `records`,
+`records_by_kind`, `identities`, `cadence` (`inventory_cycles`,
+`open_interest_cycles`, `quote_cycles`, `greeks_cycles`, `inventory_events`),
+`vendor_clock_lead`, `cycles[]` (per cycle: slot, instants, duration, delay,
+overrun, `run_state`, scheduled / acquired / unacquired endpoints with attempt
+detail, capture session id, manifest, first and last receipt, records by kind,
+exclusions, conflicting groups, clock leads, membership check, model evidence,
+merge outcomes).
+
+### `research-pilot-readiness/2.1.36` (`session-readiness.json`, `src/replay/session_readiness.py`)
+
+As 2.1.35, with `generated_from` naming the assembler, collector, session
+approval, schedule fingerprint, `assembly_sha256` and every cycle; a `session`
+block (slots, cycles, overruns, restarts, stops, budget, failures, cadence,
+merge outcomes, membership, ambiguity counts, clock leads, identities,
+records, `structure_verified`); `replay` adds `decisions_with_stale_inputs`,
+`decisions_with_skewed_inputs`, `decisions_with_open_interest_gaps`; and two
+verdicts: `option_side_usable` with `option_side_blocking_reasons` (over the
+option-side requirements, `NO_PASSING_DECISIONS`,
+`DIAGNOSTIC_PARAMETERS_NOT_RESEARCH_DEFAULT`, `SESSION_STRUCTURE_NOT_VERIFIED`)
+and `usable_for_intraday_pilot` with `blocking_reasons` (every requirement,
+futures and multi-session coverage included). Trust flags all `false`.
+
+### `research-pilot-summary/2.1.36` (`pilot-summary.json`, `src/replay/pilot_summary.py`)
+
+`label`, `sessions[]` (`source`, `sha256`, `schema_version`, `kind`
+`COLLECTION_SESSION` / `SINGLE_CAPTURE`, `session_date`, origins,
+`synthetic_only`, `diagnostic`, both verdicts and their reasons,
+`usable_decisions`, `expected_decisions`, `decisions_with_inventory`,
+`blocker_decision_counts`, `counts_basis` `EXACT` / `LOWER_BOUND`, stale /
+skewed / open-interest-gap decision counts, `coverage`, `identities`,
+`vendor_clock_lead`, `ambiguity_after_known_state`, `structure_verified`,
+`report_hash`), `totals`, `minimum_sessions`, `option_side_pilot_ready`,
+`option_side_blocking_reasons` (`FEWER_OPTION_SIDE_USABLE_SESSIONS_THAN_MINIMUM`,
+`DIAGNOSTIC_SESSION_INCLUDED`, `SYNTHETIC_SESSIONS_ONLY`),
+`usable_for_intraday_pilot`, `blocking_reasons` (adds
+`SESSIONS_NOT_USABLE_FOR_THE_WHOLE_PILOT`), `observed_source_origins`,
+`synthetic_only`, trust flags (all `false`), `limitations`, `report_hash`.
+Synthetic and recorded sessions are never summarised together.

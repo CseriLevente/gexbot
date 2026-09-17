@@ -822,12 +822,17 @@ class RetryingTransport:
         random_unit: Callable[[], float] = lambda: 0.5,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         attempt_observer: Any = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._inner = inner
         self._policy = policy or RetryPolicy()
         self._sleep = sleep
         self._random_unit = random_unit
         self._max_response_bytes = max_response_bytes
+        #: Stamps every attempt's ``started_at``/``received_at``. Injectable so
+        #: a collector driven by a fake clock records receipts on that clock;
+        #: the default is the wall clock, as before v2.1.36.
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         #: Told about every attempt, successful or not. Until v2.1.12 a retryable
         #: 429 or 503 body was logged and dropped inside this loop, so the
         #: responses that would explain a partial capture were exactly the ones
@@ -876,7 +881,7 @@ class RetryingTransport:
                 safe_url=_redact(url),
                 request_parameters_hash=_parameters_hash(params),
                 started_at=started_at,
-                received_at=datetime.now(UTC),
+                received_at=self._clock(),
                 status_code=status_code,
                 response_headers=safe_headers(headers),
                 transport_error_code=transport_error_code,
@@ -913,7 +918,7 @@ class RetryingTransport:
 
         for attempt in range(1, self._policy.max_retries + 2):
             started = time.monotonic()
-            started_at = datetime.now(UTC)
+            started_at = self._clock()
             try:
                 response = self._inner.get(url, params, timeout_seconds)
             except ResponseTooLargeError as exc:

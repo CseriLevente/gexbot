@@ -214,9 +214,9 @@ def test_the_sweep_receives_the_authorized_plan_rather_than_deriving_one(
     received: list[object] = []
     original = pipeline_module.ThetaDataResearchPipeline.capture_required_endpoints_raw
 
-    def watched(self, *, capture, as_of, plan=None):
+    def watched(self, *, capture, as_of, plan=None, **scope):
         received.append(plan)
-        return original(self, capture=capture, as_of=as_of, plan=plan)
+        return original(self, capture=capture, as_of=as_of, plan=plan, **scope)
 
     monkeypatch.setattr(
         pipeline_module.ThetaDataResearchPipeline,

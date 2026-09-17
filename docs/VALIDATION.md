@@ -221,7 +221,7 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
-Current: **90.32%** across 13,850 statements, against a fail_under of 90.
+Current: **91.08%** line-and-branch across 16,869 statements, against a fail_under of 90 (v2.1.36 gate; v2.1.35 measured 91.08% across 15,518 statements; v2.1.34 90.94% across 14,832; v2.1.33 90.64% across 14,386).
 
 ### Three versions, three meanings
 
@@ -229,7 +229,7 @@ They move independently, and conflating them is how a change hides.
 
 | Constant | Value | Defined in | Moves when |
 |---|---|---|---|
-| Package version | `2.1.30` | `pyproject.toml` | anything ships |
+| Package version | `2.1.36` | `pyproject.toml` | anything ships |
 | Parser version | `thetadata-v3-parser/2.1.17` | `src/adapters/raw_store.py` | vendor-payload interpretation changes -- v2.1.15 replays the exact stored bytes under the captured content type and charset rather than a UTF-8-with-replacement reading of them |
 | Engine version | `gex-engine/2.1.10` | `src/domain/model_spec.py` | the numerics change |
 | Manifest schema | `raw-capture-manifest/2.1.17` | `src/adapters/raw_store.py` | the *shape* of capture evidence changes |
@@ -260,6 +260,11 @@ They move independently, and conflating them is how a change hides.
 | Data-eligibility schema | `analytical-universe/2.1.28` | `src/domain/analytical_universe.py` | the *meaning* of an eligibility verdict changes -- when a contract that used to be eligible would now be excluded, or excluded under a different reason. New in v2.1.28: an open-interest record that does not exist stops being spelled `0`, and a contract whose expiration precedes the capture's market session stops being part of the current analytical universe |
 | Analytical-universe report schema | `analytical-universe-report/2.1.28` | `src/adapters/thetadata/analytical_universe.py` | what a capture's eligibility partition must carry changes. Separate from the certification schema **and deliberately not part of it**: nothing about what a certification derives from a capture changed in v2.1.28, so `capture-certification/2.1.27` did not move and both committed live-capture reports still reproduce their `report_hash` |
 | Analytical-universe algorithm | `analytical-universe/1` | `src/adapters/thetadata/analytical_universe.py` | the *classification* changes -- when an identity that used to land in one class would now land in another. Separate from the schema above for the same reason `oi-transition/1` is separate from `longitudinal-oi`: two reports with the same fields are incomparable if they were classified differently |
+| Pricing-diagnostics schema | `pricing-diagnostics/2.1.31` | `src/adapters/thetadata/pricing_diagnostics.py` | the offline diagnostic report shape changes |
+| Direct delta diagnostic algorithm | `direct-delta-grid/1` | `src/adapters/thetadata/pricing_diagnostics.py` | the candidate grid, sample admission or scoring changes |
+| Floor-aware inference schema | `floor-aware-pricing-inference/2.1.32` | `src/adapters/thetadata/floor_inference.py` | candidate support and censoring report shape changes |
+| Cross-capture validation schema | `pricing-inference-validation/2.1.32` | `src/adapters/thetadata/floor_inference.py` | replication report shape changes |
+| Floor-aware inference algorithm | `common-population-censoring/1` | `src/adapters/thetadata/floor_inference.py` | joint support, censoring or replication rules change |
 | ThetaData support-evidence schema | `thetadata-support-evidence/2.1.30` | `src/adapters/thetadata/oi_policy.py` | what privacy-safe metadata and closed claims are extracted from a private vendor email changes |
 | OI-policy-resolution schema | `oi-policy-resolution/2.1.30` | `src/adapters/thetadata/oi_policy.py` | how vendor support claims are composed with a frozen capture report changes |
 | OI-policy derivation | `thetadata-oi-policy/1` | `src/adapters/thetadata/oi_policy.py` | the policy conclusions or capture-binding rules change |
@@ -278,6 +283,21 @@ They move independently, and conflating them is how a change hides.
 | Documentation-bundle schema | `vendor-documentation-bundle/2.1.18` | `src/adapters/thetadata/openapi_evidence.py` | what a verified bundle must carry changes. **The official OpenAPI document is pinned**: `https://docs.thetadata.us/openapiv3.yaml`, 812,792 bytes, SHA-256 `1b65f93c879a5ca4477a0ff9177235138e0c81840e0c7dddfbd9e34164b40b50`, stored content-addressed under `vendor_documentation/`. The digest is over the exact response body bytes -- not a markdown rendering, not a reserialization of the parsed YAML, not a summary |
 
 | Documentation-extractor version | `openapi-evidence-extractor/2.1.18` | `src/adapters/thetadata/openapi_evidence.py` | *how* a value is read out of the document changes. Separate from the schema: the same bytes read under different normalizers yield different claims |
+
+| Research-contract schema | `intraday-research-contract/2.1.33` | `src/replay/research_contract.py` | the declared research design (scope, grid, freshness budgets) changes meaning. Unchanged in v2.1.34: the replay consumes it as-is |
+| Research-input audit schema | `research-input-audit/2.1.33` | `src/replay/research_contract.py` | what a declared-frame audit carries changes |
+| Research-events schema | `research-events/2.1.34` | `src/replay/event_store.py` | what a normalized, hash-bound event record must carry changes -- kinds, canonical identities, event/availability clocks, revision sequence, origin labels. Still accepted unchanged in v2.1.35 |
+| Research-events schema (lineage-bound) | `research-events/2.1.35` | `src/replay/event_store.py` | the 2.1.34 record plus a mandatory `lineage` (raw payload digest, native row, rule, availability basis) and a document `provenance` naming the verified capture and every payload. Replay semantics are the 2.1.34 ones |
+| Research-events schema (session-bound) | `research-events/2.1.36` | `src/replay/event_store.py` | the 2.1.35 record whose `lineage` also names the collection `cycle` and the logical `request_id`, under a document `provenance` naming the session approval, schedule fingerprint, intent and log digests and every cycle's verified capture. Replay semantics are still the 2.1.34 ones |
+| Capture normalizer | `thetadata-research-events/2.1.36` (row rules `thetadata-v3/<kind>/2`, inventory and model evidence `/1`) | `src/adapters/thetadata/research_events.py` | how a native ThetaData v3 row becomes a research event changes -- columns read, identity canonicalisation, timestamp zone, receipt evidence, repeated-identity policy, exclusion reasons, open-interest attribution -- or, as in v2.1.36, what the normalizer accepts as a capture (a partial-scope cycle with `NOT_SCHEDULED` / `NOT_ACQUIRED` receipts) and reports. Row rules moved to revision 2 after the independent review of the first v2.1.35 cut and are unchanged in v2.1.36 |
+| Pilot-readiness schema | `research-pilot-readiness/2.1.35` | `src/replay/pilot_readiness.py` | what a readiness report carries or what a requirement status means changes. Every trust flag is pinned false |
+| Session-readiness schema | `research-pilot-readiness/2.1.36` | `src/replay/session_readiness.py` | what an assembled session's readiness report carries -- the `session` block, the option-side verdict apart from the whole-pilot verdict -- or what a status means changes. Every trust flag is pinned false |
+| Pilot-summary schema | `research-pilot-summary/2.1.36` | `src/replay/pilot_summary.py` | what the multi-session summary restates or how it judges the option side across sessions changes |
+| Session assembler | `thetadata-session-assembly/2.1.36` (report `intraday-session-assembly/2.1.36`) | `src/adapters/thetadata/session_assembly.py` | the merge rule (current-revision comparison, availability order, tie-break, membership, ambiguity) or the structural verification changes |
+| Session collector | `intraday-session-collector/2.1.36` (`intraday-collection-schedule/2.1.36`, `intraday-session-intent/-approval/-log/-summary/2.1.36`) | `src/ingest/schedule.py`, `src/ingest/session_collector.py` | how slots, scopes, budgets, approvals or missed-slot accounting are derived or recorded changes |
+| Pilot-collection specification | `intraday-pilot-collection/2.1.36` | `config/intraday_pilot.json` | what the pilot collector is required to record or refuse changes. v2.1.36 added the `collection` policy block and the corrected 09:30 schedule |
+| Research-replay plan schema | `research-replay-plan/2.1.34` | `src/replay/session.py` | what a replay declares up front changes -- session, contract, bound sources, fill policy, probes |
+| Research-session replay schema | `research-session-replay/2.1.34` | `src/replay/session.py` | what the replay report carries or what one of its flags means changes. Every trust flag other than `source_bytes_verified` is pinned false in this schema |
 
 The engine version is part of the model fingerprint and therefore of the replay
 hash: a change to the maths that did not move the hash would be undetectable.
@@ -315,3 +335,105 @@ python -m mypy src
 ```
 
 See [RELEASE.md](RELEASE.md) for the bootstrap and the release procedure.
+
+## v2.1.36 intraday collection and session assembly
+
+Everything runs offline on a fake clock (`src/ingest/clock.FakeClock`) and a
+fake vendor (`tests/synthetic_session.SyntheticFeed`, which serves native-schema
+bodies generated from that clock and learns the cycle it is serving from the
+session directory); every cycle is the real one-shot command with its
+preflight, per-request authorisation, manifest, attempt log and verification.
+`tests/unit/test_collection_schedule.py` (22 cases): first slot 09:30:00 ET,
+FULL every 30 minutes, 390/210 slots on regular/early-close sessions,
+non-trading days refused, phases, fingerprint binding, policy refusals, the
+repository specification, both clocks. `tests/unit/test_session_collector.py`
+(17): the dry run writes nothing and its approval binds date, destination,
+policy and budget; missing, wrong, stale or per-cycle approvals refused before
+any request; existing destination left alone; nothing starts after the last
+slot; each slot is one verified capture in its scope with receipts inside its
+interval and no history/at-time request; late start, overrun and restart
+accounting; resume needs the same session and no live lock; failed endpoints
+recorded with the rest kept; consecutive empty cycles, a systemic 401 and an
+exhausted budget stop the session; an operator interrupt is logged and the
+lock released. `tests/unit/test_session_assembly.py` (28) on one scripted
+session: A → B → A as three revisions the replay selects in order; an
+unchanged quote emitted once and never made younger; a late revision of an
+older event that does not displace the newer state; an ambiguous observation
+leaving the known state standing; open interest and inventory reused only
+through original receipts, a missing row unavailable; a failed Greeks request
+keeping the cycle's other payloads with no model evidence; membership against
+the latest listing; missed, overrun and restarted slots reported, never
+backfilled; lineage from every record to cycle, request, payload, row and
+rule, with the bytes rehashed; loading as `research-events/2.1.36`;
+determinism across copies; tampered payload, log, intent, scope and events
+lineage refused; receipt ties broken deterministically; readiness verdicts and
+recomputation. `tests/unit/test_session_event_schema.py` (14): the store's
+field-by-field refusals for the session schema.
+`tests/regression/test_synthetic_session_end_to_end.py` (8): two clean
+synthetic sessions through collector, assembler, replay, readiness and summary
+-- only scheduled snapshot requests issued, every artefact `SYNTHETIC`, the
+option side usable on each (7 usable decisions in the collected window, the
+rest stale and reported), the summary refusing to call synthetic sessions
+ready and refusing to mix them with the recorded September 2 capture; the
+collector command's dry run, live refusal and schedule modes. The frozen
+native fixture and the September 2 evidence were regenerated once under the
+2.1.36 normalizer identifier; their records are byte-identical to the r2
+ones apart from that identifier (checked while regenerating and recorded in
+the completion report). The v2.1.34 replay regressions and the r2 duplicate
+reproduction are retained unchanged.
+
+## v2.1.35 native normalization and readiness
+
+The normalizer (`src/adapters/thetadata/research_events.py`) is tested on a
+synthetic capture written in the vendor's native v3 column layout
+(`tests/native_capture.py`) and on the lineage-bound source schema in the event
+store (`tests/unit/test_native_normalization.py`, 77 cases;
+`tests/unit/test_intraday_pilot_config.py`, 6 cases;
+`tests/regression/test_native_capture_fixture.py`, 5 cases). Negative controls
+first: a tampered payload, a native schema drift, a ragged row, a missing
+endpoint, a listing date disagreeing with the valuation instant, an
+undocumented settlement convention, a model fixed after its Greeks receipt,
+out-of-range or non-integer tolerances, a payload without any recorded
+receipt, an attempt receipt that contradicts the manifest, a receipt before
+its request, a damaged attempt log, vendor timestamps after the receipt with
+and without a tolerance, weekend-stamped and non-integer open interest, zero
+and non-finite IV, vendor IV error, out-of-range delta, duplicates, unlisted
+and non-SPXW identities, repeated identities that disagree (a crossed row
+beside a clean one, two valid but different quotes, differing vendor times, a
+malformed twin) in both input orders for quotes, Greeks, open interest and the
+index row -- excluded whole, identity kept in the inventory, frame refused as
+missing input -- and every lineage/provenance malformation the store must
+refuse. Positive checks show exact repeats coalesce to the lowest row with the
+clean control still passing, follow each emitted record's lineage back into
+the raw bytes and re-read the row, prove availability equals the later
+recorded receipt and never the event time, prove the command's five outputs
+are reproducible byte for byte, and pin a frozen fixture
+(`tests/fixtures/native/synthetic_2026-09-08/`: every capture file by digest --
+no captured payload is tracked -- plus the frozen events, plan, readiness JSON
+and Markdown). The real September 2 capture's readiness reports are in
+`docs/evidence/`; they are evidence about data usability, not trading results.
+
+## v2.1.34 verified replay
+
+The replay (`research-events/2.1.34`, `research-replay-plan/2.1.34`,
+`research-session-replay/2.1.34`) verifies source bytes against declared
+digests, replays availability-indexed state over the full declared decision
+grid and runs conservative counterfactual fill probes in exact decimal
+arithmetic. Its tests (`tests/unit/test_verified_replay.py`,
+`tests/regression/test_synthetic_replay_fixture.py`) are negative controls
+first: tampering, duplicate keys and revisions, escaping paths, malformed
+numbers, timestamps and identities, future inventory and model evidence,
+delayed old rows, missing versus zero OI, holiday prior sessions, boundary
+instants, stale or crossed quotes, undersized displayed liquidity, ineffective
+profiles and overlapping probes are each shown to be refused or blocked. The
+shipped bundle is synthetic; matching digests verify bytes, not vendor
+authenticity or normalization. See `INTRADAY_RESEARCH.md`.
+
+## v2.1.33 research diagnostics
+
+The declared-data contract (`intraday-research-contract/2.1.33`) and audit
+(`research-input-audit/2.1.33`) check supplied event/availability declarations.
+They do not certify raw sources or a complete dataset. Gamma sensitivity
+(`gamma-model-sensitivity/2.1.33`) recomputes model screening from verified
+captures and preserves OI-available identity sets, without computing GEX.
+See `INTRADAY_RESEARCH.md` for the fixed research scope and interpretation.

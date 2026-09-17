@@ -1,0 +1,13 @@
+{
+  "contract": {
+    "cadence_seconds": 60,
+    "close_buffer_minutes": 15,
+    "max_dte": 7,
+    "max_market_age_seconds": 60.0,
+    "max_market_skew_seconds": 2.0,
+    "open_delay_minutes": 5,
+    "root": "SPXW",
+    "schema_version": "intraday-research-contract/2.1.33"
+  },
+  "frames": []
+}

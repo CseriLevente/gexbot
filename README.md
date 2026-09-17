@@ -17,6 +17,50 @@ complete universe.
 
 ---
 
+v2.1.33 adds point-in-time declaration checks and per-contract gamma sensitivity
+across the retained pricing models. See [the intraday research specification](docs/INTRADAY_RESEARCH.md)
+for the data contract, offline commands and next steps toward a trading backtest.
+The [floor-aware inference runbook](docs/FLOOR_AWARE_INFERENCE.md) describes
+the underlying model screening and remaining ambiguity.
+
+v2.1.34 adds an offline, source-verified session replay with conservative
+counterfactual fill probes (`python -m src.tools.replay_research_session`). It
+verifies normalized event bytes against declared digests, replays availability-
+indexed state over the full decision grid and prices hypothetical futures fills
+in exact decimal arithmetic. The shipped example is synthetic; the report never
+claims vendor authenticity, a trusted GEX, a tested strategy or a PnL. Section
+"Verified replay and fill probes" of the intraday research specification is the
+reference.
+
+v2.1.35 adds a deterministic normalizer from a verified ThetaData capture
+directory to hash-bound research events with per-record raw lineage and
+recorded-receipt availability, an offline command that normalizes, replays and
+writes a pilot-readiness report
+(`python -m src.tools.normalize_thetadata_capture CAPTURE --out DIR`), and a
+collection specification for a small multi-session intraday pilot
+([docs/INTRADAY_PILOT_COLLECTION.md](docs/INTRADAY_PILOT_COLLECTION.md)). The
+preserved September 2 close capture normalizes and replays, and every one of
+its 371 research decisions is blocked because nothing was received before the
+research window ended; the readiness report says so
+([docs/evidence/PILOT_READINESS_2026-09-02.md](docs/evidence/PILOT_READINESS_2026-09-02.md)).
+Futures quotes, sizes, instrument metadata and costs remain missing inputs.
+
+v2.1.36 adds the intraday collection session and the multi-cycle assembler
+the pilot specification called for: `python -m src.tools.collect_intraday_session`
+runs the approved one-shot capture once per slot from the 09:30 ET open under a
+second approval that binds the day's schedule, budget and destination, with one
+cycle in flight and every missed, overrun or restarted slot recorded;
+`python -m src.tools.assemble_intraday_session` verifies a session's structure,
+normalizes each cycle under its scheduled scope and merges the cycles by
+recorded availability into `research-events/2.1.36` with per-record cycle
+lineage, then replays and writes a session readiness report that judges the
+option side apart from the pilot as a whole;
+`python -m src.tools.summarize_intraday_pilot` restates several sessions as one
+summary. All of it is tested offline on a fake clock and a fake vendor; no live
+session has been collected, no futures source exists, and a synthetic session
+is never counted as trading evidence. The runbook is
+[docs/INTRADAY_PILOT_COLLECTION.md](docs/INTRADAY_PILOT_COLLECTION.md).
+
 ## Try it
 
 No subscription, no API key, no network:
@@ -25,7 +69,7 @@ No subscription, no API key, no network:
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m src.app        # full GEX snapshot, synthetic chain
-.venv/Scripts/python.exe -m pytest         # 2933 tests, 90% coverage
+.venv/Scripts/python.exe -m pytest         # full regression suite; 90% aggregate coverage gate
 ```
 
 The engine core (`src/gex`, `src/domain`, `src/synthetic`) executes **no
@@ -287,13 +331,17 @@ src/
   adapters/      base (protocols), transport, raw_store, thetadata/, synthetic/
   config/        typed schema loading
   synthetic/     deterministic chain generation (production, not test-only)
+  replay/        research contract, hash-bound event store, session replay,
+                 fill probes (offline; no positions, orders or PnL)
+  tools/         offline operator commands (capture, certify, compare, audit, replay)
   app.py         runnable demo
 tests/
   unit/          per-module rules and formulas
   integration/   offline pipeline through the fake transport
   regression/    frozen, hand-transcribed expectations
   replay/        determinism and output-hash stability
-  fixtures/      stored vendor responses
+  fixtures/      stored vendor responses; replay/ holds the frozen synthetic
+                 replay bundle and its report
 ```
 
 ---
@@ -310,6 +358,8 @@ python -m pytest --cov --cov-report=term-missing
 python -m ruff check .               # lint
 python -m ruff format --check .      # format
 python -m mypy src                   # types (strict)
+python -m src.tools.replay_research_session tests/fixtures/replay/synthetic_2026-09-08 --json replay-report.json
+                                     # offline synthetic replay; output must not exist yet
 ```
 
 Python 3.12 or 3.13.

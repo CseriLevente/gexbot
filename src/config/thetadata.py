@@ -1116,6 +1116,9 @@ def build_thetadata_client(
         # body is consumed inside the retry loop, so without this the responses
         # that explain a partial capture are exactly the ones nobody keeps.
         attempt_observer=attempt_observer,
+        # The same clock the client stamps its records with, so the attempt
+        # log and the manifest receipts of one response come from one source.
+        clock=clock,
     )
 
     # **No filesystem store is created from a configuration path.**

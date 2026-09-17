@@ -111,6 +111,20 @@ frozen fixtures other than the regenerated native one, the research contract
 and every trust gate are unchanged. Not done: a live session; a futures source;
 any strategy, GEX, PnL, sizing or order logic.
 
+Re-cut (r2) after the first Windows verification of the imported branch, which
+passed ruff, format, strict mypy, the demo, the schedule command and 3,377 of
+3,379 tests and failed two: the attempt log wrote its ``index.jsonl`` in text
+mode without ``newline="\n"``, so Windows wrote CRLF and the same attempts
+produced different evidence bytes on different hosts (the frozen native
+fixture's index digest differed; the parser had always accepted either
+ending); and a v2.1.35 test chose the payload to tamper with by
+``glob("*quote.raw")``, which also matches the contract listing, so on Windows
+it edited a file with no price and nothing was refused. r2 writes the index
+with ``newline="\n"``, selects the snapshot-quote payload explicitly and adds
+a test that the index bytes are LF-only on every host. No other change; both
+defects predate v2.1.36 and had never been exercised on Windows because the
+Windows checkout was at v2.1.30 until this release was applied.
+
 ## 2.1.35 - native-data normalization and intraday replay readiness
 
 Adds a deterministic normalizer from one verified ThetaData v3 capture directory

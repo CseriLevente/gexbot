@@ -468,6 +468,25 @@ def test_a_reopened_attempt_log_detects_a_modified_body(tmp_path):
     )
 
 
+def test_the_attempt_index_is_written_with_lf_line_endings_on_every_host(tmp_path):
+    """The index is hashed evidence; its bytes may not depend on the writer's OS.
+
+    Found by the first Windows verification of v2.1.36: text mode without
+    ``newline`` wrote CRLF there, so the frozen native fixture's
+    ``attempts/index.jsonl`` digest differed from the Linux one. On Linux this
+    test always passed; on Windows it fails without the fix.
+    """
+    _report, root = _capture_with_attempts(tmp_path)
+    index = next(root.rglob("index.jsonl"))
+    raw = index.read_bytes()
+    assert raw.endswith(b"\n")
+    assert b"\r" not in raw
+    assert len(raw.splitlines()) >= 1
+    for line in raw.split(b"\n"):
+        if line:
+            json.loads(line)
+
+
 def test_a_malformed_middle_index_line_is_a_finding(tmp_path):
     """A torn *final* line is an interrupted append. A middle one is damage."""
     from src.adapters.http_attempts import HttpAttemptLog

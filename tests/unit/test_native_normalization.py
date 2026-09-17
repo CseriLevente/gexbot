@@ -511,8 +511,13 @@ def test_a_damaged_attempt_log_is_reported_and_not_used(tmp_path):
 
 def test_a_tampered_payload_is_refused_before_any_row_is_read(tmp_path):
     root = write_native_capture(tmp_path / "capture")
-    raw = next((root / "raw").glob("*quote.raw"))
-    raw.write_bytes(raw.read_bytes().replace(b"12.30", b"12.31", 1))
+    # The option *snapshot* quote payload: ``*quote.raw`` also matches the
+    # contract listing, and which one a glob yields first depends on the
+    # filesystem (Windows returned the listing, which carries no price).
+    raw = next((root / "raw").glob("*snapshot-quote.raw"))
+    before = raw.read_bytes()
+    raw.write_bytes(before.replace(b"12.30", b"12.31", 1))
+    assert raw.read_bytes() != before, "the tamper must change the payload"
     with pytest.raises(ValueError, match="not the bytes that were captured"):
         normalize_capture(root)
 

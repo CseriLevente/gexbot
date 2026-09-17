@@ -382,6 +382,17 @@ ones apart from that identifier (checked while regenerating and recorded in
 the completion report). The v2.1.34 replay regressions and the r2 duplicate
 reproduction are retained unchanged.
 
+The first cut of v2.1.36 was the first release verified on the operator's
+Windows checkout (Python 3.12.10, win32): ruff, format, strict mypy, the demo
+and the schedule command passed, 3,377 of 3,379 tests passed, and two failed
+for Windows-only reasons -- the attempt log's ``index.jsonl`` written with
+CRLF (text mode without ``newline``), and a tamper test whose glob matched the
+listing payload before the quote payload on NTFS. The re-cut fixes both and
+adds `tests/unit/test_raw_acquisition.py::test_the_attempt_index_is_written_with_lf_line_endings_on_every_host`,
+which is a real regression test only on Windows; on Linux it always passed.
+The Linux gate below was re-run on the re-cut; the Windows re-run is the
+operator's.
+
 ## v2.1.35 native normalization and readiness
 
 The normalizer (`src/adapters/thetadata/research_events.py`) is tested on a

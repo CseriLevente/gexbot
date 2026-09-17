@@ -131,7 +131,7 @@ New functional components:
 
 ## Verification
 
-- Environment: Python 3.12.3 on Linux-6.18.44-fc-v24-x86_64-with-glibc2.39; every
+- Environment: Python 3.12.3 on Linux-6.18.44-fc-v33-x86_64-with-glibc2.39; every
   `requirements-lock.txt` pin installed offline from the downloaded wheels, plus
   one package the lockfile does not list: the `setuptools` build backend
   (within the declared `>=68,<86` range) needed for the offline editable
@@ -140,7 +140,7 @@ New functional components:
 - `python -m ruff format --check .`: exit 0 (226 files already formatted).
 - `python -m mypy src` (strict): exit 0 (Success: no issues found in 116 source files).
 - `python -m src.app`: exit 0.
-- Tests: **3,379 passed, 0 failed, 0 errors,
+- Tests: **3,380 passed, 0 failed, 0 errors,
   0 skipped** across all 98 test modules, each module run in
   one of two isolated copies of the committed tree (with `.git`, so the
   release-integrity archive tests ran rather than skipped) under
@@ -164,9 +164,42 @@ New functional components:
   `SYNTHETIC` (`synthetic-session-demonstration/` in the release folder).
 
 This is a Linux, Python 3.12 verification of the imported-history commit. It
-is not a Windows, Python 3.13 or remote GitHub CI result. The gate was run once
-to obtain these numbers and once more on the final commit that records them;
-both runs are in the evidence folder.
+is not a remote GitHub CI result; the operator's Windows (Python 3.12.10) run
+of the first cut is described in the next section. The gate was run once to
+obtain these numbers and once more on the final commit that records them;
+both runs, and the two passes over the superseded first cut, are in the
+evidence folder.
+
+## Windows verification of the first cut, and the re-cut
+
+The first cut (imported-history commit `1137c97fb20b`, archive
+`gex-bot-v2.1.36-1137c97fb20b.zip`) was applied to the operator's Windows
+checkout as branch `v2.1.36-intraday-collector` on the v2.1.30 release commit
+`a3fba0e` (the checkout's tree equalled the v2.1.30 archive; the cumulative
+patch applied cleanly and the committed tree equalled the first-cut archive
+byte for byte). The operator's verification there (Python 3.12.10, win32):
+`ruff check`, `ruff format --check`, strict `mypy src` (116 files),
+`python -m src.app` and `--show-schedule 2026-09-18` passed; `pytest --cov`
+reported 3,377 passed, 2 failed, 91.08% coverage in 8 min 58 s. The two
+failures were Windows-only:
+
+- `test_the_builder_reproduces_every_frozen_capture_file`: the frozen
+  `attempts/index.jsonl` digest differed. `HttpAttemptLog._append_index`
+  opened the index in text mode without `newline="\n"`, so Windows wrote CRLF.
+  The parser (`recovered_from`) always accepted either ending and the
+  `index_hash` is computed over normalised text, so no verification was
+  wrong; but evidence bytes depended on the writer's host. Fixed by writing
+  with `newline="\n"`; a new test asserts the index bytes are LF-only.
+- `test_a_tampered_payload_is_refused_before_any_row_is_read` (v2.1.35):
+  `glob("*quote.raw")` matches the contract-listing payload as well as the
+  quote payload, and NTFS returned the listing first, so the "tamper" changed
+  nothing. Fixed by selecting `*snapshot-quote.raw` and asserting the bytes
+  changed.
+
+Both defects predate this release and had never been exercised on Windows;
+the checkout was at v2.1.30 until this release was applied. The re-cut
+carries only these three changes over the first cut; the first-cut archive is
+preserved and marked superseded.
 
 ## Synthetic end-to-end demonstration (not trading evidence)
 

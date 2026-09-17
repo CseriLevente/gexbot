@@ -336,7 +336,11 @@ class HttpAttemptLog:
             return
         self.root.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record.as_dict(), sort_keys=True, default=str) + "\n"
-        with open(self.index_path, "a", encoding="utf-8") as stream:
+        # ``newline="\n"``: the index is evidence whose bytes are hashed and
+        # frozen; without it Windows text mode writes CRLF and the same attempts
+        # produce different bytes on different hosts (found by the first Windows
+        # run of v2.1.36; the parser always read either ending).
+        with open(self.index_path, "a", encoding="utf-8", newline="\n") as stream:
             stream.write(line)
             stream.flush()
             os.fsync(stream.fileno())

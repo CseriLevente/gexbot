@@ -95,8 +95,15 @@ def test_collection_issued_only_scheduled_snapshot_requests(pipeline):
         assert summary["cycles_executed"] == 11
         assert summary["slots_by_status"] == {"EXECUTED": 11}
         assert summary["endpoint_failures"] == {}
-        assert summary["requests_issued"] == 5 + 10 * 3
-        assert len(feed.calls) == summary["requests_issued"]
+        # r3: on a clean session every level of the accounting equals the
+        # scheduled scope, and the HTTP attempt count equals what the fake
+        # vendor actually saw.
+        requests = summary["requests"]
+        assert requests["scheduled"] == 5 + 10 * 3
+        assert requests["attempted"] == requests["acquired"] == 5 + 10 * 3
+        assert requests["http_attempts"] == len(feed.calls) == 5 + 10 * 3
+        assert requests["without_receipt"] == requests["not_attempted"] == 0
+        assert summary["interruption"] is None
         for call in feed.calls:
             assert call.url.startswith("http")
             assert "/v3/" in call.url
@@ -119,9 +126,16 @@ def test_collection_issued_only_scheduled_snapshot_requests(pipeline):
 
 def test_a_clean_session_yields_usable_option_side_decisions(pipeline):
     outputs, _ = pipeline
-    for day, _root, out, _summary, _feed in outputs:
+    for day, _root, out, summary, feed in outputs:
         readiness = read_json((out / "session-readiness.json").read_bytes())
         assert readiness["session_date"] == day.isoformat()
+        # r3: the readiness report restates the accounting the assembler
+        # recounted from every cycle, and it equals the collector's summary
+        # and the fake vendor's call count.
+        assert readiness["session"]["requests"]["http_attempts"] == len(feed.calls)
+        for key in ("scheduled", "attempted", "http_attempts", "acquired"):
+            assert readiness["session"]["requests"][key] == summary["requests"][key]
+        assert readiness["session"]["interruptions"] == []
         assert readiness["synthetic_only"] is True
         assert readiness["observed_source_origins"] == ["SYNTHETIC"]
         # Cycles ran 09:30-09:40; decisions 09:35-09:40 have fresh inputs.
@@ -176,8 +190,16 @@ def test_the_summary_counts_sessions_but_never_calls_synthetic_data_evidence(pip
     for row in summary["sessions"]:
         assert row["kind"] == "COLLECTION_SESSION"
         assert row["counts_basis"] == "EXACT"
+        assert row["report_hash_verified"] is True
         assert row["coverage"]["cycles_executed"] == 11
         assert row["coverage"]["restarts"] == 0
+        assert row["requests"]["basis"] == "CYCLE_REPORTS_AND_ATTEMPT_LOGS"
+        assert row["requests"]["http_attempts"] == row["requests"]["scheduled"] == 35
+    totals = summary["totals"]["requests"]
+    assert totals["http_attempts"] == sum(len(o[4].calls) for o in _outputs) == 70
+    assert totals["attempted"] == totals["acquired"] == 70
+    assert totals["without_receipt"] == 0
+    assert totals["sessions_without_attempt_evidence"] == 0
     markdown = (summary_out / "pilot-summary.md").read_text(encoding="utf-8")
     assert "synthetic only: True" in markdown
     assert "SYNTHETIC_SESSIONS_ONLY" in markdown
@@ -279,6 +301,105 @@ def test_the_collector_command_refuses_live_without_a_matching_approval(
     assert "does not authorise" in err or "not a trading session" in err
     assert not output.exists()
     assert calls == []
+
+
+def test_the_collector_command_reports_an_interruption_consistently(
+    tmp_path, monkeypatch, capsys
+):
+    """Review finding 1: whichever phase the operator interrupted, the command
+    exits 130 with one message that says where, whether a partial capture was
+    preserved, where the log and summary are, and that continuing needs an
+    explicit --resume with the same approval."""
+    from src.ingest.session_collector import OperatorInterrupt
+
+    cases = [
+        (
+            OperatorInterrupt("093100", "REQUEST", partial_capture=True),
+            "partial capture",
+        ),
+        (
+            OperatorInterrupt("093100", "REQUEST", partial_capture=False),
+            "before its first request",
+        ),
+        (OperatorInterrupt("093100", "WAIT"), "while waiting for slot 093100"),
+        (OperatorInterrupt("093100", "BETWEEN_CYCLES"), "between cycles"),
+        (KeyboardInterrupt(), "at an unrecorded point"),
+    ]
+
+    def raiser(interrupt):
+        def raising(*args, **kwargs):
+            raise interrupt
+
+        return raising
+
+    for interrupt, expected in cases:
+        monkeypatch.setattr(
+            collect_intraday_session, "collect_session", raiser(interrupt)
+        )
+        code = collect_intraday_session.main(
+            [
+                "--config",
+                CONFIG,
+                "--output",
+                str(tmp_path / "session"),
+                "--execute-live",
+                "--approve",
+                "a" * 64,
+            ]
+        )
+        err = capsys.readouterr().err
+        assert code == 130
+        assert "INTERRUPTED by the operator" in err
+        assert expected in err
+        assert "status INTERRUPTED, reason OPERATOR_INTERRUPT" in err
+        assert "Nothing continues on its own" in err
+        assert f"--resume --approve {'a' * 64}" in err
+
+
+def test_the_collector_command_prints_the_request_accounting(
+    tmp_path, monkeypatch, capsys
+):
+    summary = {
+        "schema_version": "intraday-session-summary/2.1.36-r3",
+        "status": "STOPPED",
+        "stop_reason": "AUTHENTICATION_REJECTED",
+        "cycles_executed": 1,
+        "slots_planned": 390,
+        "requests": {
+            "scheduled": 5,
+            "attempted": 1,
+            "http_attempts": 1,
+            "http_attempts_failed": 1,
+            "with_receipt": 1,
+            "acquired": 0,
+            "not_attempted": 4,
+            "without_receipt": 0,
+        },
+        "request_budget": {"requests": 1196, "max_attempts": 4784},
+    }
+    monkeypatch.setattr(
+        collect_intraday_session, "collect_session", lambda *a, **k: summary
+    )
+    code = collect_intraday_session.main(
+        [
+            "--config",
+            CONFIG,
+            "--output",
+            str(tmp_path / "session"),
+            "--execute-live",
+            "--approve",
+            "a" * 64,
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "session STOPPED (AUTHENTICATION_REJECTED)" in out
+    assert (
+        "requests scheduled 5, attempted 1, HTTP attempts 1 (retries included)" in out
+    )
+    assert "of the approved budget 1196 logical / 4784 HTTP" in out
+    assert "0 begun without a receipt" in out
+    assert "no GEX computed, no orders placed" in out
 
 
 def test_show_schedule_needs_no_approval_and_writes_nothing(capsys):

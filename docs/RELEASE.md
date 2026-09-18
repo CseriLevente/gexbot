@@ -204,7 +204,7 @@ python -m pytest tests/regression/test_native_capture_fixture.py tests/unit/test
 # Intraday collection, assembly and summary, end to end on a fake clock and a
 # fake vendor (v2.1.36): two synthetic sessions are collected, assembled,
 # replayed and summarised; every artefact must say SYNTHETIC. Nothing is sent.
-python -m pytest tests/regression/test_synthetic_session_end_to_end.py tests/unit/test_session_collector.py tests/unit/test_session_assembly.py -q
+python -m pytest tests/regression/test_synthetic_session_end_to_end.py tests/unit/test_session_collector.py tests/unit/test_session_assembly.py tests/unit/test_pilot_summary_validation.py -q
 # The schedule for any session date needs no approval and writes nothing:
 python -m src.tools.collect_intraday_session --show-schedule 2026-09-15
 ```

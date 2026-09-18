@@ -221,7 +221,7 @@ transport, which cannot be covered without either mocking `httpx` internals
 retry, redaction and size-cap behaviour lives in `RetryingTransport`, which *is*
 covered.
 
-Current: **91.08%** line-and-branch across 16,869 statements, against a fail_under of 90 (v2.1.36 gate; v2.1.35 measured 91.08% across 15,518 statements; v2.1.34 90.94% across 14,832; v2.1.33 90.64% across 14,386).
+Current: **91.19%** line-and-branch across 17,124 statements, against a fail_under of 90 (v2.1.36 r3 gate; v2.1.35 measured 91.08% across 15,518 statements; v2.1.34 90.94% across 14,832; v2.1.33 90.64% across 14,386).
 
 ### Three versions, three meanings
 
@@ -291,10 +291,10 @@ They move independently, and conflating them is how a change hides.
 | Research-events schema (session-bound) | `research-events/2.1.36` | `src/replay/event_store.py` | the 2.1.35 record whose `lineage` also names the collection `cycle` and the logical `request_id`, under a document `provenance` naming the session approval, schedule fingerprint, intent and log digests and every cycle's verified capture. Replay semantics are still the 2.1.34 ones |
 | Capture normalizer | `thetadata-research-events/2.1.36` (row rules `thetadata-v3/<kind>/2`, inventory and model evidence `/1`) | `src/adapters/thetadata/research_events.py` | how a native ThetaData v3 row becomes a research event changes -- columns read, identity canonicalisation, timestamp zone, receipt evidence, repeated-identity policy, exclusion reasons, open-interest attribution -- or, as in v2.1.36, what the normalizer accepts as a capture (a partial-scope cycle with `NOT_SCHEDULED` / `NOT_ACQUIRED` receipts) and reports. Row rules moved to revision 2 after the independent review of the first v2.1.35 cut and are unchanged in v2.1.36 |
 | Pilot-readiness schema | `research-pilot-readiness/2.1.35` | `src/replay/pilot_readiness.py` | what a readiness report carries or what a requirement status means changes. Every trust flag is pinned false |
-| Session-readiness schema | `research-pilot-readiness/2.1.36` | `src/replay/session_readiness.py` | what an assembled session's readiness report carries -- the `session` block, the option-side verdict apart from the whole-pilot verdict -- or what a status means changes. Every trust flag is pinned false |
-| Pilot-summary schema | `research-pilot-summary/2.1.36` | `src/replay/pilot_summary.py` | what the multi-session summary restates or how it judges the option side across sessions changes |
-| Session assembler | `thetadata-session-assembly/2.1.36` (report `intraday-session-assembly/2.1.36`) | `src/adapters/thetadata/session_assembly.py` | the merge rule (current-revision comparison, availability order, tie-break, membership, ambiguity) or the structural verification changes |
-| Session collector | `intraday-session-collector/2.1.36` (`intraday-collection-schedule/2.1.36`, `intraday-session-intent/-approval/-log/-summary/2.1.36`) | `src/ingest/schedule.py`, `src/ingest/session_collector.py` | how slots, scopes, budgets, approvals or missed-slot accounting are derived or recorded changes |
+| Session-readiness schema | `research-pilot-readiness/2.1.36-r3` (the pilot summary also accepts `/2.1.36` and `/2.1.35`) | `src/replay/session_readiness.py` | what an assembled session's readiness report carries -- the `session` block, the option-side verdict apart from the whole-pilot verdict -- or what a status means changes. Every trust flag is pinned false |
+| Pilot-summary schema | `research-pilot-summary/2.1.36-r3` | `src/replay/pilot_summary.py` | what the multi-session summary restates or how it judges the option side across sessions changes |
+| Session assembler | `thetadata-session-assembly/2.1.36-r3` (report `intraday-session-assembly/2.1.36-r3`) | `src/adapters/thetadata/session_assembly.py` | the merge rule (current-revision comparison, availability order, tie-break, membership, ambiguity) or the structural verification changes |
+| Session collector | `intraday-session-collector/2.1.36-r3` (`intraday-collection-schedule/2.1.36`, `intraday-session-intent/-approval/2.1.36`, `intraday-session-log/-summary/2.1.36-r3`) | `src/ingest/schedule.py`, `src/ingest/session_collector.py` | how slots, scopes, budgets, approvals or missed-slot accounting are derived or recorded changes |
 | Pilot-collection specification | `intraday-pilot-collection/2.1.36` | `config/intraday_pilot.json` | what the pilot collector is required to record or refuse changes. v2.1.36 added the `collection` policy block and the corrected 09:30 schedule |
 | Research-replay plan schema | `research-replay-plan/2.1.34` | `src/replay/session.py` | what a replay declares up front changes -- session, contract, bound sources, fill policy, probes |
 | Research-session replay schema | `research-session-replay/2.1.34` | `src/replay/session.py` | what the replay report carries or what one of its flags means changes. Every trust flag other than `source_bytes_verified` is pinned false in this schema |
@@ -392,6 +392,39 @@ adds `tests/unit/test_raw_acquisition.py::test_the_attempt_index_is_written_with
 which is a real regression test only on Windows; on Linux it always passed.
 The Linux gate below was re-run on the re-cut; the Windows re-run is the
 operator's.
+
+r3 (after the independent review of r2; `docs/handoff/V2_1_36_COMPLETION.md`
+has the findings) adds the regression tests the review asked for.
+`tests/unit/test_session_collector.py` grows to 24 cases: an operator
+interrupt between cycles, during a request (the one-shot's `OPERATOR_CANCELLED`
+now stops the session; the partial capture is kept; resume never retakes the
+slot), during a wait (`FakeClock.sleep_until` interrupted) and before a
+cycle's first request (bootstrap-failure report), each asserting no
+later-cycle request, `STOP` + `SESSION_END`, the summary's `interruption`, the
+released lock and the raised `OperatorInterrupt`; and the request accounting
+on a first-request 401 (one transport call, one attempt, four not attempted),
+a partial acquisition, 503 retries (eight HTTP attempts for five requests) and
+a transport failure without a response, each against the fake vendor's call
+count. `tests/unit/test_session_assembly.py` grows to 35: the assembly's
+`requests` block equals the collector's summary and the per-cycle recount from
+each cycle's report and attempt log, the readiness report restates it, a log
+whose accounting disagrees and a shortened attempt log are refused, a log of
+the 2.1.36 schema is refused, a cancelled-then-resumed session assembles
+with the interruption reported, and a slot the one-shot refused before it ran
+is accounted as without a report and still assembles and summarises. `tests/unit/test_pilot_summary_validation.py`
+(new, 24): the recorded September 2 report and the r2 synthetic session
+report accepted unchanged as positive controls; the reviewer's stale-hash and
+freshly-hashed-impossible-count reports refused; negative, float, string and
+boolean counts refused; nested and total inconsistencies, session count and
+budget inconsistencies, unknown origins, a disagreeing `synthetic_only`, a
+synthetic report relabelled recorded, verdicts disagreeing with reasons,
+trust claims, a missing hash and another schema refused; re-serialisation is
+not a change. `tests/regression/test_synthetic_session_end_to_end.py` grows to
+10: the clean sessions' accounting equal at every level through readiness and
+summary, and the collector command's interruption and accounting messages.
+The reviewer's probe script exits 0 on the r3 tree (its request-accounting
+probe updated for the renamed field, shipped with the release beside the
+original).
 
 ## v2.1.35 native normalization and readiness
 

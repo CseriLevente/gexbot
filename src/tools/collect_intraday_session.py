@@ -175,14 +175,23 @@ def _console(entry: dict[str, Any]) -> None:
     if entry.get("event") == "SLOT":
         detail = ""
         if entry["status"] == "EXECUTED":
+            requests = entry.get("requests") or {}
             detail = (
                 f" {entry.get('run_state')} acquired {len(entry.get('acquired', []))}"
-                f" missing {entry.get('missing') or '-'} in {entry.get('duration_seconds')} s"
+                f" missing {entry.get('missing') or '-'} in {entry.get('duration_seconds')} s;"
+                f" requests scheduled {requests.get('scheduled')} attempted "
+                f"{requests.get('attempted')} http {requests.get('http_attempts')}"
             )
+            if entry.get("operator_cancelled"):
+                detail += " OPERATOR_CANCELLED (partial capture preserved)"
+            elif entry.get("stop_reason"):
+                detail += f" stop {entry.get('stop_reason')}"
         elif entry["status"].startswith("MISSED"):
             detail = f" late by {entry.get('late_by_seconds')} s ({entry.get('cause')})"
         elif entry["status"] == "FAILED_TO_START":
             detail = f" {entry.get('error_message', '')[:120]}"
+            if entry.get("operator_cancelled"):
+                detail += " OPERATOR_CANCELLED before the first request"
         print(f"{entry['label']} {entry['status']}{detail}", flush=True)
     else:
         print(
@@ -246,18 +255,48 @@ def main(argv: list[str] | None = None) -> int:
     except SessionCollectionError as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as interrupt:
+        # Raised by the collector after it logged the stop, wrote the summary
+        # and released the lock -- whether the operator struck during a wait,
+        # between cycles or in the middle of a request (in which case the
+        # cycle's partial capture and attempt evidence are preserved and the
+        # slot is not retaken). Nothing continues without an explicit --resume.
+        label = getattr(interrupt, "label", None)
+        phase = str(getattr(interrupt, "phase", "UNKNOWN"))
+        partial = bool(getattr(interrupt, "partial_capture", False))
+        where = {
+            "REQUEST": f"during cycle {label}; "
+            + (
+                f"its partial capture and attempt log under cycles/{label} are "
+                "preserved"
+                if partial
+                else f"it was stopped before its first request (cycles/{label} "
+                "holds only the bootstrap-failure report)"
+            )
+            + " and the slot is not retaken",
+            "WAIT": f"while waiting for slot {label}",
+            "BETWEEN_CYCLES": f"between cycles, before slot {label}",
+        }.get(phase, "at an unrecorded point")
         print(
-            "interrupted by the operator; the session log records it. Resume with "
-            f"--resume --approve {args.approve} to continue at the next future slot.",
+            f"INTERRUPTED by the operator {where}. The session log, its summary "
+            f"(status INTERRUPTED, reason OPERATOR_INTERRUPT) and the released lock "
+            f"are under {args.output}. Nothing continues on its own; to continue at "
+            f"the next future slot run again with --resume --approve {args.approve}.",
             file=sys.stderr,
         )
         return 130
     print(json.dumps(summary, indent=2, sort_keys=True))
+    requests = summary["requests"]
     print(
         f"session {summary['status']} ({summary['stop_reason'] or 'no stop reason'}): "
         f"{summary['cycles_executed']} cycles executed of {summary['slots_planned']} "
-        f"slots; raw captures only, no GEX computed, no orders placed. Assemble with "
+        f"slots; requests scheduled {requests['scheduled']}, attempted "
+        f"{requests['attempted']}, HTTP attempts {requests['http_attempts']} "
+        f"(retries included) of the approved budget "
+        f"{summary['request_budget']['requests']} logical / "
+        f"{summary['request_budget']['max_attempts']} HTTP; "
+        f"{requests['without_receipt']} begun without a receipt. Raw captures only, "
+        "no GEX computed, no orders placed. Assemble with "
         f"python -m src.tools.assemble_intraday_session {pathlib.Path(args.output)} "
         "--out <new directory>"
     )

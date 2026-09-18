@@ -561,22 +561,57 @@ Intent (`session-intent.json`): `collector_version`, `mode` (`LIVE` or
 `pipeline_fingerprint`, `capture_plan_fingerprint`, `market_session`,
 `overrides` (both `false`, always).
 
-Log (`session-log.jsonl`, one JSON object per line): `event` `SESSION_START` /
-`RESTART` / `SLOT` / `STOP` / `SESSION_END`. A `SLOT` entry carries `slot`,
-`label`, `scheduled_at`, `kind`, `scope`, `status` (`EXECUTED`,
-`FAILED_TO_START`, `MISSED_OVERRUN`, `MISSED_RESTART_GAP`,
-`MISSED_LATE_START`, `STOPPED`) and, when executed, `started_at`,
-`finished_at`, `duration_seconds`, `start_delay_seconds`, `cycle_dir`,
-`run_state`, `acquired`, `missing`, `manifest_hash`, `capture_session_id`,
-`stop_reason`, `error_code`, `overran_next_boundary`; a missed slot carries
-`observed_at`, `late_by_seconds`, `cause`.
+Log (`session-log.jsonl`, one JSON object per line; schema
+`intraday-session-log/2.1.36-r3`): `event` `SESSION_START` / `RESTART` /
+`SLOT` / `STOP` / `SESSION_END`. A `SLOT` entry carries `slot`, `label`,
+`scheduled_at`, `kind`, `scope`, `status` (`EXECUTED`, `FAILED_TO_START`,
+`MISSED_OVERRUN`, `MISSED_RESTART_GAP`, `MISSED_LATE_START`, `STOPPED`) and,
+when executed, `started_at`, `finished_at`, `duration_seconds`,
+`start_delay_seconds`, `cycle_dir`, `run_state`, `acquired`, `missing`,
+`manifest_hash`, `capture_session_id`, `stop_reason`, `error_code`,
+`operator_cancelled` (r3: the one-shot reported the operator's interrupt --
+`raw_acquisition.stop_reason` `OPERATOR_CANCELLED`, or the typed code
+`INTERNAL_ERROR:KeyboardInterrupt` of a bootstrap or finalization failure),
+`overran_next_boundary` and `requests` (r3, below); a missed slot carries
+`observed_at`, `late_by_seconds`, `cause`. A `FAILED_TO_START` entry carries
+`error_message` and `requests`; when the one-shot claimed the cycle directory
+but failed or was interrupted before its first request it also carries
+`cycle_dir`, `report_path` (`capture-bootstrap-failure.json`), `run_state`
+(`FAILED_BEFORE_REQUEST`), `error_code` and `operator_cancelled`, and its
+`requests` are certain zeros with basis
+`BOOTSTRAP_FAILURE_REPORT_BEFORE_ANY_REQUEST`.
 
-Summary (`session-summary.json`): `status` (`COMPLETED`, `STOPPED`,
-`INTERRUPTED`), `stop_reason`, `slots_planned`, `slots_by_status`,
-`cycles_executed`, `cycles_with_every_scheduled_endpoint`,
-`cycles_overrunning_a_boundary`, `endpoint_failures`, `requests_issued`,
-`request_budget`, `restarts`, `cycle_duration_seconds`, `log_entries`,
-`session_root`, `ended_at`.
+`requests` (r3, per slot; `src/ingest/session_collector.py:request_accounting`):
+`scheduled` (the slot's approved scope), `attempted` (logical requests the
+sweep began, `raw_acquisition.attempted_endpoints`), `http_attempts` (every
+record of the cycle's attempt log, retries included), `http_attempts_failed`,
+`with_receipt` (scheduled endpoints with at least one attempt record),
+`acquired` (payloads that verified), `not_attempted` (scheduled endpoints
+never begun: a systemic stop, a cancellation), `without_receipt` (begun but
+without an attempt record -- a request in flight when the operator
+interrupted; the explicit uncertainty, never counted as attempted-and-answered),
+`attempt_evidence_verified` (the one-shot's `attempt_evidence.ok`; `null` when
+there is no attempt log to verify) and `basis` (`CYCLE_REPORT_AND_ATTEMPT_LOG`,
+`CYCLE_DID_NOT_START` -- everything but `scheduled` is `null` -- or the
+bootstrap basis above). Nothing in it is inferred from the schedule.
+
+A `STOP` entry carries `at`, `reason` and, for `OPERATOR_INTERRUPT`,
+`interruption`: `slot`, `phase` (`REQUEST`, `WAIT`, `BETWEEN_CYCLES`),
+`partial_capture_preserved`, `cycle_dir`, `continuing_requires`.
+
+Summary (`session-summary.json`, schema `intraday-session-summary/2.1.36-r3`):
+`status` (`COMPLETED`, `STOPPED`, `INTERRUPTED`), `stop_reason`
+(`OPERATOR_INTERRUPT` for every operator interruption, wherever it struck),
+`slots_planned`, `slots_by_status`, `cycles_executed`,
+`cycles_with_every_scheduled_endpoint`, `cycles_overrunning_a_boundary`,
+`endpoint_failures`, `requests` (the per-slot accounting summed:
+`scheduled`, `attempted`, `http_attempts`, `http_attempts_failed`,
+`with_receipt`, `acquired`, `not_attempted`, `without_receipt`,
+`cycles_with_unverified_attempt_evidence`, `cycles_without_a_report`,
+`basis`; replaces the 2.1.36 `requests_issued`, which summed the scheduled
+scope of executed slots and was not a count of requests), `request_budget`,
+`interruption` (the `STOP` entry's record, or `null`), `restarts`,
+`cycle_duration_seconds`, `log_entries`, `session_root`, `ended_at`.
 
 ### `research-events/2.1.36` (emitted by `src/adapters/thetadata/session_assembly.py`)
 
@@ -594,14 +629,23 @@ provenance cycle whose payloads include `raw_sha256`) and `request_id`.
 order across cycles. Replay receipts carry `schema_version` and the session
 `provenance`.
 
-### `intraday-session-assembly/2.1.36` (`session-assembly.json`)
+### `intraday-session-assembly/2.1.36-r3` (`session-assembly.json`)
 
-`assembler`, `normalizer`, `collector`, `origin`, `capture_origins`,
-`session_date`, `verification` (`intent_sha256`, `log_sha256`,
-`executed_cycles`, `orphan_cycle_directories`, `findings`,
-`structure_verified`), `session` (mode, approvals, policy, budget, slots by
-status, cycles executed / assembled / skipped / complete / overrunning,
-restarts, stops, ended, `endpoint_failures`, `requests_issued`),
+`assembler` (`thetadata-session-assembly/2.1.36-r3`), `normalizer`,
+`collector`, `origin`, `capture_origins`, `session_date`, `verification`
+(`intent_sha256`, `log_sha256`, `executed_cycles`, `orphan_cycle_directories`,
+`findings`, `structure_verified`; r3 adds the findings
+`LOG_SCHEMA_UNSUPPORTED:<schema>` -- the log must be
+`intraday-session-log/2.1.36-r3` -- `SLOT_WITHOUT_REQUEST_ACCOUNTING:<label>`,
+`CYCLE_REQUESTS_NOT_RECOUNTABLE:<label>:<why>` and
+`CYCLE_REQUESTS_DIFFER_FROM_LOG:<label>:<keys>`, raised when the accounting
+the collector logged is not what the cycle's `capture-summary.json` and
+`attempts/index.jsonl` say now, key by key), `session` (mode, approvals,
+policy, budget, slots by status, cycles executed / assembled / skipped /
+complete / overrunning, restarts, `stops[]` (`at`, `reason`, `interruption`),
+ended, `endpoint_failures`, `requests` -- the collector's per-slot accounting
+summed, plus `cycles_recounted_from_evidence` and
+`operator_cancelled_cycles`; replaces `requests_issued`),
 `receipt_clock_tolerance_ms`, `merge` (`rule`, `outcomes_by_kind` with
 `NEW_EVENT`, `REOBSERVED_UNCHANGED`, `REVISION`, `REVERTED_REVISION`,
 `LATE_OLDER_EVENT`; `membership` with `NOT_IN_LATEST_INVENTORY`,
@@ -612,18 +656,22 @@ restarts, stops, ended, `endpoint_failures`, `requests_issued`),
 `records_by_kind`, `identities`, `cadence` (`inventory_cycles`,
 `open_interest_cycles`, `quote_cycles`, `greeks_cycles`, `inventory_events`),
 `vendor_clock_lead`, `cycles[]` (per cycle: slot, instants, duration, delay,
-overrun, `run_state`, scheduled / acquired / unacquired endpoints with attempt
-detail, capture session id, manifest, first and last receipt, records by kind,
-exclusions, conflicting groups, clock leads, membership check, model evidence,
-merge outcomes).
+overrun, `run_state`, `stop_reason`, `operator_cancelled`, `requests`
+(recounted from the cycle directory), scheduled / acquired / unacquired
+endpoints with attempt detail, capture session id, manifest, first and last
+receipt, records by kind, exclusions, conflicting groups, clock leads,
+membership check, model evidence, merge outcomes).
 
-### `research-pilot-readiness/2.1.36` (`session-readiness.json`, `src/replay/session_readiness.py`)
+### `research-pilot-readiness/2.1.36-r3` (`session-readiness.json`, `src/replay/session_readiness.py`)
 
 As 2.1.35, with `generated_from` naming the assembler, collector, session
 approval, schedule fingerprint, `assembly_sha256` and every cycle; a `session`
-block (slots, cycles, overruns, restarts, stops, budget, failures, cadence,
-merge outcomes, membership, ambiguity counts, clock leads, identities,
-records, `structure_verified`); `replay` adds `decisions_with_stale_inputs`,
+block (slots, cycles, overruns, restarts, stops, budget, `requests` (the
+assembly's block, verbatim; r3 -- the 2.1.36 schema carried
+`requests_issued`), `interruptions[]` (every `STOP` entry's `interruption`
+record), failures, cadence, merge outcomes, membership, ambiguity counts,
+clock leads, identities, records, `structure_verified`); `replay` adds
+`decisions_with_stale_inputs`,
 `decisions_with_skewed_inputs`, `decisions_with_open_interest_gaps`; and two
 verdicts: `option_side_usable` with `option_side_blocking_reasons` (over the
 option-side requirements, `NO_PASSING_DECISIONS`,
@@ -631,16 +679,48 @@ option-side requirements, `NO_PASSING_DECISIONS`,
 and `usable_for_intraday_pilot` with `blocking_reasons` (every requirement,
 futures and multi-session coverage included). Trust flags all `false`.
 
-### `research-pilot-summary/2.1.36` (`pilot-summary.json`, `src/replay/pilot_summary.py`)
+### `research-pilot-summary/2.1.36-r3` (`pilot-summary.json`, `src/replay/pilot_summary.py`)
+
+Accepts readiness reports of schemas `research-pilot-readiness/2.1.35`,
+`/2.1.36` and `/2.1.36-r3`. r3 validates each before reading it
+(`validate_readiness_report`): the embedded semantic `report_hash` is
+recomputed over the report minus that field (the same rule every supported
+schema hashes with) and must match; every decision count must be a
+non-negative integer (booleans, floats and strings are refused, not coerced);
+`usable_decisions` must equal `replay.passing_decisions`, `blocked_decisions`
+equal `replay.blocked_decisions`, and `passing + blocked` equal
+`replay.expected_decisions`; `decisions_with_inventory` may not exceed
+`expected_decisions`, and the per-decision stale / skewed / open-interest-gap
+counts and every `blocker_decision_counts` value may not exceed
+`blocked_decisions`; `observed_source_origins` must be a list drawn from
+`SYNTHETIC` / `RECORDED_NORMALIZED` with `synthetic_only` equal to "every
+origin is `SYNTHETIC`"; `usable_for_intraday_pilot` and `option_side_usable`
+must be booleans equal to "no blocking reason", `NO_PASSING_DECISIONS` must be
+present when `usable_decisions` is 0; every trust flag must be `false` and
+`orders_placed` 0; a session report's slot, cycle and request counts must
+agree with each other and stay within the approved budget. A report that
+fails any check is refused by name (`PilotSummaryError`). A matching hash is
+an integrity check on the report as written, not vendor authenticity.
 
 `label`, `sessions[]` (`source`, `sha256`, `schema_version`, `kind`
 `COLLECTION_SESSION` / `SINGLE_CAPTURE`, `session_date`, origins,
 `synthetic_only`, `diagnostic`, both verdicts and their reasons,
 `usable_decisions`, `expected_decisions`, `decisions_with_inventory`,
 `blocker_decision_counts`, `counts_basis` `EXACT` / `LOWER_BOUND`, stale /
-skewed / open-interest-gap decision counts, `coverage`, `identities`,
+skewed / open-interest-gap decision counts, `requests` (`basis`
+`CYCLE_REPORTS_AND_ATTEMPT_LOGS` for an r3 session report,
+`SCHEDULED_SCOPE_OF_EXECUTED_SLOTS` for a 2.1.36 one -- its `requests_issued`
+restated as `scheduled`, with `attempted`, `http_attempts` and the rest
+`null` rather than invented -- or `SINGLE_CAPTURE_RECEIPTS`; `scheduled`,
+`attempted`, `http_attempts`, `http_attempts_failed`, `with_receipt`,
+`acquired`, `not_attempted`, `without_receipt`,
+`cycles_with_unverified_attempt_evidence`, `operator_cancelled_cycles`,
+`budget`), `coverage` (adds `interruptions`), `identities`,
 `vendor_clock_lead`, `ambiguity_after_known_state`, `structure_verified`,
-`report_hash`), `totals`, `minimum_sessions`, `option_side_pilot_ready`,
+`report_hash`, `report_hash_verified`), `totals` (adds `requests` -- a total
+is `null` when any session lacks that count -- with
+`sessions_without_attempt_evidence`, `operator_cancelled_cycles` and
+`basis_by_session`, and `interruptions`), `minimum_sessions`, `option_side_pilot_ready`,
 `option_side_blocking_reasons` (`FEWER_OPTION_SIDE_USABLE_SESSIONS_THAN_MINIMUM`,
 `DIAGNOSTIC_SESSION_INCLUDED`, `SYNTHETIC_SESSIONS_ONLY`),
 `usable_for_intraday_pilot`, `blocking_reasons` (adds

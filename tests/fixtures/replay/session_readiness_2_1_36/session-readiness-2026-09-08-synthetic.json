@@ -1,0 +1,311 @@
+{
+  "authenticity_verified": false,
+  "blocked_decisions": 364,
+  "blocking_reasons": [
+    "futures_bid_ask_size",
+    "futures_instrument_metadata",
+    "futures_costs",
+    "multi_session_coverage"
+  ],
+  "generated_from": {
+    "assembler": "thetadata-session-assembly/2.1.36",
+    "assembly_sha256": "d5e6cb371d663502c1c71bf461902fee91abf52ba362a39465e355e715755dc7",
+    "collector": "intraday-session-collector/2.1.36",
+    "cycles": [
+      {
+        "capture_session_id": "capture-20260908T133000Z-6bcfdc20594ba467",
+        "label": "093000",
+        "manifest_sha256": "c271603917fab6780658a22c744ae1808331e8f41a9fe2dd99ab6dff46e8cf6f"
+      },
+      {
+        "capture_session_id": "capture-20260908T133100Z-4cf59297dae4d155",
+        "label": "093100",
+        "manifest_sha256": "165c99a41e521fd91021cd1a6b57f1712215698b15e4048ae48bd2d389b82578"
+      },
+      {
+        "capture_session_id": "capture-20260908T133200Z-964c092579cd361a",
+        "label": "093200",
+        "manifest_sha256": "8f366e7ab556e5c1967703776940748f07954c7047c0bfc016401b3cbeb4833e"
+      },
+      {
+        "capture_session_id": "capture-20260908T133300Z-fa90f081b32b257d",
+        "label": "093300",
+        "manifest_sha256": "9574a3fec9768facaff9d2aa0a41349377f5e6ac919cfe1c2c2bf7d7de85da00"
+      },
+      {
+        "capture_session_id": "capture-20260908T133400Z-6eb178ffcfb34f0e",
+        "label": "093400",
+        "manifest_sha256": "801259b3e9989c973697324aab7856e8a37d83a5689ed570e43406c8b75a097e"
+      },
+      {
+        "capture_session_id": "capture-20260908T133500Z-20680403b05b6f3f",
+        "label": "093500",
+        "manifest_sha256": "94ee860456e48ac37dfc3521fbbc92fbe612860cbd266b6ddaa66d589dcdf622"
+      },
+      {
+        "capture_session_id": "capture-20260908T133600Z-c75cfd1a52817b13",
+        "label": "093600",
+        "manifest_sha256": "3b2579e2b5768e8c2e40ac97c69ed6d3cd3585dc710a03dcbb69586b2118195f"
+      },
+      {
+        "capture_session_id": "capture-20260908T133700Z-74d7f33ac1b94f06",
+        "label": "093700",
+        "manifest_sha256": "f2f4d7d97c5155de15b520c19a5545f776d7114a264f0563d8a949ff7d44c945"
+      },
+      {
+        "capture_session_id": "capture-20260908T133800Z-81eab5c6bec75ab9",
+        "label": "093800",
+        "manifest_sha256": "9f88d91e44564b05745b12e18337c70a9ceb6a83ec48e6273d0187d61d10c773"
+      },
+      {
+        "capture_session_id": "capture-20260908T133900Z-d059edb5bf0b3eb1",
+        "label": "093900",
+        "manifest_sha256": "98e21a7663b33ed7cc4b632f0d7c1fc5353523cd81433da6a8a8d6ef2c683a10"
+      },
+      {
+        "capture_session_id": "capture-20260908T134000Z-f520aaa3a2fd3ab5",
+        "label": "094000",
+        "manifest_sha256": "ee3253074672723f6d34e2a9fba6c967683a661694c448eff4462e0875f20c88"
+      }
+    ],
+    "events_sha256": "f610d1b75368629d773b3375d740c6ce7a48ee3a208f4f2898b61ce681a46508",
+    "normalizer": "thetadata-research-events/2.1.36",
+    "plan_sha256": "196d16e6c28d727fc5b6bd40c1e49eb7314d05b1b09c14a1e385a831ca82701e",
+    "replay_report_hash": "906d02a9e8d9bd7ce5630b1d41ebe21ee8901effa5d3281666887f5dd467c675",
+    "replay_schema_version": "research-session-replay/2.1.34",
+    "schedule_fingerprint": "ce947096d1f47b66d1827bbb405bbbf7c4eddc25a0e54fcad6daf1fb4b8a5aa9",
+    "session_approval_hash": "9f598ce27a027dd0dc68f639d34fa7879cfef3d33aebf8fb2894bb43524be951"
+  },
+  "gex_computed": false,
+  "label": "SYNTHETIC demonstration 2026-09-08",
+  "limitations": [
+    "Readiness measures whether recorded inputs satisfy the declared research contract; it is not a strategy, GEX or profitability result.",
+    "Receipts are the collecting process's own clock, verified as recorded bytes, not independently authenticated time.",
+    "A re-observed unchanged quote keeps its original event time and receipt; staleness is measured from the event time, never refreshed by re-observation.",
+    "Open interest and the contract listing are refreshed at their declared cadence; between refreshes the replay uses the last original receipt, never a later one.",
+    "Exclusion and merge counts describe rows this normalizer and assembler treated under versioned rules; they are not vendor error rates.",
+    "The option side can be usable while the pilot as a whole is not: no futures data is collected, and none is fabricated."
+  ],
+  "normalization_verified": false,
+  "observed_source_origins": [
+    "SYNTHETIC"
+  ],
+  "option_side_blocking_reasons": [],
+  "option_side_usable": true,
+  "orders_placed": 0,
+  "parameters": {
+    "contract": {
+      "cadence_seconds": 60,
+      "close_buffer_minutes": 15,
+      "max_dte": 7,
+      "max_market_age_seconds": 60.0,
+      "max_market_skew_seconds": 2.0,
+      "open_delay_minutes": 5,
+      "root": "SPXW",
+      "schema_version": "intraday-research-contract/2.1.33"
+    },
+    "contract_hash": "5512402968f8a1e5e655e9f8d96059d2c4a8c7d17dd96c896a7a0062b6cefc08",
+    "contract_is_research_default": true,
+    "diagnostic": false,
+    "receipt_clock_tolerance_ms": 0
+  },
+  "partial_requirements": [],
+  "pnl_computed": false,
+  "ready_for_backtest": false,
+  "replay": {
+    "blocked_decisions": 364,
+    "blocker_contract_decision_counts": {
+      "STALE_GREEKS": 2912,
+      "STALE_OPTION_QUOTE": 2912,
+      "STALE_SPX_PRICE": 2912
+    },
+    "blocker_decision_counts": {
+      "STALE_GREEKS": 364,
+      "STALE_OPTION_QUOTE": 364,
+      "STALE_SPX_PRICE": 364
+    },
+    "decisions_with_inventory": 371,
+    "decisions_with_open_interest_gaps": 0,
+    "decisions_with_skewed_inputs": 0,
+    "decisions_with_stale_inputs": 364,
+    "expected_decisions": 371,
+    "fill_probes": {
+      "refusal_reasons": {},
+      "simulated_fills": 0,
+      "total": 0,
+      "unfilled": 0
+    },
+    "grid": {
+      "first": "2026-09-08T13:35:00+00:00",
+      "last": "2026-09-08T19:45:00+00:00"
+    },
+    "passing_decisions": 7
+  },
+  "report_hash": "2ca17b0ad9ac0ffaf8584591d2f8a8349e735df775a0944ef59df79a14b407bd",
+  "requirements": [
+    {
+      "description": "SPXW option inventory with a recorded receipt",
+      "detail": "1 listing events from cycles ['093000']; 8 identities listed",
+      "requirement": "option_inventory",
+      "source": "/v3/option/list/contracts/quote",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Option bid/ask observations with vendor event times",
+      "detail": "88 quote records from 11 of 11 assembled cycles; merge NEW_EVENT 88",
+      "requirement": "option_quotes",
+      "source": "/v3/option/snapshot/quote",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Implied volatility, delta and a model fixed before receipt",
+      "detail": "88 Greeks records; model evidence fixed before receipt in every cycle",
+      "requirement": "iv_model_inputs",
+      "source": "/v3/option/snapshot/greeks/first_order",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Open interest attributed to the prior session",
+      "detail": "8 open-interest records from refresh cycles ['093000']; 8 of 8 listed identities covered",
+      "requirement": "prior_session_open_interest",
+      "source": "/v3/option/snapshot/open_interest",
+      "status": "PRESENT"
+    },
+    {
+      "description": "SPX index observations",
+      "detail": "11 index records",
+      "requirement": "spx_observations",
+      "source": "/v3/index/snapshot/price",
+      "status": "PRESENT"
+    },
+    {
+      "description": "Executable futures bid/ask with displayed sizes",
+      "detail": "no futures_quote source in this session; the collector requests no futures endpoint and none is fabricated",
+      "requirement": "futures_bid_ask_size",
+      "source": null,
+      "status": "MISSING"
+    },
+    {
+      "description": "Effective-dated futures tick size and point value",
+      "detail": "no instrument source in this session; the collector requests no futures endpoint and none is fabricated",
+      "requirement": "futures_instrument_metadata",
+      "source": null,
+      "status": "MISSING"
+    },
+    {
+      "description": "Effective-dated fees and slippage assumptions",
+      "detail": "no costs source in this session; the collector requests no futures endpoint and none is fabricated",
+      "requirement": "futures_costs",
+      "source": null,
+      "status": "MISSING"
+    },
+    {
+      "description": "A recorded receipt for every payload used",
+      "detail": "35 acquired payloads, every one with a verified receipt; 0 scheduled requests produced no payload (none)",
+      "requirement": "receive_times",
+      "source": null,
+      "status": "PRESENT"
+    },
+    {
+      "description": "Observations available inside the research decision grid",
+      "detail": "371 of 371 grid decisions had an inventory available; first receipt 2026-09-08T13:30:01+00:00; 11 of 390 slots executed",
+      "requirement": "intraday_coverage",
+      "source": null,
+      "status": "PRESENT"
+    },
+    {
+      "description": "More than one recorded trading session",
+      "detail": "one recorded session (2026-09-08); the multi-session summary judges several",
+      "requirement": "multi_session_coverage",
+      "source": null,
+      "status": "MISSING"
+    }
+  ],
+  "schema_version": "research-pilot-readiness/2.1.36",
+  "session": {
+    "ambiguity_after_known_state": 0,
+    "ambiguity_without_known_state": 0,
+    "cadence": {
+      "greeks_cycles": 11,
+      "inventory_cycles": [
+        "093000"
+      ],
+      "inventory_events": 1,
+      "open_interest_cycles": [
+        "093000"
+      ],
+      "quote_cycles": 11
+    },
+    "cycles_assembled": 11,
+    "cycles_executed": 11,
+    "cycles_overrunning_a_boundary": 0,
+    "cycles_with_every_scheduled_endpoint": 11,
+    "ended": {
+      "reason": "STOP_AFTER_LABEL",
+      "status": "INTERRUPTED"
+    },
+    "endpoint_failures": {},
+    "identities": {
+      "greeked": 8,
+      "listed": 8,
+      "quoted": 8,
+      "with_open_interest": 8,
+      "without_open_interest": 0
+    },
+    "membership": {},
+    "merge": {
+      "contract_list": {
+        "NEW_EVENT": 1
+      },
+      "greeks": {
+        "NEW_EVENT": 88
+      },
+      "model_evidence": {
+        "NEW_EVENT": 11
+      },
+      "open_interest": {
+        "NEW_EVENT": 8
+      },
+      "option_quote": {
+        "NEW_EVENT": 88
+      },
+      "spx_price": {
+        "NEW_EVENT": 11
+      }
+    },
+    "mode": "OFFLINE_TRANSPORT",
+    "records": 207,
+    "records_by_kind": {
+      "contract_list": 1,
+      "greeks": 88,
+      "model_evidence": 11,
+      "open_interest": 8,
+      "option_quote": 88,
+      "spx_price": 11
+    },
+    "request_budget": {
+      "cycles": 390,
+      "max_attempts": 4784,
+      "max_attempts_per_request": 4,
+      "requests": 1196
+    },
+    "requests_issued": 35,
+    "restarts": 0,
+    "slots_by_status": {
+      "EXECUTED": 11
+    },
+    "slots_planned": 390,
+    "stops": [],
+    "structure_verified": true,
+    "vendor_clock_lead": {
+      "max_ms": 0,
+      "rows_after_receipt": 0
+    }
+  },
+  "session_date": "2026-09-08",
+  "strategy_tested": false,
+  "synthetic_only": true,
+  "trusted_for_gex": false,
+  "usable_decisions": 7,
+  "usable_for_intraday_pilot": false
+}

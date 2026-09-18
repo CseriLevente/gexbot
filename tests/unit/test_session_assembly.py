@@ -551,6 +551,273 @@ def test_a_cycle_outside_its_slot_scope_refuses(session, tmp_path):
     assert "CYCLE_SCOPE_DIFFERS_FROM_SCHEDULE:093100" in findings
 
 
+# -- request accounting (review of v2.1.36 r2, finding 2) -----------------------
+
+
+def test_request_activity_is_recounted_from_each_cycle_and_matches_the_log(
+    session, assembled
+):
+    """The session block reports what happened on the wire, summed from slot
+    entries that the structure check recounted from each cycle's own report
+    and attempt log; it is not the scheduled scope, and it agrees with the
+    collector's summary."""
+    report = assembled.report
+    assert report["schema_version"] == ASSEMBLY_SCHEMA
+    assert "requests_issued" not in report["session"]
+    requests = report["session"]["requests"]
+    collector = json.loads((session / "session-summary.json").read_text())["requests"]
+    for key in (
+        "scheduled",
+        "attempted",
+        "http_attempts",
+        "http_attempts_failed",
+        "with_receipt",
+        "acquired",
+        "not_attempted",
+        "without_receipt",
+        "cycles_with_unverified_attempt_evidence",
+    ):
+        assert requests[key] == collector[key], key
+    executed = [e for e in read_log(session) if e.get("status") == "EXECUTED"]
+    assert requests["scheduled"] == sum(len(e["scope"]) for e in executed) == 31
+    # One scripted 404 (Greeks at 09:32): attempted and answered, not acquired.
+    assert requests["attempted"] == requests["with_receipt"] == 31
+    assert requests["http_attempts"] == 31
+    assert requests["http_attempts_failed"] == 1
+    assert requests["acquired"] == 30
+    assert requests["without_receipt"] == requests["not_attempted"] == 0
+    assert requests["cycles_recounted_from_evidence"] == 9
+    assert requests["operator_cancelled_cycles"] == []
+    # Every executed cycle carries the same accounting the collector logged
+    # for it, recounted here from disk.
+    logged = {e["label"]: e["requests"] for e in executed}
+    for cycle in report["cycles"]:
+        recounted = cycle["requests"]
+        assert recounted["basis"] == "CYCLE_REPORT_AND_ATTEMPT_LOG"
+        for key, value in recounted.items():
+            assert logged[cycle["label"]][key] == value, (cycle["label"], key)
+        assert cycle["operator_cancelled"] is False
+    greeks_cycle = next(c for c in report["cycles"] if c["label"] == "093200")
+    assert greeks_cycle["requests"]["acquired"] == 2
+    assert greeks_cycle["requests"]["http_attempts_failed"] == 1
+    for stop in report["session"]["stops"]:
+        assert "interruption" in stop
+
+
+def test_the_readiness_report_carries_the_same_request_accounting(bundle, assembled):
+    readiness = read_json((bundle / "session-readiness.json").read_bytes())
+    assert readiness["schema_version"] == SESSION_READINESS_SCHEMA
+    assert "requests_issued" not in readiness["session"]
+    assert readiness["session"]["requests"] == assembled.report["session"]["requests"]
+    assert readiness["session"]["interruptions"] == []
+    markdown = (bundle / "session-readiness.md").read_text(encoding="utf-8")
+    assert "Requests: scheduled 31 of the approved budget" in markdown
+    assert "HTTP attempts 31 (retries included, 1 failed)" in markdown
+    assert "begun without a receipt 0" in markdown
+    assert "Interruptions: none" in markdown
+
+
+def test_a_log_whose_request_accounting_disagrees_with_the_cycle_refuses(
+    session, tmp_path
+):
+    copy = _copy(session, tmp_path)
+    log = copy / LOG_NAME
+    lines = log.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        entry = json.loads(line)
+        if entry.get("label") == "093500":
+            entry["requests"]["http_attempts"] += 1
+            entry["requests"]["acquired"] -= 1
+            lines[index] = json.dumps(entry, sort_keys=True)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    findings = verify_session(copy).findings
+    assert "CYCLE_REQUESTS_DIFFER_FROM_LOG:093500:http_attempts,acquired" in findings
+    with pytest.raises(SessionAssemblyError, match="CYCLE_REQUESTS_DIFFER_FROM_LOG"):
+        assemble_session(copy)
+
+
+def test_a_shortened_attempt_log_is_noticed_by_the_recount(session, tmp_path):
+    copy = _copy(session, tmp_path)
+    index = copy / "cycles" / "093600" / "attempts" / "index.jsonl"
+    lines = index.read_text(encoding="utf-8").splitlines()
+    index.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    findings = verify_session(copy).findings
+    assert any(
+        f.startswith("CYCLE_REQUESTS_DIFFER_FROM_LOG:093600:") and "http_attempts" in f
+        for f in findings
+    )
+    with pytest.raises(SessionAssemblyError):
+        assemble_session(copy)
+
+
+def test_a_log_without_per_cycle_request_accounting_is_not_assembled(session, tmp_path):
+    """A 2.1.36 (r2) log summed scheduled scopes as ``requests_issued``; r3
+    refuses to build a stream over a count it cannot recount."""
+    copy = _copy(session, tmp_path)
+    log = copy / LOG_NAME
+    lines = log.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        entry = json.loads(line)
+        entry["schema_version"] = "intraday-session-log/2.1.36"
+        entry.pop("requests", None)
+        lines[index] = json.dumps(entry, sort_keys=True)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    findings = verify_session(copy).findings
+    assert "LOG_SCHEMA_UNSUPPORTED:intraday-session-log/2.1.36" in findings
+    assert "SLOT_WITHOUT_REQUEST_ACCOUNTING:093000" in findings
+    with pytest.raises(SessionAssemblyError, match="LOG_SCHEMA_UNSUPPORTED"):
+        assemble_session(copy)
+
+
+class _InterruptingFeed(SyntheticFeed):
+    interrupted = False
+
+    def get(self, url, params, timeout_seconds):
+        if self._label() == "093500" and OPTION_QUOTE in url and not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt("simulated operator interrupt in a request")
+        return super().get(url, params, timeout_seconds)
+
+
+def test_a_cancelled_and_resumed_session_assembles_and_reports_the_interruption(
+    tmp_path,
+):
+    """Review finding 1, downstream: the partial capture of the cancelled cycle
+    is preserved and assembled, the interruption is reported all the way to
+    the readiness report, and the accounting names the request that was in
+    flight without a receipt."""
+    root = tmp_path / "session"
+    clock = FakeClock(et(9, 29, 30), tick=timedelta(milliseconds=200))
+    feed = _InterruptingFeed(clock, root)
+    with pytest.raises(KeyboardInterrupt):
+        collect_session(
+            CONFIG,
+            output=str(root),
+            approved=approval(root, clock),
+            clock=clock,
+            policy=POLICY,
+            transport=feed,
+            stop_after_label="095900",
+        )
+    assert [e["label"] for e in read_log(root) if e.get("event") == "SLOT"] == [
+        "093000",
+        "093100",
+        "093200",
+        "093300",
+        "093400",
+        "093500",
+    ]
+    clock.advance(timedelta(minutes=1, seconds=20))
+    collect_session(
+        CONFIG,
+        output=str(root),
+        approved=approval(root, clock),
+        clock=clock,
+        policy=POLICY,
+        transport=feed,
+        resume=True,
+        stop_after_label="093700",
+    )
+    verification = verify_session(root)
+    assert verification.findings == []
+    assembled = assemble_session(root)
+    session = assembled.report["session"]
+    assert session["requests"]["operator_cancelled_cycles"] == ["093500"]
+    assert session["requests"]["without_receipt"] == 1
+    # 09:35 was a FULL slot: after the interrupted quote request, open
+    # interest, Greeks and the listing were never begun.
+    assert session["requests"]["not_attempted"] == 3
+    assert session["requests"]["http_attempts"] == len(feed.calls)
+    assert session["slots_by_status"] == {"EXECUTED": 7, "MISSED_RESTART_GAP": 1}
+    cancelled = next(c for c in assembled.report["cycles"] if c["label"] == "093500")
+    assert cancelled["operator_cancelled"] is True
+    assert cancelled["stop_reason"] == "OPERATOR_CANCELLED"
+    assert cancelled["requests"]["without_receipt"] == [OPTION_QUOTE]
+    assert cancelled["requests"]["not_attempted"] == sorted(
+        [OPTION_CONTRACT_LIST, OPTION_GREEKS, OPTION_OPEN_INTEREST]
+    )
+    assert cancelled["acquired_endpoints"] == ["/v3/index/snapshot/price"]
+    interruptions = [s["interruption"] for s in session["stops"] if s["interruption"]]
+    assert len(interruptions) == 1
+    assert interruptions[0]["slot"] == "093500"
+    assert interruptions[0]["phase"] == "REQUEST"
+    assert interruptions[0]["partial_capture_preserved"] is True
+    out = tmp_path / "out"
+    assert assemble_main([str(root), "--out", str(out), "--label", "cancelled"]) == 0
+    readiness = read_json((out / "session-readiness.json").read_bytes())
+    assert readiness["session"]["interruptions"] == interruptions
+    assert readiness["session"]["requests"] == session["requests"]
+    markdown = (out / "session-readiness.md").read_text(encoding="utf-8")
+    assert (
+        "Interruptions: REQUEST at slot 093500 (partial capture preserved)" in markdown
+    )
+    assert "operator-cancelled cycles ['093500']" in markdown
+
+
+def test_a_slot_the_one_shot_refused_is_accounted_as_not_started(tmp_path):
+    """A cycle directory that already exists makes the one-shot refuse before
+    it claims anything: the slot is ``FAILED_TO_START`` with no report, its
+    accounting is unknown rather than zero, and the session still assembles,
+    judges and summarises with that slot counted as without a report."""
+    root = tmp_path / "session"
+    clock = FakeClock(et(9, 29, 30), tick=timedelta(milliseconds=200))
+    feed = SyntheticFeed(clock, root)
+    approved = approval(root, clock)
+    plan_session(CONFIG, output=str(root), now=clock.peek(), policy=POLICY)
+    stray = root / "cycles" / "093100"
+    # Created after the session claims its root: the collector makes cycles/.
+    original = feed.get
+
+    def planting(url, params, timeout_seconds):
+        if not stray.exists():
+            stray.mkdir(parents=True)
+            (stray / "stray.txt").write_text("left behind")
+        return original(url, params, timeout_seconds)
+
+    feed.get = planting  # type: ignore[method-assign]
+    summary = collect_session(
+        CONFIG,
+        output=str(root),
+        approved=approved,
+        clock=clock,
+        policy=POLICY,
+        transport=feed,
+        stop_after_label="093200",
+    )
+    entries = {e["label"]: e for e in read_log(root) if e.get("event") == "SLOT"}
+    assert entries["093100"]["status"] == "FAILED_TO_START"
+    assert "already exists" in entries["093100"]["error_message"]
+    assert entries["093100"]["requests"]["basis"] == "CYCLE_DID_NOT_START"
+    assert entries["093100"]["requests"]["attempted"] is None
+    assert entries["093100"]["requests"]["scheduled"] == 3
+    assert summary["requests"]["cycles_without_a_report"] == 1
+    assert summary["requests"]["scheduled"] == 5 + 3 + 3
+    assert summary["requests"]["attempted"] == summary["requests"]["http_attempts"] == 8
+    assert summary["requests"]["http_attempts"] == len(feed.calls)
+    verification = verify_session(root)
+    assert verification.findings == []
+    assert verification.orphan_cycle_directories == ["093100"]
+    out = tmp_path / "out"
+    assert assemble_main([str(root), "--out", str(out), "--label", "refused slot"]) == 0
+    readiness = read_json((out / "session-readiness.json").read_bytes())
+    assert readiness["session"]["requests"]["cycles_without_a_report"] == 1
+    assert readiness["session"]["slots_by_status"] == {
+        "EXECUTED": 2,
+        "FAILED_TO_START": 1,
+    }
+    from src.replay.pilot_summary import summarize_pilot
+
+    pilot = summarize_pilot(
+        [("refused.json", (out / "session-readiness.json").read_bytes())],
+        minimum_sessions=1,
+    )
+    row = pilot["sessions"][0]
+    assert row["requests"]["scheduled"] == 11
+    assert row["requests"]["attempted"] == row["requests"]["http_attempts"] == 8
+    assert row["requests"]["not_attempted"] == 0
+    assert row["report_hash_verified"] is True
+
+
 def test_a_session_without_intent_or_cycles_refuses(tmp_path):
     with pytest.raises(SessionAssemblyError, match="not a session"):
         assemble_session(tmp_path)

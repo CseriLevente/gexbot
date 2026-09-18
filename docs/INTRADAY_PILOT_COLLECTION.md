@@ -115,6 +115,34 @@ attempt log and verification are unchanged.
   (5) cycles that acquired nothing, or when the one-shot reports
   `AUTHENTICATION_REJECTED` or `STORAGE_FAILURE`; the stop is logged and the
   summary written.
+- **Operator stop (r3).** `Ctrl+C` stops the whole session wherever it strikes.
+  During a wait or between cycles nothing more is requested. During a cycle the
+  one-shot keeps what it has -- the payloads already received, the manifest and
+  the attempt log under `cycles/<HHMMSS>/` -- reports `OPERATOR_CANCELLED`, and
+  the session takes no later slot; an interrupt in the moments before a
+  cycle's first request leaves only `capture-bootstrap-failure.json` in that
+  directory and is logged `FAILED_TO_START`. In every case the log gets a
+  `STOP` entry naming the slot and phase (`REQUEST`, `WAIT`,
+  `BETWEEN_CYCLES`), the summary is written with `status INTERRUPTED`,
+  `stop_reason OPERATOR_INTERRUPT` and an `interruption` record, the lock is
+  released and the command exits 130 with one message saying the same. Nothing
+  continues on its own: continuing is an explicit `--resume` with the same
+  approval, and a slot that already has a log entry is never retaken. (The
+  2.1.36 r2 collector only honoured interrupts between cycles; an interrupt in
+  a request produced a cancelled cycle and the next slot still ran.)
+- **Request accounting (r3).** Every executed slot's log entry and the session
+  summary carry `requests`: `scheduled` (the approved scope), `attempted`
+  (logical requests the sweep began), `http_attempts` (every attempt record,
+  retries included), `http_attempts_failed`, `with_receipt`, `acquired`,
+  `not_attempted` and `without_receipt` (begun but without an attempt record
+  -- the request in flight when the operator interrupted; reported as the
+  uncertainty it is). All of it is read from the cycle's own report and
+  attempt log; the assembler recounts it from the cycle directories and
+  refuses a log that disagrees. The approved budget stays the budget: 1,196
+  logical requests and at most 4,784 HTTP attempts on the default profile.
+  (2.1.36 r2 reported `requests_issued` = the summed scheduled scope of
+  executed slots, so an immediate authentication rejection on the first
+  request was reported as five requests issued; it was one.)
 - **Layout.** `<session>/session-intent.json` (written first),
   `<session>/session-log.jsonl` (one append-only line per slot and lifecycle
   event, fsynced), `<session>/cycles/<HHMMSS>/` (one complete one-shot capture
@@ -268,13 +296,27 @@ was 3.5 MB per full cycle). Nothing below places an order or computes a GEX.
        --execute-live --approve <SESSION APPROVAL>
      ```
      The process sleeps until 09:30:00 ET, prints one line per slot
-     (`093000 EXECUTED COMPLETED_RAW_VERIFIED acquired 5 …`, `MISSED_OVERRUN`,
+     (`093000 EXECUTED COMPLETED_RAW_VERIFIED acquired 5 missing - in 3.2 s;
+     requests scheduled 5 attempted 5 http 5`, `MISSED_OVERRUN`,
      `FAILED_TO_START`, …) and ends after the last slot with the session
-     summary. Do not touch the output tree while it runs. An approval that
-     does not match (another day, another policy, another directory) is
-     refused before any request; so is an existing output directory.
-   - **If the process stops** (crash, reboot, `Ctrl+C`), resume the same
-     session with the same approval:
+     summary, whose last line states the request activity against the
+     approved budget (`requests scheduled N, attempted N, HTTP attempts N
+     (retries included) of the approved budget 1196 logical / 4784 HTTP; 0
+     begun without a receipt`). Do not touch the output tree while it runs.
+     An approval that does not match (another day, another policy, another
+     directory) is refused before any request; so is an existing output
+     directory.
+   - **To stop the session yourself**, press `Ctrl+C` once and wait for the
+     `INTERRUPTED by the operator …` message (exit code 130). It says where the
+     interrupt struck; if it struck during a cycle, that cycle's partial
+     capture and attempt log are preserved under `cycles\<HHMMSS>` and the
+     slot is logged `EXECUTED` with `OPERATOR_CANCELLED` (or `FAILED_TO_START`
+     if no request had been sent yet). The session log, `session-summary.json`
+     (`INTERRUPTED` / `OPERATOR_INTERRUPT`, with the `interruption` record) and
+     the released lock are in the session directory. The collector never
+     continues on its own after an interrupt.
+   - **If the process stopped** (your `Ctrl+C`, a crash, a reboot) and you want
+     to continue the same session, resume it with the same approval:
      ```powershell
      .\.venv\Scripts\python.exe -m src.tools.collect_intraday_session `
        --config config\thetadata_intraday.yaml `
@@ -282,10 +324,12 @@ was 3.5 MB per full cycle). Nothing below places an order or computes a GEX.
        --output C:\ThetaDataCaptures\sessions\2026-09-15 `
        --execute-live --approve <SESSION APPROVAL> --resume
      ```
-     Slots that passed during the gap are recorded `MISSED_RESTART_GAP` and
-     collection continues at the next future slot. If `session.lock` is still
-     present and no collector is running, delete that one file and resume
-     again; delete nothing else.
+     Slots that passed during the gap are recorded `MISSED_RESTART_GAP`, a slot
+     that already has a log entry (including the cancelled one) is never
+     retaken, and collection continues at the next future slot. If
+     `session.lock` is still present and no collector is running (a crash, not
+     an operator interrupt, which releases it), delete that one file and
+     resume again; delete nothing else.
 3. **After each session.**
    - Archive the session directory read-only and record its digests.
    - Assemble, replay and judge readiness (offline, research defaults):
@@ -295,12 +339,18 @@ was 3.5 MB per full cycle). Nothing below places an order or computes a GEX.
        --out C:\ThetaDataCaptures\assembled\2026-09-15 `
        --label "session 2026-09-15"
      ```
-     The output directory must not exist. Read `session-readiness.md`: the
-     option-side verdict, usable decisions, per-cycle failures, missed slots,
-     overruns, restarts, open-interest gaps, stale and skewed decisions, clock
-     leads. Keep any diagnostic run (nonzero `--receipt-clock-tolerance-ms`,
-     altered `--close-buffer-minutes`) in its own directory; its report says
-     `diagnostic`.
+     The output directory must not exist. The assembler first recounts every
+     executed cycle's request activity from its `capture-summary.json` and
+     `attempts\index.jsonl` and refuses a session whose log disagrees
+     (`CYCLE_REQUESTS_DIFFER_FROM_LOG:<slot>:<keys>`), or whose log is not the
+     r3 schema. Read `session-readiness.md`: the option-side verdict, usable
+     decisions, the `Requests:` line (scheduled of budget, attempted, HTTP
+     attempts with retries, receipts, acquired, not attempted, begun without a
+     receipt, operator-cancelled cycles), the `Interruptions:` line, per-cycle
+     failures, missed slots, overruns, restarts, open-interest gaps, stale and
+     skewed decisions, clock leads. Keep any diagnostic run (nonzero
+     `--receipt-clock-tolerance-ms`, altered `--close-buffer-minutes`) in its
+     own directory; its report says `diagnostic`.
 4. **Across sessions.**
    ```powershell
    .\.venv\Scripts\python.exe -m src.tools.summarize_intraday_pilot `
@@ -309,12 +359,22 @@ was 3.5 MB per full cycle). Nothing below places an order or computes a GEX.
      --out C:\ThetaDataCaptures\summary\2026-09-week `
      --label "pilot week 1"
    ```
-   The summary names, per session and in total, usable decisions, coverage,
+   The summary first validates every readiness report it is given -- its
+   embedded `report_hash` recomputed over its contents, its decision counts
+   non-negative integers that agree with each other (`usable + blocked ==
+   expected`, top level equal to the replay block), its origins known and its
+   verdicts consistent with their reasons -- and refuses a report that fails by
+   name (r3; the r2 summary accepted a report whose usable decisions had been
+   edited to 372 of 371). It then names, per session and in total, usable
+   decisions, coverage, request activity on the basis each report supports
+   (attempt evidence for r3 sessions; the scheduled scope only for a 2.1.36
+   report, whose attempted and HTTP counts are shown as unknown), interruptions,
    open-interest gaps, stale and skewed decisions, clock leads, request
    failures, overruns and restarts, and states whether the option side reached
-   the minimum number of usable sessions (5 by default). Resolve data
-   limitations explicitly before any strategy evaluation; the summary is not
-   one.
+   the minimum number of usable sessions (5 by default). A matching report
+   hash means the report is the one its writer produced, not that the vendor
+   data behind it is authentic. Resolve data limitations explicitly before
+   any strategy evaluation; the summary is not one.
 
 ## 8. Explicitly out of scope
 

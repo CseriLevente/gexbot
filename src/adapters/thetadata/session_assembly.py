@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
+from src.adapters.http_attempts import HttpAttemptLog
 from src.adapters.thetadata.capture_certification import (
     OPTION_CONTRACT_LIST,
     OPTION_GREEKS,
@@ -70,13 +71,34 @@ from src.ingest.session_collector import (
     INTENT_NAME,
     LOG_NAME,
     SESSION_INTENT_SCHEMA,
+    SESSION_LOG_SCHEMA,
     SessionApproval,
     read_log,
+    total_request_accounting,
 )
 from src.replay.event_store import SESSION_EVENT_SCHEMA
 
-ASSEMBLER = "thetadata-session-assembly/2.1.36"
-ASSEMBLY_SCHEMA = "intraday-session-assembly/2.1.36"
+#: r3: the session block reports request activity from each cycle's own
+#: report and attempt log -- scheduled, attempted, HTTP attempts with retries,
+#: receipts, acquisitions, and requests begun without a receipt -- and the
+#: structure check recounts every executed cycle from disk against what the
+#: collector logged. 2.1.36 reported the summed scheduled scope as "issued".
+ASSEMBLER = "thetadata-session-assembly/2.1.36-r3"
+ASSEMBLY_SCHEMA = "intraday-session-assembly/2.1.36-r3"
+CYCLE_SUMMARY_NAME = "capture-summary.json"
+#: The per-cycle accounting keys the log must agree with the cycle's evidence
+#: on. ``basis`` is descriptive and not compared.
+REQUEST_ACCOUNTING_KEYS = (
+    "scheduled",
+    "attempted",
+    "http_attempts",
+    "http_attempts_failed",
+    "with_receipt",
+    "acquired",
+    "not_attempted",
+    "without_receipt",
+    "attempt_evidence_verified",
+)
 OPTION_KINDS = frozenset({"option_quote", "greeks", "open_interest"})
 KIND_ENDPOINTS = {kind: endpoint for endpoint, kind in KINDS.items()}
 #: Merge outcomes, counted per kind in the assembly report.
@@ -119,6 +141,44 @@ class ExecutedCycle:
     finished_at: datetime
     entry: dict[str, Any]
     root: pathlib.Path
+    #: Request accounting recounted from the cycle directory itself.
+    requests: dict[str, Any] = field(default_factory=dict)
+
+
+def recount_cycle_requests(
+    scope: frozenset[str] | set[str], cycle_root: pathlib.Path
+) -> dict[str, Any]:
+    """What a cycle actually did on the wire, recounted from its own files.
+
+    The same accounting the collector logs, derived again without the log:
+    the attempt records under ``attempts/`` (every HTTP attempt, retries
+    included, each with its endpoint and whether it succeeded) and the cycle's
+    ``capture-summary.json`` (which logical requests the sweep began and which
+    payloads verified). ``attempt_evidence_verified`` is the attempt log
+    checked against itself now -- index, fingerprints, bodies -- not the
+    flag the one-shot wrote.
+    """
+    summary = json.loads((cycle_root / CYCLE_SUMMARY_NAME).read_bytes())
+    attempts_root = cycle_root / "attempts"
+    evidence = HttpAttemptLog.open_existing(attempts_root)
+    records = HttpAttemptLog.recovered_from(attempts_root)
+    scheduled = sorted(scope)
+    acquisition = summary.get("raw_acquisition") or {}
+    attempted = sorted(set(acquisition.get("attempted_endpoints", [])) & set(scheduled))
+    with_receipt = sorted({str(r.get("endpoint")) for r in records} & set(scheduled))
+    acquired = sorted(set(summary.get("completed_endpoints", [])) & set(scheduled))
+    return {
+        "scheduled": len(scheduled),
+        "attempted": len(attempted),
+        "http_attempts": len(records),
+        "http_attempts_failed": sum(1 for r in records if not r.get("succeeded")),
+        "with_receipt": len(with_receipt),
+        "acquired": len(acquired),
+        "not_attempted": sorted(set(scheduled) - set(attempted)),
+        "without_receipt": sorted(set(attempted) - set(with_receipt)),
+        "attempt_evidence_verified": evidence.ok,
+        "basis": "CYCLE_REPORT_AND_ATTEMPT_LOG",
+    }
 
 
 @dataclass
@@ -200,6 +260,12 @@ def verify_session(root: pathlib.Path | str) -> SessionVerification:
     entries = read_log(root)
     if not entries or entries[0].get("event") != "SESSION_START":
         findings.append("LOG_DOES_NOT_BEGIN_WITH_SESSION_START")
+    # r3: every entry must carry the log schema whose slot entries account for
+    # requests from evidence. An earlier log summed scheduled scopes, and a
+    # merged stream must not inherit that count as if it were measured.
+    for version in sorted({str(e.get("schema_version")) for e in entries}):
+        if version != SESSION_LOG_SCHEMA:
+            findings.append(f"LOG_SCHEMA_UNSUPPORTED:{version}")
     cycles: list[ExecutedCycle] = []
     seen_labels: set[str] = set()
     cycle_approval = approval.cycle_approval_hash
@@ -247,6 +313,28 @@ def verify_session(root: pathlib.Path | str) -> SessionVerification:
         acquired = sorted(entry.get("acquired", []))
         if acquired != sorted(set(capture.record_hashes) & set(KINDS)):
             findings.append(f"CYCLE_PAYLOADS_DIFFER_FROM_LOG:{label}")
+        # r3: the request accounting the collector logged must be what the
+        # cycle's own report and attempt log say now, key by key.
+        try:
+            recount = recount_cycle_requests(frozenset(slot["scope"]), cycle_root)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            findings.append(
+                f"CYCLE_REQUESTS_NOT_RECOUNTABLE:{label}:{str(error)[:160]}"
+            )
+            continue
+        logged = entry.get("requests")
+        if not isinstance(logged, dict):
+            findings.append(f"SLOT_WITHOUT_REQUEST_ACCOUNTING:{label}")
+        else:
+            differing = [
+                key
+                for key in REQUEST_ACCOUNTING_KEYS
+                if logged.get(key) != recount[key]
+            ]
+            if differing:
+                findings.append(
+                    f"CYCLE_REQUESTS_DIFFER_FROM_LOG:{label}:{','.join(differing)}"
+                )
         cycles.append(
             ExecutedCycle(
                 label=label,
@@ -257,6 +345,7 @@ def verify_session(root: pathlib.Path | str) -> SessionVerification:
                 finished_at=_stamp(str(entry["finished_at"])),
                 entry=entry,
                 root=cycle_root,
+                requests=recount,
             )
         )
     cycles_root = root / "cycles"
@@ -418,6 +507,9 @@ def _cycle_summary(
         "start_delay_seconds": cycle.entry.get("start_delay_seconds"),
         "overran_next_boundary": bool(cycle.entry.get("overran_next_boundary")),
         "run_state": cycle.entry.get("run_state"),
+        "stop_reason": cycle.entry.get("stop_reason"),
+        "operator_cancelled": bool(cycle.entry.get("operator_cancelled")),
+        "requests": dict(cycle.requests),
         "scheduled_endpoints": coverage["scheduled_endpoints"],
         "acquired_endpoints": coverage["acquired_endpoints"],
         "unacquired_endpoints": {
@@ -700,7 +792,11 @@ def assemble_session(
                 1 for e in verification.entries if e.get("event") == "RESTART"
             ),
             "stops": [
-                {"at": e.get("at"), "reason": e.get("reason")}
+                {
+                    "at": e.get("at"),
+                    "reason": e.get("reason"),
+                    "interruption": e.get("interruption"),
+                }
                 for e in verification.entries
                 if e.get("event") == "STOP"
             ],
@@ -713,9 +809,15 @@ def assemble_session(
                 None,
             ),
             "endpoint_failures": dict(sorted(failures.items())),
-            "requests_issued": sum(
-                len(e.get("scope", [])) for e in slots if e["status"] == "EXECUTED"
-            ),
+            # Summed from the slot entries, each of which the structure check
+            # above recounted from the cycle's own report and attempt log.
+            "requests": {
+                **total_request_accounting(slots),
+                "cycles_recounted_from_evidence": len(verification.cycles),
+                "operator_cancelled_cycles": [
+                    str(e["label"]) for e in slots if e.get("operator_cancelled")
+                ],
+            },
         },
         "receipt_clock_tolerance_ms": receipt_clock_tolerance_ms,
         "merge": {

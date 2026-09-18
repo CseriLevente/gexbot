@@ -444,7 +444,13 @@ runbook (`docs/INTRADAY_PILOT_COLLECTION.md`); none has been run live.
   boundary; an overrunning cycle finishes, the slots it spans are
   `MISSED_OVERRUN`, and collection resumes at the next future boundary. Late
   starts and `--resume` record the passed slots the same way. The session
-  stops itself after five empty cycles or a systemic refusal. The collector
+  stops itself after five empty cycles or a systemic refusal, and (r3) on the
+  operator's interrupt wherever it strikes -- during a request the one-shot's
+  partial capture is kept, the cycle is logged `OPERATOR_CANCELLED`, no later
+  slot runs, and continuing is an explicit `--resume`. Every executed slot
+  carries `requests` (r3): scheduled, attempted, HTTP attempts with retries,
+  receipts, acquired, not attempted and begun-without-receipt, read from the
+  cycle's own report and attempt log, never from the schedule. The collector
   reads one injected clock and hands it to the transport, so offline tests on
   a fake clock and a fake vendor (`tests/synthetic_session.py`) have
   deterministic receipts.
@@ -462,15 +468,23 @@ runbook (`docs/INTRADAY_PILOT_COLLECTION.md`); none has been run live.
   excludes its identity for that cycle and revises nothing. Output
   `research-events/2.1.36` carries `cycle` and `request_id` in every lineage
   and every cycle's manifest and payload digests in the provenance; the event
-  store refuses lineage outside them. The session readiness
-  (`research-pilot-readiness/2.1.36`) reports `option_side_usable` apart from
-  `usable_for_intraday_pilot`, which stays false without recorded futures.
-- `python -m src.tools.summarize_intraday_pilot` restates several readiness
-  reports as `research-pilot-summary/2.1.36`: usable decisions, coverage,
-  open-interest gaps, stale and skewed decisions, clock leads, request
-  failures, overruns and restarts per session and in total. It refuses to mix
-  synthetic and recorded sessions; a summary with any synthetic session is
-  synthetic and never "ready".
+  store refuses lineage outside them. The assembler (r3) also recounts every
+  executed cycle's request activity from its `capture-summary.json` and
+  `attempts/index.jsonl` and refuses a session log that disagrees. The session
+  readiness (`research-pilot-readiness/2.1.36-r3`) reports `option_side_usable`
+  apart from `usable_for_intraday_pilot`, which stays false without recorded
+  futures, plus the request accounting and any interruption.
+- `python -m src.tools.summarize_intraday_pilot` validates each readiness
+  report before reading it (r3: embedded semantic `report_hash` recomputed,
+  counts non-negative integers that agree with each other, origins known,
+  verdicts consistent with their reasons; a report failing any check is
+  refused by name) and restates the rest as `research-pilot-summary/2.1.36-r3`:
+  usable decisions, coverage, request activity on the basis each report
+  supports, interruptions, open-interest gaps, stale and skewed decisions,
+  clock leads, request failures, overruns and restarts per session and in
+  total. It refuses to mix synthetic and recorded sessions; a summary with any
+  synthetic session is synthetic and never "ready". A matching hash is an
+  integrity check, not vendor authenticity.
 
 The end-to-end regression (`tests/regression/test_synthetic_session_end_to_end.py`)
 collects two clean synthetic sessions, assembles, replays and summarises them:

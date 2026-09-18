@@ -25,6 +25,9 @@ The script (all knobs optional):
   timestamp for three consecutive executed cycles from that label with prices
   A, B, A, so the assembler must emit three revisions of one event.
 - ``missing_open_interest`` -- identities the open-interest payload omits.
+- ``flaky`` -- ``{label: {endpoint: n}}``: the first ``n`` requests for that
+  endpoint on that cycle answer HTTP 503, then it answers normally, so the
+  retrying transport records more HTTP attempts than logical requests.
 
 - ``frozen`` -- ``FROZEN`` is quoted with one unchanging timestamp and price
   from its first observation on: every later cycle re-observes it.
@@ -112,6 +115,9 @@ class SyntheticFeed:
     #: there is) and a different price -- a late revision of an older event.
     stale_in: dict[str, dict[str, str]] = field(default_factory=dict)
     missing_open_interest: tuple[Mapping[str, str], ...] = ()
+    #: ``{label: {endpoint: n}}``: HTTP 503 for the first ``n`` requests of that
+    #: endpoint on that cycle; the retrying transport then tries again.
+    flaky: dict[str, dict[str, int]] = field(default_factory=dict)
     capture_origin: str = "OFFLINE_FIXTURE"
     calls: list[RecordedCall] = field(default_factory=list)
     #: Cycle labels served, in order, so the script can count cycles.
@@ -154,6 +160,14 @@ class SyntheticFeed:
             return HttpResponse(
                 status_code=404,
                 text="no data for this request\n",
+                headers={"content-type": "text/plain"},
+            )
+        remaining = self.flaky.get(label, {}).get(endpoint, 0)
+        if remaining > 0:
+            self.flaky[label][endpoint] = remaining - 1
+            return HttpResponse(
+                status_code=503,
+                text="service unavailable\n",
                 headers={"content-type": "text/plain"},
             )
         return HttpResponse(

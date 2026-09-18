@@ -39,7 +39,12 @@ from src.replay.pilot_readiness import (
 )
 from src.replay.research_contract import ResearchContract
 
-SESSION_READINESS_SCHEMA = "research-pilot-readiness/2.1.36"
+#: r3: the session block carries the request accounting (scheduled, attempted,
+#: HTTP attempts with retries, receipts, acquisitions, begun without a
+#: receipt) and any operator interruption instead of a summed scheduled scope.
+SESSION_READINESS_SCHEMA = "research-pilot-readiness/2.1.36-r3"
+#: The r2 schema, still accepted by the pilot summary as valid input.
+SESSION_READINESS_SCHEMA_2_1_36 = "research-pilot-readiness/2.1.36"
 OPTION_SIDE = (
     "option_inventory",
     "option_quotes",
@@ -309,7 +314,12 @@ def session_readiness(
             "stops": session["stops"],
             "ended": session["ended"],
             "request_budget": session["request_budget"],
-            "requests_issued": session["requests_issued"],
+            "requests": session["requests"],
+            "interruptions": [
+                stop["interruption"]
+                for stop in session["stops"]
+                if stop.get("interruption") is not None
+            ],
             "endpoint_failures": session["endpoint_failures"],
             "cadence": assembly["cadence"],
             "merge": assembly["merge"]["outcomes_by_kind"],
@@ -449,9 +459,34 @@ def render_session_markdown(report: dict[str, Any]) -> str:
             f"{session['cycles_assembled']}, with every scheduled endpoint "
             f"{session['cycles_with_every_scheduled_endpoint']}, overrunning a boundary "
             f"{session['cycles_overrunning_a_boundary']}; restarts {session['restarts']}.",
-            f"- Requests issued {session['requests_issued']} of budget "
-            f"{session['request_budget']['requests']}; endpoint failures "
-            f"{_pairs(session['endpoint_failures'])}.",
+            f"- Requests: scheduled {session['requests']['scheduled']} of the approved "
+            f"budget {session['request_budget']['requests']}; attempted "
+            f"{session['requests']['attempted']}; HTTP attempts "
+            f"{session['requests']['http_attempts']} (retries included, "
+            f"{session['requests']['http_attempts_failed']} failed) of at most "
+            f"{session['request_budget']['max_attempts']}; with a receipt "
+            f"{session['requests']['with_receipt']}; acquired "
+            f"{session['requests']['acquired']}; scheduled but not attempted "
+            f"{session['requests']['not_attempted']}; begun without a receipt "
+            f"{session['requests']['without_receipt']}; cycles whose attempt log did "
+            f"not verify {session['requests']['cycles_with_unverified_attempt_evidence']}; "
+            f"operator-cancelled cycles {session['requests']['operator_cancelled_cycles'] or '-'}; "
+            f"endpoint failures {_pairs(session['endpoint_failures'])}.",
+            "- Interruptions: "
+            + (
+                "; ".join(
+                    f"{i['phase']} at slot {i['slot']}"
+                    + (
+                        " (partial capture preserved)"
+                        if i.get("partial_capture_preserved")
+                        else ""
+                    )
+                    for i in session["interruptions"]
+                )
+                if session["interruptions"]
+                else "none"
+            )
+            + ".",
             f"- Inventory cycles {session['cadence']['inventory_cycles']}; open-interest "
             f"cycles {session['cadence']['open_interest_cycles']}; quote cycles "
             f"{session['cadence']['quote_cycles']}; Greeks cycles "
@@ -521,6 +556,7 @@ __all__ = [
     "OPTION_SIDE",
     "REQUIREMENTS",
     "SESSION_READINESS_SCHEMA",
+    "SESSION_READINESS_SCHEMA_2_1_36",
     "render_session_markdown",
     "session_readiness",
 ]

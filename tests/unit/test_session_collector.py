@@ -32,12 +32,14 @@ from src.ingest.session_collector import (
     SESSION_LOG_SCHEMA,
     SESSION_SUMMARY_SCHEMA,
     SUMMARY_NAME,
+    OperatorInterrupt,
     SessionApproval,
     SessionCollectionError,
     collect_session,
     plan_session,
     read_log,
 )
+from src.tools import capture_thetadata_once
 from tests.synthetic_session import SyntheticFeed
 
 pytestmark = pytest.mark.integration
@@ -277,7 +279,18 @@ def test_each_slot_is_one_verified_one_shot_capture_in_its_scope(tmp_path):
     assert summary["stop_reason"] == "STOP_AFTER_LABEL"
     assert summary["cycles_executed"] == 3
     assert summary["slots_by_status"] == {"EXECUTED": 3}
-    assert summary["requests_issued"] == 5 + 3 + 3
+    # r3: activity is counted from each cycle's evidence, and on a clean
+    # session every count agrees with the scheduled scope and the fake vendor.
+    requests = summary["requests"]
+    assert requests["scheduled"] == 5 + 3 + 3
+    assert requests["attempted"] == requests["with_receipt"] == 11
+    assert requests["acquired"] == 11
+    assert requests["http_attempts"] == len(feed.calls) == 11
+    assert requests["http_attempts_failed"] == 0
+    assert requests["not_attempted"] == requests["without_receipt"] == 0
+    assert requests["cycles_with_unverified_attempt_evidence"] == 0
+    assert requests["cycles_without_a_report"] == 0
+    assert summary["interruption"] is None
     assert summary["cycles_with_every_scheduled_endpoint"] == 3
     assert summary["restarts"] == 0
     assert sorted(p.name for p in (root / "cycles").iterdir()) == [
@@ -585,7 +598,39 @@ def test_the_budget_bounds_the_session(tmp_path, monkeypatch):
     ]
 
 
-def test_an_operator_interrupt_is_logged_and_the_lock_released(tmp_path):
+# -- operator interruption (review of v2.1.36 r2, finding 1) --------------------
+#
+# Wherever the operator strikes -- between cycles, during a wait, in the middle
+# of a request, or in the moments before a cycle's first request -- the session
+# takes no later-cycle request, logs a STOP with where it was interrupted,
+# writes its summary, releases its lock and raises one OperatorInterrupt.
+# Continuing is an explicit --resume, which never retakes a logged slot.
+
+
+def _assert_cleanly_interrupted(root, *, slot, phase, partial):
+    log = read_log(root)
+    stop = [e for e in log if e.get("event") == "STOP"]
+    assert len(stop) == 1
+    assert stop[0]["reason"] == "OPERATOR_INTERRUPT"
+    assert stop[0]["interruption"]["slot"] == slot
+    assert stop[0]["interruption"]["phase"] == phase
+    assert stop[0]["interruption"]["partial_capture_preserved"] is partial
+    assert "--resume" in stop[0]["interruption"]["continuing_requires"]
+    assert log[-1]["event"] == "SESSION_END"
+    assert log[-1]["status"] == "INTERRUPTED"
+    assert log[-1]["reason"] == "OPERATOR_INTERRUPT"
+    assert log.index(stop[0]) == len(log) - 2
+    assert not (root / LOCK_NAME).exists()
+    summary = json.loads((root / SUMMARY_NAME).read_text())
+    assert summary["status"] == "INTERRUPTED"
+    assert summary["stop_reason"] == "OPERATOR_INTERRUPT"
+    assert summary["interruption"] == stop[0]["interruption"]
+    return log, summary
+
+
+def test_an_operator_interrupt_between_cycles_is_logged_and_the_lock_released(
+    tmp_path,
+):
     root = tmp_path / "session"
     clock = clock_at(9, 29, 30)
     feed = SyntheticFeed(clock, root)
@@ -596,7 +641,7 @@ def test_an_operator_interrupt_is_logged_and_the_lock_released(tmp_path):
         if entry.get("label") == "093100":
             raise KeyboardInterrupt
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(OperatorInterrupt) as raised:
         collect_session(
             CONFIG,
             output=str(root),
@@ -606,11 +651,292 @@ def test_an_operator_interrupt_is_logged_and_the_lock_released(tmp_path):
             transport=feed,
             on_entry=interrupt,
         )
-    log = read_log(root)
-    assert log[-1]["event"] == "SESSION_END"
-    assert log[-1]["status"] == "INTERRUPTED"
-    assert log[-1]["reason"] == "OPERATOR_INTERRUPT"
-    assert not (root / LOCK_NAME).exists()
-    summary = json.loads((root / SUMMARY_NAME).read_text())
-    assert summary["status"] == "INTERRUPTED"
+    assert raised.value.phase == "BETWEEN_CYCLES"
+    assert raised.value.label == "093100"
+    _assert_cleanly_interrupted(
+        root, slot="093100", phase="BETWEEN_CYCLES", partial=False
+    )
+    assert [e["label"] for e in slots(root)] == ["093000", "093100"]
+    # No request of a later cycle: exactly the two executed cycles' requests.
+    assert len(feed.calls) == 5 + 3
     assert seen[:3] == ["SESSION_START", "093000", "093100"]
+
+
+class InterruptingFeed(SyntheticFeed):
+    """Raises KeyboardInterrupt on the quote request of one cycle, once."""
+
+    interrupt_in: str = "093100"
+    interrupted: bool = False
+
+    def get(self, url, params, timeout_seconds):
+        if (
+            self._label() == self.interrupt_in
+            and OPTION_QUOTE in url
+            and not self.interrupted
+        ):
+            self.interrupted = True
+            raise KeyboardInterrupt("simulated operator interrupt in a request")
+        return super().get(url, params, timeout_seconds)
+
+
+def test_an_interrupt_during_a_request_stops_the_session_and_keeps_the_partial(
+    tmp_path,
+):
+    root = tmp_path / "session"
+    clock = clock_at(9, 29, 30)
+    feed = InterruptingFeed(clock, root)
+    with pytest.raises(OperatorInterrupt) as raised:
+        run(root, clock, feed, stop_after="095900")
+    assert feed.interrupted
+    assert (raised.value.label, raised.value.phase) == ("093100", "REQUEST")
+    assert raised.value.partial_capture is True
+    _assert_cleanly_interrupted(root, slot="093100", phase="REQUEST", partial=True)
+    entries = slots(root)
+    # The interrupted cycle is logged as the one-shot reported it, and no
+    # later cycle executed: the 09:32 slot was never taken.
+    assert [(e["label"], e["status"]) for e in entries] == [
+        ("093000", "EXECUTED"),
+        ("093100", "EXECUTED"),
+    ]
+    cancelled = entries[1]
+    assert cancelled["stop_reason"] == "OPERATOR_CANCELLED"
+    assert cancelled["operator_cancelled"] is True
+    assert cancelled["run_state"] == "FAILED_PARTIAL_ACQUISITION"
+    assert cancelled["acquired"] == [INDEX_PRICE]
+    assert entries[0]["operator_cancelled"] is False
+    # The partial capture is preserved: manifest, attempt log, the one payload.
+    cycle = root / "cycles" / "093100"
+    assert (cycle / "manifest.json").is_file()
+    assert (cycle / "attempts" / "index.jsonl").is_file()
+    capture = load_capture(cycle, require_greeks_request=False)
+    assert sorted(capture.record_hashes) == [INDEX_PRICE]
+    # The accounting says what happened on the wire: the index print was
+    # requested and received, the quote request was begun and has no receipt
+    # (it was in flight), the Greeks request was never begun.
+    requests = cancelled["requests"]
+    assert requests["scheduled"] == 3
+    assert requests["attempted"] == 2
+    assert requests["http_attempts"] == requests["with_receipt"] == 1
+    assert requests["acquired"] == 1
+    assert requests["without_receipt"] == [OPTION_QUOTE]
+    assert requests["not_attempted"] == [OPTION_GREEKS]
+    assert requests["attempt_evidence_verified"] is True
+    # The fake vendor saw the first cycle and the index print only.
+    assert len(feed.calls) == 5 + 1
+    summary = json.loads((root / SUMMARY_NAME).read_text())
+    assert summary["requests"]["http_attempts"] == 6
+    assert summary["requests"]["without_receipt"] == 1
+    assert summary["requests"]["not_attempted"] == 1
+    assert summary["interruption"]["cycle_dir"] == "cycles/093100"
+    # Continuing is an explicit resume: the cancelled slot is not retaken, the
+    # slots that passed meanwhile are missed, collection goes on from there.
+    clock.advance(timedelta(minutes=2, seconds=20))
+    resumed = collect_session(
+        CONFIG,
+        output=str(root),
+        approved=approval_for(root, clock),
+        clock=clock,
+        policy=CollectionPolicy(),
+        transport=feed,
+        resume=True,
+        stop_after_label="093400",
+    )
+    assert [(e["label"], e["status"]) for e in slots(root)] == [
+        ("093000", "EXECUTED"),
+        ("093100", "EXECUTED"),
+        ("093200", "MISSED_RESTART_GAP"),
+        ("093300", "MISSED_RESTART_GAP"),
+        ("093400", "EXECUTED"),
+    ]
+    assert resumed["restarts"] == 1
+    assert resumed["requests"]["http_attempts"] == len(feed.calls) == 9
+    assert resumed["interruption"] is None
+    assert not (root / LOCK_NAME).exists()
+
+
+class InterruptibleClock(FakeClock):
+    """A fake clock whose wait for one slot is interrupted by the operator."""
+
+    def __init__(self, *args, interrupt_before, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.interrupt_before = interrupt_before
+        self.interrupted = False
+
+    def sleep_until(self, moment):
+        if moment == self.interrupt_before and not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt("simulated operator interrupt while waiting")
+        super().sleep_until(moment)
+
+
+def test_an_interrupt_during_a_wait_takes_no_request_of_that_slot(tmp_path):
+    root = tmp_path / "session"
+    clock = InterruptibleClock(et(9, 29, 30), tick=TICK, interrupt_before=et(9, 31))
+    feed = SyntheticFeed(clock, root)
+    with pytest.raises(OperatorInterrupt) as raised:
+        run(root, clock, feed, stop_after="095900")
+    assert clock.interrupted
+    assert (raised.value.label, raised.value.phase) == ("093100", "WAIT")
+    assert raised.value.partial_capture is False
+    _assert_cleanly_interrupted(root, slot="093100", phase="WAIT", partial=False)
+    # Only the 09:30 cycle ran; nothing of 09:31 was requested or claimed.
+    assert [e["label"] for e in slots(root)] == ["093000"]
+    assert len(feed.calls) == 5
+    assert sorted(p.name for p in (root / "cycles").iterdir()) == ["093000"]
+    summary = json.loads((root / SUMMARY_NAME).read_text())
+    assert summary["requests"]["scheduled"] == 5
+    assert summary["requests"]["http_attempts"] == 5
+    assert summary["interruption"]["cycle_dir"] is None
+
+
+def test_an_interrupt_before_a_cycles_first_request_still_stops_the_session(
+    tmp_path, monkeypatch
+):
+    """The one-shot turns an interrupt between claiming the cycle directory and
+    its first request into a bootstrap-failure report (no manifest, no
+    request). The session must read that report as the operator's stop."""
+    root = tmp_path / "session"
+    clock = clock_at(9, 29, 30)
+    feed = SyntheticFeed(clock, root)
+    original = capture_thetadata_once._write_intent
+
+    def interrupting(run, *, config_path):
+        if run.destination.name == "093100":
+            raise KeyboardInterrupt("simulated operator interrupt before a request")
+        return original(run, config_path=config_path)
+
+    monkeypatch.setattr(capture_thetadata_once, "_write_intent", interrupting)
+    with pytest.raises(OperatorInterrupt) as raised:
+        run(root, clock, feed, stop_after="095900")
+    assert (raised.value.label, raised.value.phase) == ("093100", "REQUEST")
+    assert raised.value.partial_capture is False
+    _assert_cleanly_interrupted(root, slot="093100", phase="REQUEST", partial=False)
+    entries = slots(root)
+    assert [(e["label"], e["status"]) for e in entries] == [
+        ("093000", "EXECUTED"),
+        ("093100", "FAILED_TO_START"),
+    ]
+    stopped = entries[1]
+    assert stopped["operator_cancelled"] is True
+    assert stopped["error_code"] == "INTERNAL_ERROR:KeyboardInterrupt"
+    assert stopped["run_state"] == "FAILED_BEFORE_REQUEST"
+    assert stopped["report_path"] == "capture-bootstrap-failure.json"
+    assert (root / "cycles" / "093100" / "capture-bootstrap-failure.json").is_file()
+    assert not (root / "cycles" / "093100" / "manifest.json").exists()
+    assert stopped["requests"]["attempted"] == 0
+    assert stopped["requests"]["http_attempts"] == 0
+    assert stopped["requests"]["not_attempted"] == sorted(MARKET_SCOPE)
+    assert stopped["requests"]["basis"] == "BOOTSTRAP_FAILURE_REPORT_BEFORE_ANY_REQUEST"
+    assert len(feed.calls) == 5
+    summary = json.loads((root / SUMMARY_NAME).read_text())
+    assert summary["cycles_executed"] == 1
+    assert summary["requests"]["scheduled"] == 8
+    assert summary["requests"]["http_attempts"] == 5
+    assert summary["requests"]["cycles_with_unverified_attempt_evidence"] == 0
+    assert summary["requests"]["cycles_without_a_report"] == 0
+
+
+# -- request accounting (review of v2.1.36 r2, finding 2) -----------------------
+#
+# ``requests`` distinguishes the scheduled scope from what happened on the wire:
+# logical requests begun, HTTP attempts (retries included), receipts, verified
+# payloads, requests never begun and requests begun without a receipt. Every
+# count is read from the cycle's own report and attempt log, never inferred
+# from the schedule; the fake vendor's call count is the check.
+
+
+def test_a_first_request_rejection_counts_one_attempt_not_the_whole_scope(
+    tmp_path,
+):
+    root = tmp_path / "session"
+    clock = clock_at(9, 29, 30)
+    feed = SyntheticFeed(clock, root, reject=frozenset({"093000"}))
+    summary, _ = run(root, clock, feed, stop_after="095900")
+    assert summary["stop_reason"] == "AUTHENTICATION_REJECTED"
+    assert len(feed.calls) == 1
+    requests = summary["requests"]
+    assert requests["scheduled"] == 5
+    assert requests["attempted"] == 1
+    assert requests["http_attempts"] == 1
+    assert requests["http_attempts_failed"] == 1
+    assert requests["with_receipt"] == 1
+    assert requests["acquired"] == 0
+    assert requests["not_attempted"] == 4
+    assert requests["without_receipt"] == 0
+    entry = slots(root)[0]
+    assert entry["requests"]["attempted"] == 1
+    assert len(entry["requests"]["not_attempted"]) == 4
+    assert entry["requests"]["without_receipt"] == []
+
+
+def test_partial_acquisition_counts_attempts_receipts_and_payloads_apart(tmp_path):
+    root = tmp_path / "session"
+    clock = clock_at(9, 29, 30)
+    feed = SyntheticFeed(clock, root, fail={"093000": {OPTION_OPEN_INTEREST}})
+    summary, _ = run(root, clock, feed, stop_after="093000")
+    entry = slots(root)[0]
+    requests = entry["requests"]
+    # Every scheduled request was attempted once and answered (a 404 is a
+    # receipt); one answer carried no usable payload.
+    assert requests["scheduled"] == requests["attempted"] == 5
+    assert requests["http_attempts"] == requests["with_receipt"] == 5
+    assert requests["http_attempts_failed"] == 1
+    assert requests["acquired"] == 4
+    assert requests["not_attempted"] == requests["without_receipt"] == []
+    assert len(feed.calls) == 5
+    assert summary["requests"]["acquired"] == 4
+    assert summary["endpoint_failures"] == {OPTION_OPEN_INTEREST: 1}
+
+
+def test_retries_are_counted_as_http_attempts_not_as_requests(tmp_path):
+    root = tmp_path / "session"
+    clock = clock_at(9, 29, 30)
+    feed = SyntheticFeed(
+        clock, root, flaky={"093000": {OPTION_QUOTE: 2, INDEX_PRICE: 1}}
+    )
+    summary, _ = run(root, clock, feed, stop_after="093100")
+    entries = slots(root)
+    first = entries[0]["requests"]
+    # Two 503s on the quote, one on the index print, then success: five
+    # logical requests, eight HTTP attempts, three of them failed.
+    assert first["scheduled"] == first["attempted"] == first["acquired"] == 5
+    assert first["with_receipt"] == 5
+    assert first["http_attempts"] == 8
+    assert first["http_attempts_failed"] == 3
+    assert entries[0]["missing"] == []
+    second = entries[1]["requests"]
+    assert second["http_attempts"] == second["attempted"] == 3
+    assert summary["requests"]["http_attempts"] == len(feed.calls) == 11
+    assert summary["requests"]["attempted"] == 8
+    assert summary["requests"]["http_attempts_failed"] == 3
+    assert summary["request_budget"]["requests"] > summary["requests"]["scheduled"]
+    assert (
+        summary["request_budget"]["max_attempts"]
+        >= summary["requests"]["http_attempts"]
+    )
+
+
+def test_a_transport_failure_without_a_response_is_still_an_attempt(tmp_path):
+    from src.adapters.transport import TransportError
+
+    class Dropping(SyntheticFeed):
+        dropped = False
+
+        def get(self, url, params, timeout_seconds):
+            if self._label() == "093000" and OPTION_GREEKS in url and not self.dropped:
+                self.dropped = True
+                self.calls.append(None)
+                raise TransportError("simulated timeout before any response")
+            return super().get(url, params, timeout_seconds)
+
+    root = tmp_path / "session"
+    clock = clock_at(9, 29, 30)
+    feed = Dropping(clock, root)
+    summary, _ = run(root, clock, feed, stop_after="093000")
+    requests = slots(root)[0]["requests"]
+    assert requests["attempted"] == requests["acquired"] == 5
+    assert requests["http_attempts"] == 6
+    assert requests["http_attempts_failed"] == 1
+    assert requests["with_receipt"] == 5
+    assert requests["without_receipt"] == []
+    assert summary["requests"]["http_attempts"] == len(feed.calls) == 6

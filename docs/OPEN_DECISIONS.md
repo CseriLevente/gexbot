@@ -1192,6 +1192,23 @@ session will be the first evidence about several choices made here:
   `AUTHENTICATION_REJECTED` / `STORAGE_FAILURE` from the one-shot, stop the
   session. Rate limiting stops one cycle's sweep (the one-shot's policy) but
   not the session, so a temporary limit costs at most a few slots.
+- **Operator stop (r3, after the independent review).** The operator's
+  interrupt stops the whole session wherever it strikes, including inside a
+  request: the one-shot keeps the partial capture and the session takes no
+  later slot. The alternative -- finishing the interrupted cycle's remaining
+  requests, or continuing to the next slot and leaving the operator to press
+  again -- was the r2 behaviour and was rejected by the review as not honouring
+  the operator. Continuing after any interrupt is an explicit `--resume`.
+  Whether an in-flight request was received by the vendor cannot be known
+  from this side; it is reported as `without_receipt`, never as answered or as
+  unsent.
+- **Request accounting basis (r3).** Activity is counted from each cycle's own
+  report and attempt log at four levels (scheduled, logical requests begun,
+  HTTP attempts with retries, verified payloads), with the in-flight
+  uncertainty separate. The scheduled scope, which r2 reported as "issued", is
+  kept as the budget reference only. Whether the vendor's own request metering
+  equals the HTTP attempt count is not known and the first live session should
+  compare the two.
 - **Membership of a MARKET cycle** is checked against the latest listing
   available at the record's receipt; a quote for an identity that appears
   intraday before the next refresh lists it is excluded (counted

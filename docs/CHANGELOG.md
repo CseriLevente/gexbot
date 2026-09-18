@@ -125,6 +125,82 @@ a test that the index bytes are LF-only on every host. No other change; both
 defects predate v2.1.36 and had never been exercised on Windows because the
 Windows checkout was at v2.1.30 until this release was applied.
 
+Re-cut (r3) after the independent review of r2 (`gex-bot-v2.1.36-bc68c6cd21dd.zip`,
+review dated 2026-09-17), which found three reproducible defects in the new
+session layer and asked for those three corrections only. All three are
+reproduced against r2 and refused on r3 by the reviewer's own probes
+(`reproduce_v2136_review.py`; its request-accounting probe is updated for the
+new schema and shipped beside the original, as the review allows).
+
+1. *Operator cancellation during a request.* r2 stopped the session only for
+   `AUTHENTICATION_REJECTED` / `STORAGE_FAILURE`; an interrupt during a request
+   produced a cycle reporting `OPERATOR_CANCELLED` and the next slot still ran.
+   r3 stops the whole session wherever the operator strikes: an executed cycle
+   whose one-shot reports `OPERATOR_CANCELLED` (or the typed
+   `INTERNAL_ERROR:KeyboardInterrupt` of a bootstrap or finalization failure,
+   which carries no sweep stop reason) raises `OperatorInterrupt` after being
+   logged, the same exception a `KeyboardInterrupt` during a wait or between
+   cycles becomes. The partial capture -- payloads received, manifest, attempt
+   log -- is preserved; a cycle interrupted before its first request is logged
+   `FAILED_TO_START` with its bootstrap-failure report. The log gets a `STOP`
+   entry with an `interruption` record (slot, phase `REQUEST` / `WAIT` /
+   `BETWEEN_CYCLES`, whether a partial capture was preserved, what continuing
+   requires), the summary is written with `INTERRUPTED` / `OPERATOR_INTERRUPT`
+   and the record, the lock is released, and the command exits 130 with one
+   message saying the same. Continuing is an explicit `--resume`; a logged slot
+   is never retaken. The one-shot's evidence preservation is unchanged. The
+   cancelled-then-resumed session assembles; the interruption reaches the
+   readiness report. Tests: interrupt in a request, in a wait, between cycles,
+   before a cycle's first request -- each asserting no later-cycle request,
+   STOP + SESSION_END, summary, lock and the raised exception -- plus resume
+   and assembly after cancellation and the command's messages.
+2. *Request activity, not scheduled scope.* r2's `requests_issued` summed each
+   executed slot's scope (an immediate 401 on the first request: one transport
+   call, five "issued"). r3 replaces it with `requests` at every level:
+   `scheduled`, `attempted` (logical requests the sweep began),
+   `http_attempts` (every attempt record, retries included),
+   `http_attempts_failed`, `with_receipt`, `acquired`, `not_attempted` and
+   `without_receipt` (begun without an attempt record -- the request in flight
+   at an interrupt -- reported as uncertainty, never as attempted-and-answered),
+   read from the cycle's own report and attempt log. The assembler recounts
+   every executed cycle from `capture-summary.json` and `attempts/index.jsonl`
+   and refuses a log that disagrees (`CYCLE_REQUESTS_DIFFER_FROM_LOG`), a log
+   without the accounting, or a log of another schema; the readiness report
+   restates the assembly's block and the pilot summary restates each report on
+   the basis it supports (attempt evidence; the scheduled scope only for a
+   2.1.36 report, with the rest unknown; single-capture receipts). The approved
+   budget is unchanged. Tests: first-request rejection (1 = 1), partial
+   acquisition, 503 retries (8 HTTP attempts for 5 requests), a transport
+   failure without a response, cancellation, the clean-session equality with
+   the fake vendor's call count, assembler/readiness reconciliation, and
+   tampered log / shortened attempt log refusals.
+3. *Readiness reports validated before aggregation.* r2 recorded a SHA-256 of
+   the bytes it received and read the report; a report with
+   `usable_decisions` edited from 7 to 372 of 371 was summarised, with its
+   stale hash and with a fresh one. r3's `validate_readiness_report`
+   recomputes the embedded semantic `report_hash` under each supported
+   schema's rule and refuses a mismatch; requires every count to be a
+   non-negative integer (no coercion of booleans, floats or strings);
+   requires `usable == replay.passing`, `blocked == replay.blocked`,
+   `passing + blocked == expected`, `decisions_with_inventory <= expected`,
+   derived per-decision counts and blocker decision counts `<= blocked`;
+   requires origins from `SYNTHETIC` / `RECORDED_NORMALIZED` with
+   `synthetic_only` agreeing, boolean verdicts agreeing with their blocking
+   reasons, `NO_PASSING_DECISIONS` present when usable is 0, every trust flag
+   false and `orders_placed` 0; and, for session reports, slot, cycle and
+   request counts that agree with each other and the budget. Valid 2.1.35
+   (the recorded September 2 report) and 2.1.36 (the r2 synthetic report, now
+   a fixture) inputs are accepted unchanged; synthetic and recorded sessions
+   stay separate. A matching hash is an integrity check, not authenticity.
+
+Schema identifiers move to `…/2.1.36-r3` for the session log, session
+summary, assembly, session readiness and pilot summary; the event schema
+(`research-events/2.1.36`), the intent and approval schemas, the normalizer,
+the research contract, the replay and every trust gate are unchanged. No data
+eligibility, missing-OI, freshness or trust gate is loosened; no trading
+behaviour is added; no live request was made. The r2 archive stays in
+`releases\` as superseded.
+
 ## 2.1.35 - native-data normalization and intraday replay readiness
 
 Adds a deterministic normalizer from one verified ThetaData v3 capture directory
